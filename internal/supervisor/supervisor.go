@@ -837,6 +837,70 @@ func (s *Supervisor) AppLogPath(appID string) string {
 	return filepath.Join(s.LogDir, appID, "current.log")
 }
 
+// Restart cycles the named app's process in place: the current child
+// receives SIGTERM, the existing watch goroutine observes the exit
+// and applies its standard restart path (same Command/Args/Env/Port,
+// same App identity), and Restart blocks until a new PID is in
+// StatusRunning or timeout elapses.
+//
+// Unlike Deploy, Restart does NOT take a Router — the appID's
+// dispatch route stays pointed at the same App pointer the whole
+// time, so traffic is briefly absorbed by the OS during the gap
+// between SIGTERM and the new process binding. The same backoff and
+// crash-loop accounting that govern an organic crash apply here, so
+// repeated forced restarts can eventually trip the crash-loop
+// suspension just like a flapping app.
+//
+// timeout caps the wait for the new PID; zero uses a 10s default.
+// Note that the active backoff stacks across restarts within
+// RestartWindow — a fresh app restarts almost instantly, but the
+// third restart in quick succession may wait 4s before the new
+// process appears, so timeout must be generous enough to absorb the
+// backoff at the current restart_count or Restart will return a
+// timeout error even though the supervisor will still complete the
+// relaunch in the background.
+func (s *Supervisor) Restart(id string, timeout time.Duration) (*App, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	s.mu.RLock()
+	app, ok := s.apps[id]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("supervisor: app %q not found: %w", id, ErrNotFound)
+	}
+
+	cmd := app.snapshotCmd()
+	if cmd == nil || cmd.Process == nil {
+		return nil, fmt.Errorf("supervisor: app %q has no running process", id)
+	}
+	oldPID := app.PID()
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		return nil, fmt.Errorf("supervisor: restart signal: %w", err)
+	}
+
+	// Poll for new PID at StatusRunning. The watch goroutine's existing
+	// backoff path drives the relaunch; we just wait it out.
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !s.isTracked(app) {
+			return nil, fmt.Errorf("supervisor: app %q removed during restart", id)
+		}
+		switch app.Status() {
+		case StatusCrashLooping:
+			return nil, fmt.Errorf("supervisor: app %q entered crash-loop during restart: %w",
+				id, ErrNotCrashLooping)
+		case StatusRunning:
+			if app.PID() != oldPID {
+				return app, nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return app, fmt.Errorf("supervisor: restart of %q timed out after %v", id, timeout)
+}
+
 // Stop gracefully stops the named app: SIGTERM, wait up to
 // GracefulShutdownTimeout for exit, then SIGKILL if still alive.
 // Blocks until the app's watch goroutine has fully terminated.

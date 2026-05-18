@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -52,6 +53,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/apps/{id}", s.guard(s.handleStop))
 	s.mux.HandleFunc("POST /v1/apps/{id}/deploy", s.guard(s.handleDeploy))
 	s.mux.HandleFunc("POST /v1/apps/{id}/reset", s.guard(s.handleReset))
+	s.mux.HandleFunc("POST /v1/apps/{id}/restart", s.guard(s.handleRestart))
 	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
 }
 
@@ -236,6 +238,30 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, viewOf(app))
 }
 
+// handleRestart handles POST /v1/apps/{id}/restart. Body is optional;
+// an empty or "{}" body defaults timeout_ms to 0 (supervisor uses 10s).
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req RestartRequest
+	if r.ContentLength > 0 || r.Body != http.NoBody {
+		if err := decodeJSONAllowEmpty(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+			return
+		}
+	}
+
+	app, err := s.sup.Restart(id, msOr(req.TimeoutMS, 0))
+	if err != nil {
+		if errors.Is(err, supervisor.ErrNotFound) {
+			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(app))
+}
+
 // handleReset handles POST /v1/apps/{id}/reset.
 func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -268,6 +294,25 @@ func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	return nil
+}
+
+// decodeJSONAllowEmpty is like decodeJSON but tolerates an empty body
+// — leaves dst at its zero value. Used by handlers (e.g. restart)
+// where the body is optional.
+func decodeJSONAllowEmpty(r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
 		return err
 	}
 	return nil

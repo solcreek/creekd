@@ -354,6 +354,62 @@ func TestCgroupLimitsWithoutParentRejected(t *testing.T) {
 	}
 }
 
+// --- Restart endpoint --------------------------------------------------
+
+func TestRestartHappyPath(t *testing.T) {
+	ts := newTestServer(t, "")
+	ts.sup.InitialBackoff = 10 * time.Millisecond
+	ts.sup.MaxBackoff = 20 * time.Millisecond
+
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		SpawnRequest{ID: "rs", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("rs") })
+
+	oldPID := ts.sup.Get("rs").PID()
+
+	status, body := ts.do(t, "POST", "/v1/apps/rs/restart",
+		RestartRequest{TimeoutMS: 3000}, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body = %s", status, body)
+	}
+	var view AppView
+	mustJSON(t, body, &view)
+	if view.PID == 0 || view.PID == oldPID {
+		t.Errorf("PID = %d, want a new non-zero PID (was %d)", view.PID, oldPID)
+	}
+	if view.Status != "running" {
+		t.Errorf("Status = %q, want running", view.Status)
+	}
+}
+
+func TestRestartUnknownReturns404(t *testing.T) {
+	ts := newTestServer(t, "")
+	status, _ := ts.do(t, "POST", "/v1/apps/ghost/restart", RestartRequest{}, "")
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", status)
+	}
+}
+
+func TestRestartAcceptsEmptyBody(t *testing.T) {
+	ts := newTestServer(t, "")
+	ts.sup.InitialBackoff = 10 * time.Millisecond
+	ts.sup.MaxBackoff = 20 * time.Millisecond
+
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		SpawnRequest{ID: "noargs", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("noargs") })
+
+	// Send POST with no body at all (nil body in the request).
+	req := httptest.NewRequest("POST", "/v1/apps/noargs/restart", nil)
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d body = %s, want 200 with no body", w.Code, w.Body.String())
+	}
+}
+
 // TestUnknownPathReturns404: the mux's default response for an
 // unmatched path is 404 — confirming we didn't accidentally catch-all.
 func TestUnknownPathReturns404(t *testing.T) {

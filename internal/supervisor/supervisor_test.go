@@ -1312,6 +1312,69 @@ func TestSpawnSetsAppRuntime(t *testing.T) {
 	}
 }
 
+// --- Restart -----------------------------------------------------------
+
+func TestRestartReturnsNewPID(t *testing.T) {
+	sup := newTestSupervisor()
+	// Fast restart so the test doesn't burn time on real backoff.
+	sup.InitialBackoff = 10 * time.Millisecond
+	sup.MaxBackoff = 20 * time.Millisecond
+
+	app, err := sup.Spawn(Config{
+		ID: "cycle", Command: "sleep", Args: []string{"30"}, Port: 9700,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(app.ID) })
+
+	oldPID := app.PID()
+	got, err := sup.Restart(app.ID, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if got != app {
+		t.Errorf("Restart returned different *App pointer")
+	}
+	if app.PID() == oldPID {
+		t.Errorf("PID did not change: still %d", app.PID())
+	}
+	if app.Status() != StatusRunning {
+		t.Errorf("Status = %s, want running", app.Status())
+	}
+}
+
+func TestRestartUnknownAppReturnsErrNotFound(t *testing.T) {
+	sup := newTestSupervisor()
+	_, err := sup.Restart("ghost", time.Second)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRestartUsesDefaultTimeoutWhenZero(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 10 * time.Millisecond
+	sup.MaxBackoff = 20 * time.Millisecond
+
+	app, err := sup.Spawn(Config{
+		ID: "deftimeout", Command: "sleep", Args: []string{"30"}, Port: 9701,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(app.ID) })
+
+	oldPID := app.PID()
+	// Pass 0 — should use the 10s default and complete in ms.
+	if _, err := sup.Restart(app.ID, 0); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if app.PID() == oldPID {
+		t.Errorf("PID unchanged after Restart with default timeout")
+	}
+}
+
 // TestSpawnRuntimeOnlyModeFailsWhenBinaryMissing exercises the
 // no-Command Spawn path through to startLocked. Uses a Runtime whose
 // resolved executable is a nonsense path so we can assert the failure

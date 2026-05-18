@@ -22,6 +22,13 @@ type SpawnRequest struct {
 	Limits  *Limits  `json:"limits,omitempty"`
 }
 
+// RestartRequest is the body of POST /v1/apps/{id}/restart. An empty
+// body is accepted — TimeoutMS defaults to 10s (handled in
+// supervisor.Restart).
+type RestartRequest struct {
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
+}
+
 // DeployRequest is the body of POST /v1/apps/{id}/deploy. The path
 // identifies the v1 app; the body describes v2. Port must differ
 // from v1's current port.
