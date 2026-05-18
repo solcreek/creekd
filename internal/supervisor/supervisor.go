@@ -92,6 +92,11 @@ type App struct {
 	// within RestartWindow on every record. Used for crash-loop
 	// detection.
 	restarts []time.Time
+
+	// done is closed when the watch goroutine terminates. Callers can
+	// select on it to know when the app has fully stopped (used by
+	// graceful shutdown for SIGTERM → SIGKILL escalation).
+	done chan struct{}
 }
 
 // PID returns the OS process id, or 0 if the process is not running.
@@ -181,6 +186,24 @@ func (a *App) clearRestarts() {
 	a.restarts = nil
 }
 
+// resetDone replaces the done channel with a fresh one. The previous
+// channel was already closed by the prior watch goroutine; this prepares
+// the App for a new watch goroutine (used by Reset()). Caller must
+// ensure the prior watch goroutine has exited before calling this.
+func (a *App) resetDone() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.done = make(chan struct{})
+}
+
+// waitDone returns the current done channel under lock. Used by stop
+// paths so they observe whichever channel the active watch will close.
+func (a *App) waitDone() chan struct{} {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.done
+}
+
 // Supervisor owns the registry of running apps and the goroutines that
 // watch them.
 type Supervisor struct {
@@ -193,6 +216,10 @@ type Supervisor struct {
 	MaxBackoff         time.Duration // cap on backoff doubling (default 30s)
 	RestartWindow      time.Duration // sliding window for crash-loop detection (default 60s)
 	CrashLoopThreshold int           // restarts in window before suspending (default 5)
+
+	// Graceful shutdown (M5.3a). How long Stop waits between SIGTERM and
+	// SIGKILL escalation. Default 30s for production; tests use shorter.
+	GracefulShutdownTimeout time.Duration
 
 	// Stdout / Stderr are inherited by each child process. Production
 	// uses os.Stdout / os.Stderr (M5.6 will replace with per-app log
@@ -213,15 +240,16 @@ func New(logger *slog.Logger) *Supervisor {
 		logger = slog.Default()
 	}
 	return &Supervisor{
-		apps:               make(map[string]*App),
-		logger:             logger,
-		InitialBackoff:     1 * time.Second,
-		MaxBackoff:         30 * time.Second,
-		RestartWindow:      60 * time.Second,
-		CrashLoopThreshold: 5,
-		Stdout:             os.Stdout,
-		Stderr:             os.Stderr,
-		WaitDelay:          0,
+		apps:                    make(map[string]*App),
+		logger:                  logger,
+		InitialBackoff:          1 * time.Second,
+		MaxBackoff:              30 * time.Second,
+		RestartWindow:           60 * time.Second,
+		CrashLoopThreshold:      5,
+		GracefulShutdownTimeout: 30 * time.Second,
+		Stdout:                  os.Stdout,
+		Stderr:                  os.Stderr,
+		WaitDelay:               0,
 	}
 }
 
@@ -264,6 +292,7 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		Command: cfg.Command,
 		Args:    cfg.Args,
 		Port:    cfg.Port,
+		done:    make(chan struct{}),
 	}
 
 	if err := s.startLocked(app, cfg.Env); err != nil {
@@ -311,7 +340,10 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 
 // watch blocks on cmd.Wait() and restarts the process on exit, applying
 // exponential backoff and crash-loop detection. Runs in its own goroutine.
+// Closes app.done when it terminates (for graceful shutdown wait).
 func (s *Supervisor) watch(app *App, extraEnv []string) {
+	defer close(app.done)
+
 	for {
 		cmd := app.snapshotCmd()
 		if cmd == nil {
@@ -405,7 +437,29 @@ func (s *Supervisor) Reset(id string) error {
 			id, app.Status(), ErrNotCrashLooping)
 	}
 
+	// Wait for the prior watch goroutine to finish closing its done
+	// channel. Status flipped to CrashLooping just before that watch
+	// returned, so this is a very short wait — but it must happen
+	// before we replace the channel, or the new watch's defer will
+	// panic on a not-yet-closed-by-prior-watch channel.
+	prevDone := app.waitDone()
+	s.mu.Unlock()
+	<-prevDone
+	s.mu.Lock()
+
+	// Verify the app is still registered and still crash-looping.
+	if cur, ok := s.apps[id]; !ok || cur != app {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor: app %q vanished during reset: %w", id, ErrNotFound)
+	}
+	if app.Status() != StatusCrashLooping {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor: app %q not crash-looping (status=%s): %w",
+			id, app.Status(), ErrNotCrashLooping)
+	}
+
 	app.clearRestarts()
+	app.resetDone()
 
 	if err := s.startLocked(app, nil); err != nil {
 		s.mu.Unlock()
@@ -418,12 +472,18 @@ func (s *Supervisor) Reset(id string) error {
 	return nil
 }
 
-// Stop signals the named app to exit and removes it from the registry.
-// The watch goroutine will observe the de-registration and not restart.
-//
-// M5.3 will add graceful shutdown (SIGTERM → drain → SIGKILL fallback).
-// For M5.1 we send SIGTERM and return immediately.
+// Stop gracefully stops the named app: SIGTERM, wait up to
+// GracefulShutdownTimeout for exit, then SIGKILL if still alive.
+// Blocks until the app's watch goroutine has fully terminated.
 func (s *Supervisor) Stop(id string) error {
+	return s.StopWithTimeout(id, s.GracefulShutdownTimeout)
+}
+
+// StopWithTimeout is like Stop but with a caller-specified timeout for
+// graceful exit. If the timeout elapses before the process exits, the
+// supervisor sends SIGKILL and waits for the watch goroutine to
+// terminate.
+func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 	s.mu.Lock()
 	app, exists := s.apps[id]
 	if !exists {
@@ -434,21 +494,64 @@ func (s *Supervisor) Stop(id string) error {
 	s.mu.Unlock()
 
 	cmd := app.snapshotCmd()
-	if cmd != nil && cmd.Process != nil {
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			// Process may already be dead; that's OK.
-			s.logger.Debug("signal failed (process likely gone)",
-				"id", id,
-				"err", err,
+	done := app.waitDone()
+	if cmd == nil || cmd.Process == nil {
+		// Process never started; watch may already have exited.
+		// Wait briefly for done to close in case watch is mid-cleanup.
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+		}
+		return nil
+	}
+
+	// Phase 1: SIGTERM and wait for graceful exit.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		s.logger.Debug("SIGTERM failed (process likely gone)",
+			"id", id, "err", err,
+		)
+	}
+
+	s.logger.Info("app stop requested",
+		"id", id,
+		"timeout", timeout,
+	)
+
+	if timeout <= 0 {
+		// No graceful window — proceed straight to SIGKILL.
+		return s.escalateAndWait(id, cmd, done)
+	}
+
+	select {
+	case <-done:
+		s.logger.Info("app stopped gracefully", "id", id)
+		return nil
+	case <-time.After(timeout):
+		s.logger.Warn("graceful shutdown timeout; escalating to SIGKILL",
+			"id", id, "timeout", timeout,
+		)
+		return s.escalateAndWait(id, cmd, done)
+	}
+}
+
+// escalateAndWait sends SIGKILL and blocks until the watch goroutine
+// closes done. Used when graceful exit fails or is bypassed.
+func (s *Supervisor) escalateAndWait(id string, cmd *exec.Cmd, done <-chan struct{}) error {
+	if cmd.Process != nil {
+		if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+			s.logger.Debug("SIGKILL failed (process likely gone)",
+				"id", id, "err", err,
 			)
 		}
 	}
-
-	s.logger.Info("app stop requested", "id", id)
+	<-done
+	s.logger.Info("app stopped (SIGKILL)", "id", id)
 	return nil
 }
 
-// StopAll signals every supervised app to exit. Used during shutdown.
+// StopAll gracefully stops every supervised app concurrently. Honours
+// the context deadline: if ctx has a deadline, each app gets at most
+// the remaining time as its graceful window before SIGKILL escalation.
 func (s *Supervisor) StopAll(ctx context.Context) {
 	s.mu.RLock()
 	ids := make([]string, 0, len(s.apps))
@@ -457,11 +560,28 @@ func (s *Supervisor) StopAll(ctx context.Context) {
 	}
 	s.mu.RUnlock()
 
-	for _, id := range ids {
-		if err := s.Stop(id); err != nil {
-			s.logger.Warn("stop during shutdown failed", "id", id, "err", err)
+	timeout := s.GracefulShutdownTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < timeout {
+			timeout = remaining
 		}
 	}
+	if timeout < 0 {
+		timeout = 0
+	}
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := s.StopWithTimeout(id, timeout); err != nil {
+				s.logger.Warn("stop during shutdown failed", "id", id, "err", err)
+			}
+		}(id)
+	}
+	wg.Wait()
 }
 
 // List returns a snapshot of currently registered apps.

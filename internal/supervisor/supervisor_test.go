@@ -704,3 +704,257 @@ func TestStopAllShutdownPath(t *testing.T) {
 	}
 }
 
+// --- M5.3a: graceful shutdown (SIGTERM → SIGKILL) ----------------------
+
+// TestGracefulShutdownExitsWithinTimeout: a child that respects SIGTERM
+// (sleep's default action) should be cleaned up well before the timeout.
+// Stop() must block until the watch goroutine has fully terminated.
+func TestGracefulShutdownExitsWithinTimeout(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.GracefulShutdownTimeout = 2 * time.Second
+
+	app, err := sup.Spawn(Config{
+		ID:      "graceful",
+		Command: "sleep",
+		Args:    []string{"30"},
+		Port:    9600,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	start := time.Now()
+	if err := sup.Stop(app.ID); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// SIGTERM should fell sleep promptly — well under the timeout.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("graceful stop took %v, expected fast SIGTERM path", elapsed)
+	}
+
+	// Watch goroutine must have finished by the time Stop returns.
+	if app.Status() != StatusStopped {
+		t.Errorf("expected StatusStopped after Stop, got %s", app.Status())
+	}
+}
+
+// stubbornScript returns a sh script that installs an ignore-TERM trap,
+// touches readyPath once the trap is in place, then loops until SIGKILL.
+// The marker lets tests synchronise on trap installation — otherwise a
+// fast SIGTERM races startup and kills the shell with its default action.
+func stubbornScript(readyPath string) string {
+	return fmt.Sprintf(`trap '' TERM; : > %s; while true; do sleep 0.1; done`, readyPath)
+}
+
+// waitForFile blocks until path exists or timeout elapses.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	if !eventuallyTrue(timeout, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}) {
+		t.Fatalf("file %q never appeared within %v", path, timeout)
+	}
+}
+
+// TestGracefulShutdownEscalatesToSIGKILL: a child that ignores SIGTERM
+// forces the supervisor to escalate. Total elapsed must be ≥ timeout
+// (graceful window expired) but only a little more (SIGKILL is prompt).
+func TestGracefulShutdownEscalatesToSIGKILL(t *testing.T) {
+	sup := newTestSupervisor()
+	timeout := 300 * time.Millisecond
+	sup.GracefulShutdownTimeout = timeout
+
+	ready, err := os.CreateTemp("", "creekd-stubborn-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	readyPath := ready.Name() + ".ready"
+	ready.Close()
+	os.Remove(ready.Name())
+	t.Cleanup(func() { os.Remove(readyPath) })
+
+	app, err := sup.Spawn(Config{
+		ID:      "stubborn",
+		Command: "sh",
+		Args:    []string{"-c", stubbornScript(readyPath)},
+		Port:    9601,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	waitForFile(t, readyPath, 2*time.Second)
+
+	start := time.Now()
+	if err := sup.Stop(app.ID); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < timeout {
+		t.Errorf("Stop returned before graceful timeout (%v < %v) — escalation may have skipped",
+			elapsed, timeout)
+	}
+	// SIGKILL plus watch teardown should be quick. Allow generous margin
+	// for slow CI without making the test useless.
+	if elapsed > timeout+2*time.Second {
+		t.Errorf("Stop took %v (timeout %v); SIGKILL escalation slower than expected",
+			elapsed, timeout)
+	}
+
+	if app.Status() != StatusStopped {
+		t.Errorf("expected StatusStopped after escalated Stop, got %s", app.Status())
+	}
+}
+
+// TestStopWithTimeoutZero: a zero timeout skips the SIGTERM wait entirely
+// and proceeds straight to SIGKILL.
+func TestStopWithTimeoutZero(t *testing.T) {
+	sup := newTestSupervisor()
+
+	ready, err := os.CreateTemp("", "creekd-zero-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	readyPath := ready.Name() + ".ready"
+	ready.Close()
+	os.Remove(ready.Name())
+	t.Cleanup(func() { os.Remove(readyPath) })
+
+	app, err := sup.Spawn(Config{
+		ID:      "immediate-kill",
+		Command: "sh",
+		Args:    []string{"-c", stubbornScript(readyPath)},
+		Port:    9602,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	waitForFile(t, readyPath, 2*time.Second)
+
+	start := time.Now()
+	if err := sup.StopWithTimeout(app.ID, 0); err != nil {
+		t.Fatalf("StopWithTimeout failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// No graceful window — should complete fast.
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("StopWithTimeout(0) took %v, expected near-immediate SIGKILL", elapsed)
+	}
+	if app.Status() != StatusStopped {
+		t.Errorf("expected StatusStopped, got %s", app.Status())
+	}
+}
+
+// TestStopAllRespectsGracefulShutdown: concurrent SIGTERM to several
+// well-behaved apps should all finish within the deadline.
+func TestStopAllRespectsGracefulShutdown(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.GracefulShutdownTimeout = 3 * time.Second
+
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("ga-%d", i)
+		_, err := sup.Spawn(Config{
+			ID: id, Command: "sleep", Args: []string{"30"}, Port: 9610 + i,
+		})
+		if err != nil {
+			t.Fatalf("Spawn %q failed: %v", id, err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	sup.StopAll(ctx)
+	elapsed := time.Since(start)
+
+	if got := len(sup.List()); got != 0 {
+		t.Errorf("expected 0 apps after StopAll, got %d", got)
+	}
+	// SIGTERM is concurrent; should finish well under the deadline.
+	if elapsed > 2*time.Second {
+		t.Errorf("StopAll took %v, expected fast concurrent SIGTERM path", elapsed)
+	}
+}
+
+// TestStopAllEscalatesStubbornChild: StopAll must still terminate every
+// app even when one ignores SIGTERM. Verifies SIGKILL escalation runs
+// inside the concurrent stop path too.
+func TestStopAllEscalatesStubbornChild(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.GracefulShutdownTimeout = 400 * time.Millisecond
+
+	ready, err := os.CreateTemp("", "creekd-stopall-stub-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	readyPath := ready.Name() + ".ready"
+	ready.Close()
+	os.Remove(ready.Name())
+	t.Cleanup(func() { os.Remove(readyPath) })
+
+	// One cooperative, one stubborn.
+	_, err = sup.Spawn(Config{
+		ID: "coop", Command: "sleep", Args: []string{"30"}, Port: 9620,
+	})
+	if err != nil {
+		t.Fatalf("Spawn coop failed: %v", err)
+	}
+	_, err = sup.Spawn(Config{
+		ID:      "stub",
+		Command: "sh",
+		Args:    []string{"-c", stubbornScript(readyPath)},
+		Port:    9621,
+	})
+	if err != nil {
+		t.Fatalf("Spawn stub failed: %v", err)
+	}
+
+	waitForFile(t, readyPath, 2*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	sup.StopAll(ctx)
+	elapsed := time.Since(start)
+
+	if got := len(sup.List()); got != 0 {
+		t.Errorf("expected 0 apps after StopAll, got %d", got)
+	}
+	// Must wait through the graceful window before SIGKILL.
+	if elapsed < sup.GracefulShutdownTimeout {
+		t.Errorf("StopAll returned in %v, before graceful timeout %v",
+			elapsed, sup.GracefulShutdownTimeout)
+	}
+}
+
+// TestStopBlocksUntilWatchExits: a stop call must not return until the
+// watch goroutine has fully torn down. This is the contract Reset()
+// relies on to safely swap the done channel.
+func TestStopBlocksUntilWatchExits(t *testing.T) {
+	sup := newTestSupervisor()
+
+	app, err := sup.Spawn(Config{
+		ID: "watch-exit", Command: "sleep", Args: []string{"30"}, Port: 9630,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	if err := sup.Stop(app.ID); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	// As soon as Stop returns, the watch goroutine must have set
+	// StatusStopped — no need to poll.
+	if app.Status() != StatusStopped {
+		t.Errorf("expected StatusStopped immediately after Stop, got %s", app.Status())
+	}
+}
+
