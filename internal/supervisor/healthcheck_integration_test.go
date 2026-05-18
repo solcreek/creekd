@@ -34,9 +34,13 @@ func TestMain(m *testing.M) {
 //	PORT (required)        port to listen on
 //	HEALTH_MODE            "ok" (default), "fail", "flaky:N", "fail-after:N"
 //	HEALTH_DELAY_MS        sleep before responding (default 0)
+//	SIGNATURE              embedded in response bodies (default "hc")
 //
 // "flaky:N" returns 500 for the first N requests, then 200.
 // "fail-after:N" returns 200 for the first N requests, then 500 forever.
+//
+// The signature is echoed in both /health and / responses, letting
+// blue-green tests tell v1 and v2 apart by body inspection.
 func runHTTPTestApp() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -48,6 +52,10 @@ func runHTTPTestApp() {
 		mode = "ok"
 	}
 	delayMs, _ := strconv.Atoi(os.Getenv("HEALTH_DELAY_MS"))
+	signature := os.Getenv("SIGNATURE")
+	if signature == "" {
+		signature = "hc"
+	}
 
 	var counter int64
 
@@ -79,7 +87,11 @@ func runHTTPTestApp() {
 		default:
 			w.WriteHeader(200)
 		}
-		_, _ = w.Write([]byte("hc\n"))
+		_, _ = w.Write([]byte(signature + "\n"))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(signature + ":" + r.URL.Path + "\n"))
 	})
 	srv := &http.Server{Addr: ":" + port, Handler: mux}
 	// Block forever — supervisor will terminate us with a signal.

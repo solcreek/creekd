@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/logs"
 	"github.com/solcreek/creekd/internal/runtime"
 )
@@ -132,6 +133,17 @@ type App struct {
 // since this App was spawned.
 func (a *App) HealthFailures() int64 {
 	return atomic.LoadInt64(&a.healthFailures)
+}
+
+// renameUnderLock updates App.ID. Used by Deploy to re-key v2 from its
+// temporary registry key to the canonical app ID under the supervisor's
+// registry lock. Outside of Deploy, App.ID is immutable; callers that
+// hold A.PID()/A.Port and other fields by stale value see no harm —
+// the renamed App is the same process with a different label.
+func (a *App) renameUnderLock(newID string) {
+	a.mu.Lock()
+	a.ID = newID
+	a.mu.Unlock()
 }
 
 // PID returns the OS process id, or 0 if the process is not running.
@@ -452,6 +464,18 @@ func (s *Supervisor) healthEnabled() bool {
 		s.HealthChecker != nil
 }
 
+// isTracked returns true iff the supervisor's registry still has app
+// at its own ID *by pointer identity*. Deploy re-keys a different App
+// under an existing ID; without pointer identity, the displaced App's
+// watch goroutine would incorrectly treat itself as still tracked and
+// try to restart on top of the new owner's slot.
+func (s *Supervisor) isTracked(app *App) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cur, ok := s.apps[app.ID]
+	return ok && cur == app
+}
+
 // startLocked spawns the OS process. Caller must hold s.mu. Mutates
 // app via setState/setStatus which take App.mu internally.
 func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
@@ -498,13 +522,15 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 // closes the log rotator if watch is exiting AND the app is no longer
 // tracked — covering crash-restart-failure paths where watch removes
 // the app from the registry itself (Stop closes the rotator on its own).
+//
+// Tracking is checked by *pointer identity*, not by ID key alone:
+// Deploy may re-key a different App under the same ID, and v1's watch
+// must observe that as "not tracked" rather than restarting on top of
+// v2's registry slot.
 func (s *Supervisor) watch(app *App, extraEnv []string) {
 	defer func() {
 		close(app.done)
-		s.mu.RLock()
-		_, tracked := s.apps[app.ID]
-		s.mu.RUnlock()
-		if !tracked && app.rotator != nil {
+		if !s.isTracked(app) && app.rotator != nil {
 			_ = app.rotator.Close() // idempotent
 		}
 	}()
@@ -522,11 +548,10 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 		}
 
 		// If Stop() removed this app from the registry while the
-		// process was running, treat exit as terminal.
-		s.mu.RLock()
-		_, tracked := s.apps[app.ID]
-		s.mu.RUnlock()
-		if !tracked {
+		// process was running, treat exit as terminal. Pointer-identity
+		// check tolerates Deploy re-keying a different App at the same
+		// ID.
+		if !s.isTracked(app) {
 			app.setStatus(StatusStopped)
 			s.logger.Info("app exited (stopped)",
 				"id", app.ID,
@@ -563,8 +588,9 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 		time.Sleep(backoff)
 
 		s.mu.Lock()
-		// Re-check tracking after the delay — Stop() may have raced.
-		if _, tracked := s.apps[app.ID]; !tracked {
+		// Re-check tracking after the delay — Stop() may have raced,
+		// or Deploy may have re-keyed this ID to a different App.
+		if cur, ok := s.apps[app.ID]; !ok || cur != app {
 			s.mu.Unlock()
 			app.setStatus(StatusStopped)
 			return
@@ -575,7 +601,10 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 				"id", app.ID,
 				"err", err,
 			)
-			delete(s.apps, app.ID)
+			// Only delete if we still own this slot.
+			if cur, ok := s.apps[app.ID]; ok && cur == app {
+				delete(s.apps, app.ID)
+			}
 			s.mu.Unlock()
 			app.setStatus(StatusStopped)
 			return
@@ -730,14 +759,22 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 	}
 	delete(s.apps, id)
 	s.mu.Unlock()
+	return s.stopApp(app, timeout)
+}
 
+// stopApp gracefully terminates the given App. Caller is responsible
+// for having removed the App from the registry (or never registering
+// it) before invoking — stopApp does no registry bookkeeping. This is
+// the inner half of StopWithTimeout and is reused by Deploy to wind
+// down the v1 process after the registry swap.
+func (s *Supervisor) stopApp(app *App, timeout time.Duration) error {
 	// Close the log rotator after the watch goroutine has finished
 	// draining the child's pipes (signalled by done close). Otherwise
 	// we'd close while io.Copy may still be writing.
 	defer func() {
 		if app.rotator != nil {
 			if err := app.rotator.Close(); err != nil {
-				s.logger.Warn("log rotator close failed", "id", id, "err", err)
+				s.logger.Warn("log rotator close failed", "id", app.ID, "err", err)
 			}
 		}
 	}()
@@ -757,29 +794,29 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 	// Phase 1: SIGTERM and wait for graceful exit.
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		s.logger.Debug("SIGTERM failed (process likely gone)",
-			"id", id, "err", err,
+			"id", app.ID, "err", err,
 		)
 	}
 
 	s.logger.Info("app stop requested",
-		"id", id,
+		"id", app.ID,
 		"timeout", timeout,
 	)
 
 	if timeout <= 0 {
 		// No graceful window — proceed straight to SIGKILL.
-		return s.escalateAndWait(id, cmd, done)
+		return s.escalateAndWait(app.ID, cmd, done)
 	}
 
 	select {
 	case <-done:
-		s.logger.Info("app stopped gracefully", "id", id)
+		s.logger.Info("app stopped gracefully", "id", app.ID)
 		return nil
 	case <-time.After(timeout):
 		s.logger.Warn("graceful shutdown timeout; escalating to SIGKILL",
-			"id", id, "timeout", timeout,
+			"id", app.ID, "timeout", timeout,
 		)
-		return s.escalateAndWait(id, cmd, done)
+		return s.escalateAndWait(app.ID, cmd, done)
 	}
 }
 
@@ -856,4 +893,179 @@ var (
 	ErrAlreadyRunning  = errors.New("app already running")
 	ErrNotFound        = errors.New("app not found")
 	ErrNotCrashLooping = errors.New("app not in crash-loop state")
+	ErrDeployConflict  = errors.New("deploy: concurrent change detected")
+	ErrDeployUnhealthy = errors.New("deploy: v2 never became healthy")
 )
+
+// DeployConfig describes a blue-green replacement of an existing app.
+// Config.ID identifies the app being replaced; Config.Port is v2's new
+// port (must differ from v1's). The supervisor spawns v2 alongside v1,
+// waits up to ReadyTimeout for v2 to pass health checks, atomically
+// flips the registry + dispatch route, and gracefully stops v1.
+type DeployConfig struct {
+	Config
+	// ReadyTimeout caps how long Deploy waits for v2 to pass its first
+	// health check. Default 30s. The HealthChecker configured on the
+	// Supervisor is used. If no HealthChecker is set, Deploy assumes
+	// v2 is healthy after a brief settle.
+	ReadyTimeout time.Duration
+	// PollInterval is how often Deploy retries the health check while
+	// waiting. Default 200ms.
+	PollInterval time.Duration
+	// GracefulV1Timeout caps the SIGTERM-then-SIGKILL window for the
+	// retired v1. Defaults to s.GracefulShutdownTimeout.
+	GracefulV1Timeout time.Duration
+}
+
+// deployTempID returns the registry key used for v2 during the
+// deployment window. Exposed so tests can assert intermediate state.
+func deployTempID(id string) string { return id + "__deploying" }
+
+// Deploy performs a blue-green replacement of the app named cfg.ID:
+//
+//  1. Spawn v2 on cfg.Port under a temporary registry key.
+//  2. Poll the supervisor's HealthChecker until v2 passes or
+//     ReadyTimeout elapses. On timeout: kill v2 and return
+//     ErrDeployUnhealthy; v1 is untouched.
+//  3. Atomically remove v1 from the registry, rename v2's registry
+//     key to cfg.ID, and call router.Set(cfg.ID, v2.Port).
+//  4. Gracefully stop v1 (SIGTERM → SIGKILL escalation).
+//
+// On success returns the new App (v2). Router may be nil — in that
+// case the route flip is skipped and Deploy is purely a process
+// replacement.
+//
+// Deploy holds no supervisor-wide lock for the duration; only short
+// critical sections during registry mutation. v1's own probe and
+// watch goroutines continue running until Deploy stops it in step 4.
+func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg DeployConfig) (*App, error) {
+	if cfg.ID == "" {
+		return nil, errors.New("deploy: empty app id")
+	}
+	if cfg.ReadyTimeout <= 0 {
+		cfg.ReadyTimeout = 30 * time.Second
+	}
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 200 * time.Millisecond
+	}
+	if cfg.GracefulV1Timeout <= 0 {
+		cfg.GracefulV1Timeout = s.GracefulShutdownTimeout
+	}
+
+	// Snapshot v1.
+	s.mu.RLock()
+	v1, ok := s.apps[cfg.ID]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("deploy: app %q not found: %w", cfg.ID, ErrNotFound)
+	}
+	if cfg.Port == v1.Port {
+		return nil, fmt.Errorf("deploy: v2 port %d must differ from v1", cfg.Port)
+	}
+
+	// Spawn v2 under a temp ID so it has its own registry slot,
+	// watch goroutine, and pipe drainage. The same temp ID is what
+	// we'll use to clean up if v2 turns out unhealthy.
+	tempID := deployTempID(cfg.ID)
+	v2Cfg := cfg.Config
+	v2Cfg.ID = tempID
+	v2, err := s.Spawn(v2Cfg)
+	if err != nil {
+		return nil, fmt.Errorf("deploy: spawn v2: %w", err)
+	}
+
+	// Wait for v2 to become healthy. If the deadline elapses, kill v2
+	// (Stop removes it from the registry) and surface a sentinel error.
+	if err := s.waitDeployHealthy(ctx, v2, cfg); err != nil {
+		_ = s.Stop(tempID)
+		return nil, err
+	}
+
+	// Atomic registry swap: ensure v1 is still the one we snapshotted,
+	// then rename v2's registry key from tempID to cfg.ID.
+	s.mu.Lock()
+	if cur, ok := s.apps[cfg.ID]; !ok || cur != v1 {
+		s.mu.Unlock()
+		_ = s.Stop(tempID)
+		return nil, ErrDeployConflict
+	}
+	delete(s.apps, tempID)
+	delete(s.apps, cfg.ID)
+	v2.renameUnderLock(cfg.ID)
+	s.apps[cfg.ID] = v2
+	s.mu.Unlock()
+
+	// Flip the route. We do this AFTER the registry swap so that any
+	// admin-API list or get call observes the new app at the canonical
+	// ID before traffic shifts.
+	if router != nil {
+		if err := router.Set(cfg.ID, v2.Port); err != nil {
+			// Router refused (e.g., bad port). Roll back: put v1 back,
+			// drop v2. This is best-effort — failures here mean a
+			// half-deployed state, so we log loudly.
+			s.logger.Error("deploy: router set failed; attempting rollback",
+				"id", cfg.ID, "err", err)
+			s.mu.Lock()
+			delete(s.apps, cfg.ID)
+			s.apps[cfg.ID] = v1
+			s.mu.Unlock()
+			_ = s.stopApp(v2, cfg.GracefulV1Timeout)
+			return nil, fmt.Errorf("deploy: router.Set: %w", err)
+		}
+	}
+
+	// v1 is no longer in the registry; wind it down directly. Logs
+	// failure but does not undo the deploy — v2 is now authoritative.
+	if err := s.stopApp(v1, cfg.GracefulV1Timeout); err != nil {
+		s.logger.Warn("deploy: v1 stop failed", "id", cfg.ID, "err", err)
+	}
+
+	s.logger.Info("deploy complete",
+		"id", cfg.ID,
+		"old_pid", v1.PID(),
+		"new_pid", v2.PID(),
+		"new_port", v2.Port,
+	)
+	return v2, nil
+}
+
+// waitDeployHealthy polls the supervisor's HealthChecker against app
+// until it returns nil, ReadyTimeout elapses, or ctx is cancelled.
+// When no HealthChecker is configured the function settles briefly
+// and returns nil — the caller is treating "process started" as
+// healthy.
+func (s *Supervisor) waitDeployHealthy(ctx context.Context, app *App, cfg DeployConfig) error {
+	if s.HealthChecker == nil {
+		// Best-effort settle so the OS finishes setting up the socket.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+		return nil
+	}
+
+	checkTimeout := s.HealthCheckTimeout
+	if checkTimeout <= 0 {
+		checkTimeout = 2 * time.Second
+	}
+	deadline := time.Now().Add(cfg.ReadyTimeout)
+	var lastErr error
+	for {
+		checkCtx, cancel := context.WithTimeout(ctx, checkTimeout)
+		err := s.HealthChecker.Check(checkCtx, app)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%w: last error: %v", ErrDeployUnhealthy, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cfg.PollInterval):
+		}
+	}
+}
