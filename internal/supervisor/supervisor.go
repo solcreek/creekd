@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -823,6 +824,17 @@ func (s *Supervisor) probe(app *App, done <-chan struct{}) {
 		// process reaches StatusRunning.
 		failures = 0
 	}
+}
+
+// AppLogPath returns the absolute path of the per-app log file when
+// LogDir is configured, or "" when log capture is disabled. The path
+// is computed from LogDir + appID and is valid whether or not the
+// underlying file currently exists.
+func (s *Supervisor) AppLogPath(appID string) string {
+	if s.LogDir == "" || appID == "" {
+		return ""
+	}
+	return filepath.Join(s.LogDir, appID, "current.log")
 }
 
 // Stop gracefully stops the named app: SIGTERM, wait up to

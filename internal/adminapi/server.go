@@ -52,6 +52,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/apps/{id}", s.guard(s.handleStop))
 	s.mux.HandleFunc("POST /v1/apps/{id}/deploy", s.guard(s.handleDeploy))
 	s.mux.HandleFunc("POST /v1/apps/{id}/reset", s.guard(s.handleReset))
+	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
 }
 
 // guard wraps h with the bearer-token check. When s.token is empty
