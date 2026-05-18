@@ -4,23 +4,31 @@
 // runs as a child process; this binary spawns them, watches their
 // lifecycle, routes HTTP traffic to them, and enforces resource limits.
 //
-// Phase 1 implementation status: skeleton only. See docs/ROADMAP.md.
+// M5.1 wires the supervisor package and exposes a manual smoke-test
+// path via CREEK_SMOKE_TEST=1. The HTTP admin API and gRPC layer come
+// in later sub-tasks.
 package main
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
+
+	"github.com/solcreek/creekd/internal/supervisor"
 )
 
 const version = "0.0.0-dev"
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Printf("creekd %s starting", version)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	logger.Info("creekd starting", "version", version)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -30,21 +38,70 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
-		log.Printf("received %v, shutting down", sig)
+		logger.Info("shutdown signal received", "signal", sig.String())
 		cancel()
 	}()
 
-	if err := run(ctx); err != nil {
+	if err := run(ctx, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "creekd: %v\n", err)
 		os.Exit(1)
 	}
-	log.Printf("creekd stopped cleanly")
+	logger.Info("creekd stopped cleanly")
 }
 
-// run is the main daemon loop. M5.1 will replace this stub with actual
-// supervisor logic; M5.2-M5.7 build on top.
-func run(ctx context.Context) error {
-	log.Printf("creekd skeleton; M5.1 supervisor not yet implemented")
+func run(ctx context.Context, logger *slog.Logger) error {
+	sup := supervisor.New(logger)
+
+	// M5.1 smoke-test path. When CREEK_SMOKE_TEST=1 we spawn a small
+	// fleet of long-running children and demonstrate the supervisor
+	// is working. M5.7 will replace this with the real deploy API.
+	if os.Getenv("CREEK_SMOKE_TEST") == "1" {
+		smokeTest(sup, logger)
+	}
+
+	logger.Info("creekd ready",
+		"apps", len(sup.List()),
+		"note", "HTTP admin API arrives in later sub-tasks",
+	)
+
 	<-ctx.Done()
+	logger.Info("stopping all apps")
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sup.StopAll(stopCtx)
+
+	// Give watch goroutines a moment to observe the stop.
+	time.Sleep(200 * time.Millisecond)
+
 	return nil
+}
+
+// smokeTest spawns a few example apps to exercise the supervisor on
+// manual runs. Useful while M5.2-M5.7 are still under construction and
+// there is no admin API yet.
+func smokeTest(sup *supervisor.Supervisor, logger *slog.Logger) {
+	count := 3
+	if v := os.Getenv("CREEK_SMOKE_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			count = n
+		}
+	}
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("smoke-%d", i)
+		app, err := sup.Spawn(supervisor.Config{
+			ID:      id,
+			Command: "sleep",
+			Args:    []string{"3600"},
+			Port:    9000 + i,
+		})
+		if err != nil {
+			logger.Error("smoke spawn failed", "id", id, "err", err)
+			continue
+		}
+		logger.Info("smoke app up",
+			"id", app.ID,
+			"pid", app.PID(),
+			"port", app.Port,
+		)
+	}
 }
