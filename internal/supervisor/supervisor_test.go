@@ -21,12 +21,14 @@ func quietLogger() *slog.Logger {
 
 // newTestSupervisor returns a Supervisor wired for tests: quiet logger,
 // discarded child stdout/stderr to avoid pipe-leak into the test
-// process, and a short WaitDelay so child cleanup is bounded.
+// process, a short WaitDelay so child cleanup is bounded, and health
+// probes disabled (tests that exercise probes opt in explicitly).
 func newTestSupervisor() *Supervisor {
 	sup := New(quietLogger())
 	sup.Stdout = io.Discard
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
+	sup.HealthCheckInterval = 0
 	return sup
 }
 
@@ -955,6 +957,259 @@ func TestStopBlocksUntilWatchExits(t *testing.T) {
 	// StatusStopped — no need to poll.
 	if app.Status() != StatusStopped {
 		t.Errorf("expected StatusStopped immediately after Stop, got %s", app.Status())
+	}
+}
+
+// --- M5.3b: health probe ------------------------------------------------
+
+// mockChecker is a deterministic HealthChecker for unit tests. Each Check
+// pops the next outcome from the configured sequence; if the sequence is
+// exhausted it returns the last entry forever. Thread-safe.
+type mockChecker struct {
+	mu       sync.Mutex
+	seq      []error
+	idx      int
+	calls    int
+	lastApp  string
+	onCheck  func()
+	holdLast bool
+}
+
+func newMockChecker(seq ...error) *mockChecker {
+	return &mockChecker{seq: seq, holdLast: true}
+}
+
+func (m *mockChecker) Check(_ context.Context, app *App) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	m.lastApp = app.ID
+	if m.onCheck != nil {
+		m.onCheck()
+	}
+	if len(m.seq) == 0 {
+		return nil
+	}
+	if m.idx >= len(m.seq) {
+		if m.holdLast {
+			return m.seq[len(m.seq)-1]
+		}
+		return nil
+	}
+	err := m.seq[m.idx]
+	m.idx++
+	return err
+}
+
+func (m *mockChecker) Calls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// TestHealthProbeDisabledWhenIntervalZero: zero interval means no probe
+// goroutine; checker is never invoked.
+func TestHealthProbeDisabledWhenIntervalZero(t *testing.T) {
+	sup := newTestSupervisor()
+	mock := newMockChecker(fmt.Errorf("would fail"))
+	sup.HealthChecker = mock
+	sup.HealthCheckInterval = 0
+	sup.HealthCheckFailureThreshold = 3
+
+	_, err := sup.Spawn(Config{
+		ID: "no-probe", Command: "sleep", Args: []string{"30"}, Port: 9700,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("no-probe") })
+
+	time.Sleep(150 * time.Millisecond)
+	if got := mock.Calls(); got != 0 {
+		t.Errorf("expected 0 health checks (probe disabled), got %d", got)
+	}
+}
+
+// TestHealthProbePassingDoesNotRestart: when the checker always passes,
+// the app keeps its original PID — no restart.
+func TestHealthProbePassingDoesNotRestart(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.HealthChecker = newMockChecker() // empty seq → always nil
+	sup.HealthCheckInterval = 30 * time.Millisecond
+	sup.HealthCheckTimeout = 100 * time.Millisecond
+	sup.HealthCheckFailureThreshold = 3
+
+	app, err := sup.Spawn(Config{
+		ID: "healthy", Command: "sleep", Args: []string{"30"}, Port: 9701,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("healthy") })
+
+	originalPID := app.PID()
+	time.Sleep(250 * time.Millisecond)
+
+	if got := app.PID(); got != originalPID {
+		t.Errorf("PID changed (%d → %d); healthy app should not restart",
+			originalPID, got)
+	}
+	if app.Status() != StatusRunning {
+		t.Errorf("expected StatusRunning, got %s", app.Status())
+	}
+}
+
+// TestHealthProbeFailuresRestartAtThreshold: N consecutive failures
+// trigger SIGKILL → watch records a crash → restart with new PID.
+func TestHealthProbeFailuresRestartAtThreshold(t *testing.T) {
+	sup := newTestSupervisor()
+	// All checks fail.
+	sup.HealthChecker = newMockChecker(
+		fmt.Errorf("unhealthy"),
+	)
+	sup.HealthCheckInterval = 30 * time.Millisecond
+	sup.HealthCheckTimeout = 100 * time.Millisecond
+	sup.HealthCheckFailureThreshold = 3
+	// Disable crash-loop so we observe a clean restart.
+	sup.InitialBackoff = 5 * time.Millisecond
+	sup.MaxBackoff = 10 * time.Millisecond
+	sup.CrashLoopThreshold = 100
+
+	app, err := sup.Spawn(Config{
+		ID: "to-restart", Command: "sleep", Args: []string{"30"}, Port: 9702,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("to-restart") })
+
+	originalPID := app.PID()
+
+	// Threshold=3 with 30ms interval → ~90ms to first kill. Give 2s.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		p := app.PID()
+		return p != 0 && p != originalPID
+	}) {
+		t.Errorf("expected PID change after health threshold; original=%d, current=%d, failures=%d",
+			originalPID, app.PID(), app.HealthFailures())
+	}
+
+	if app.HealthFailures() < int64(sup.HealthCheckFailureThreshold) {
+		t.Errorf("expected ≥%d cumulative failures, got %d",
+			sup.HealthCheckFailureThreshold, app.HealthFailures())
+	}
+}
+
+// TestHealthProbeRecoveryResetsCounter: a brief failure streak below
+// threshold followed by a success must NOT cause a restart.
+func TestHealthProbeRecoveryResetsCounter(t *testing.T) {
+	sup := newTestSupervisor()
+	// Sequence: 2 fails, then success forever.
+	mock := &mockChecker{
+		seq: []error{
+			fmt.Errorf("flap-1"),
+			fmt.Errorf("flap-2"),
+			nil,
+		},
+		holdLast: true, // hold last (nil) — recovered
+	}
+	sup.HealthChecker = mock
+	sup.HealthCheckInterval = 25 * time.Millisecond
+	sup.HealthCheckTimeout = 100 * time.Millisecond
+	sup.HealthCheckFailureThreshold = 3 // 2 fails < 3 → no restart
+
+	app, err := sup.Spawn(Config{
+		ID: "recovering", Command: "sleep", Args: []string{"30"}, Port: 9703,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("recovering") })
+
+	originalPID := app.PID()
+
+	// Wait for several checks beyond the initial flap window.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return mock.Calls() >= 6
+	}) {
+		t.Fatalf("checker invoked only %d times", mock.Calls())
+	}
+
+	if got := app.PID(); got != originalPID {
+		t.Errorf("PID changed (%d → %d); recovery before threshold should not restart",
+			originalPID, got)
+	}
+	if app.Status() != StatusRunning {
+		t.Errorf("expected StatusRunning after recovery, got %s", app.Status())
+	}
+}
+
+// TestHealthProbeMarksUnhealthyBelowThreshold: while failures accumulate
+// but stay under the threshold, the app's status is StatusUnhealthy.
+func TestHealthProbeMarksUnhealthyBelowThreshold(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.HealthChecker = newMockChecker(fmt.Errorf("flap"))
+	sup.HealthCheckInterval = 25 * time.Millisecond
+	sup.HealthCheckTimeout = 100 * time.Millisecond
+	sup.HealthCheckFailureThreshold = 10 // high so we observe Unhealthy
+
+	app, err := sup.Spawn(Config{
+		ID: "marked", Command: "sleep", Args: []string{"30"}, Port: 9704,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("marked") })
+
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusUnhealthy
+	}) {
+		t.Errorf("expected StatusUnhealthy, got %s", app.Status())
+	}
+}
+
+// TestHealthProbeStopsWhenAppStopped: stopping the app must terminate
+// the probe goroutine. We assert no further Check calls land after Stop
+// + a settling delay.
+func TestHealthProbeStopsWhenAppStopped(t *testing.T) {
+	sup := newTestSupervisor()
+	mock := newMockChecker() // always nil
+	sup.HealthChecker = mock
+	sup.HealthCheckInterval = 25 * time.Millisecond
+	sup.HealthCheckTimeout = 100 * time.Millisecond
+	sup.HealthCheckFailureThreshold = 3
+
+	_, err := sup.Spawn(Config{
+		ID: "to-stop-probe", Command: "sleep", Args: []string{"30"}, Port: 9705,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	// Let a few checks happen.
+	if !eventuallyTrue(time.Second, func() bool { return mock.Calls() >= 2 }) {
+		t.Fatalf("probe never ran")
+	}
+
+	if err := sup.Stop("to-stop-probe"); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+
+	stopCalls := mock.Calls()
+	time.Sleep(200 * time.Millisecond)
+	finalCalls := mock.Calls()
+
+	// Allow at most one extra in-flight call to land between Stop and
+	// the probe noticing done was closed.
+	if finalCalls > stopCalls+1 {
+		t.Errorf("probe kept running after Stop: %d → %d calls", stopCalls, finalCalls)
+	}
+}
+
+// TestStatusStringIncludesUnhealthy verifies the new status renders.
+func TestStatusStringIncludesUnhealthy(t *testing.T) {
+	if got := StatusUnhealthy.String(); got != "unhealthy" {
+		t.Errorf("StatusUnhealthy.String() = %q, want %q", got, "unhealthy")
 	}
 }
 

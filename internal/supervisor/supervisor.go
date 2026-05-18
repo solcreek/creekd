@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -38,6 +40,7 @@ const (
 	StatusCrashed
 	StatusCrashLooping // suspended: too many crashes in a short window
 	StatusStopped      // terminal: removed from registry, will not restart
+	StatusUnhealthy    // running but failing health probes
 )
 
 // String returns the human-readable status name (for logs and admin API).
@@ -53,6 +56,8 @@ func (s Status) String() string {
 		return "crash-looping"
 	case StatusStopped:
 		return "stopped"
+	case StatusUnhealthy:
+		return "unhealthy"
 	default:
 		return "unknown"
 	}
@@ -97,6 +102,17 @@ type App struct {
 	// select on it to know when the app has fully stopped (used by
 	// graceful shutdown for SIGTERM → SIGKILL escalation).
 	done chan struct{}
+
+	// healthFailures is a monotonic counter of failed health probes
+	// across this app's lifetime. Exposed via HealthFailures(). Read
+	// and written via sync/atomic.
+	healthFailures int64
+}
+
+// HealthFailures returns the cumulative count of failed health probes
+// since this App was spawned.
+func (a *App) HealthFailures() int64 {
+	return atomic.LoadInt64(&a.healthFailures)
 }
 
 // PID returns the OS process id, or 0 if the process is not running.
@@ -232,6 +248,61 @@ type Supervisor struct {
 	// the child exits. Set non-zero to ensure tests don't hang when
 	// pipes are inherited.
 	WaitDelay time.Duration
+
+	// Health probe (M5.3b).
+	// HealthCheckInterval is the period between probes. Zero disables
+	// the probe goroutine entirely.
+	HealthCheckInterval time.Duration
+	// HealthCheckTimeout caps each individual probe.
+	HealthCheckTimeout time.Duration
+	// HealthCheckFailureThreshold is the number of consecutive failing
+	// probes required before the supervisor restarts the app. One success
+	// resets the counter.
+	HealthCheckFailureThreshold int
+	// HealthChecker is the probe implementation. Defaults to an HTTP
+	// GET against /health on the app's PORT. Tests override with a mock.
+	HealthChecker HealthChecker
+}
+
+// HealthChecker probes a running supervised app and returns nil if it
+// is healthy. M5.3b uses the result to decide whether to escalate to a
+// process restart.
+type HealthChecker interface {
+	Check(ctx context.Context, app *App) error
+}
+
+// HTTPHealthChecker performs `GET http://127.0.0.1:<port><Path>` and
+// considers the app healthy iff the response status is 2xx.
+type HTTPHealthChecker struct {
+	Path   string
+	Client *http.Client
+}
+
+// Check implements HealthChecker.
+func (h *HTTPHealthChecker) Check(ctx context.Context, app *App) error {
+	path := h.Path
+	if path == "" {
+		path = "/health"
+	}
+	client := h.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.Port, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("health: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // New returns a fresh Supervisor with production defaults.
@@ -240,16 +311,20 @@ func New(logger *slog.Logger) *Supervisor {
 		logger = slog.Default()
 	}
 	return &Supervisor{
-		apps:                    make(map[string]*App),
-		logger:                  logger,
-		InitialBackoff:          1 * time.Second,
-		MaxBackoff:              30 * time.Second,
-		RestartWindow:           60 * time.Second,
-		CrashLoopThreshold:      5,
-		GracefulShutdownTimeout: 30 * time.Second,
-		Stdout:                  os.Stdout,
-		Stderr:                  os.Stderr,
-		WaitDelay:               0,
+		apps:                        make(map[string]*App),
+		logger:                      logger,
+		InitialBackoff:              1 * time.Second,
+		MaxBackoff:                  30 * time.Second,
+		RestartWindow:               60 * time.Second,
+		CrashLoopThreshold:          5,
+		GracefulShutdownTimeout:     30 * time.Second,
+		Stdout:                      os.Stdout,
+		Stderr:                      os.Stderr,
+		WaitDelay:                   0,
+		HealthCheckInterval:         10 * time.Second,
+		HealthCheckTimeout:          2 * time.Second,
+		HealthCheckFailureThreshold: 3,
+		HealthChecker:               &HTTPHealthChecker{},
 	}
 }
 
@@ -301,7 +376,17 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 
 	s.apps[cfg.ID] = app
 	go s.watch(app, cfg.Env)
+	if s.healthEnabled() {
+		go s.probe(app, app.waitDone())
+	}
 	return app, nil
+}
+
+// healthEnabled reports whether the probe goroutine should be started.
+func (s *Supervisor) healthEnabled() bool {
+	return s.HealthCheckInterval > 0 &&
+		s.HealthCheckFailureThreshold > 0 &&
+		s.HealthChecker != nil
 }
 
 // startLocked spawns the OS process. Caller must hold s.mu. Mutates
@@ -468,8 +553,81 @@ func (s *Supervisor) Reset(id string) error {
 	s.mu.Unlock()
 
 	go s.watch(app, nil)
+	if s.healthEnabled() {
+		go s.probe(app, app.waitDone())
+	}
 	s.logger.Info("app reset; resuming", "id", id)
 	return nil
+}
+
+// probe runs the health-check loop for one app. It exits when done is
+// closed (i.e. when the watch goroutine has terminated). On
+// HealthCheckFailureThreshold consecutive failures it SIGKILLs the
+// current process; the existing watch logic observes the exit, records
+// it as a crash, and restarts via the usual backoff path.
+func (s *Supervisor) probe(app *App, done <-chan struct{}) {
+	ticker := time.NewTicker(s.HealthCheckInterval)
+	defer ticker.Stop()
+
+	var failures int
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+
+		// Only probe a running app. Skip while it is starting, crashed,
+		// or in the middle of a restart cycle.
+		if app.Status() != StatusRunning && app.Status() != StatusUnhealthy {
+			failures = 0
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), s.HealthCheckTimeout)
+		err := s.HealthChecker.Check(ctx, app)
+		cancel()
+
+		if err == nil {
+			if failures > 0 {
+				s.logger.Info("app recovered", "id", app.ID, "previous_failures", failures)
+				if app.Status() == StatusUnhealthy {
+					app.setStatus(StatusRunning)
+				}
+			}
+			failures = 0
+			continue
+		}
+
+		failures++
+		atomic.AddInt64(&app.healthFailures, 1)
+		s.logger.Warn("health check failed",
+			"id", app.ID,
+			"attempt", failures,
+			"threshold", s.HealthCheckFailureThreshold,
+			"err", err,
+		)
+
+		if failures < s.HealthCheckFailureThreshold {
+			app.setStatus(StatusUnhealthy)
+			continue
+		}
+
+		s.logger.Error("health check threshold exceeded; killing for restart",
+			"id", app.ID,
+			"failures", failures,
+		)
+		cmd := app.snapshotCmd()
+		if cmd != nil && cmd.Process != nil {
+			if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
+				s.logger.Debug("SIGKILL after unhealthy failed", "id", app.ID, "err", err)
+			}
+		}
+		// Reset the counter; the watch goroutine will handle restart
+		// (and crash-loop bookkeeping). Probe will resume once the new
+		// process reaches StatusRunning.
+		failures = 0
+	}
 }
 
 // Stop gracefully stops the named app: SIGTERM, wait up to
