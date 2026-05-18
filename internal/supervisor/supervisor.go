@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/solcreek/creekd/internal/logs"
 	"github.com/solcreek/creekd/internal/runtime"
 )
 
@@ -119,6 +120,12 @@ type App struct {
 	// across this app's lifetime. Exposed via HealthFailures(). Read
 	// and written via sync/atomic.
 	healthFailures int64
+
+	// rotator captures stdout/stderr to per-app log files when LogDir
+	// is configured. Nil when LogDir is empty (tests use Stdout/Stderr
+	// writers directly). Owned by the App for its full lifetime;
+	// closed during Stop.
+	rotator *logs.Rotator
 }
 
 // HealthFailures returns the cumulative count of failed health probes
@@ -249,10 +256,16 @@ type Supervisor struct {
 	// SIGKILL escalation. Default 30s for production; tests use shorter.
 	GracefulShutdownTimeout time.Duration
 
-	// Stdout / Stderr are inherited by each child process. Production
-	// uses os.Stdout / os.Stderr (M5.6 will replace with per-app log
-	// capture). Tests should set to io.Discard to avoid leaking pipes
-	// into the test process.
+	// LogDir is the root directory for per-app log files (M5.6). When
+	// set, each app's stdout/stderr is captured through a logs.Rotator
+	// at <LogDir>/<appID>/current.log instead of being forwarded
+	// directly to Stdout/Stderr. Stdout/Stderr remain the fallback for
+	// tests and smoke runs that don't want disk capture.
+	LogDir string
+
+	// Stdout / Stderr are the writers each child's stdout/stderr is
+	// forwarded to when LogDir is empty. Production typically sets
+	// LogDir; tests use io.Discard here to avoid leaking pipes.
 	Stdout io.Writer
 	Stderr io.Writer
 
@@ -385,7 +398,18 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		done:    make(chan struct{}),
 	}
 
+	if s.LogDir != "" {
+		rot, err := logs.NewRotator(s.LogDir, cfg.ID, logs.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("supervisor: log rotator: %w", err)
+		}
+		app.rotator = rot
+	}
+
 	if err := s.startLocked(app, cfg.Env); err != nil {
+		if app.rotator != nil {
+			_ = app.rotator.Close()
+		}
 		return nil, err
 	}
 
@@ -440,11 +464,17 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	}
 	cmd.Env = env
 
-	// M5.6 will replace these with structured log capture. For M5.1-M5.2
-	// the supervisor forwards the child's output to its configured
-	// writers (default os.Stdout / os.Stderr; tests use io.Discard).
-	cmd.Stdout = s.Stdout
-	cmd.Stderr = s.Stderr
+	// When the app has a log rotator (LogDir is set), capture
+	// stdout/stderr through it; each line is JSON-wrapped and lands in
+	// <LogDir>/<appID>/current.log. Otherwise forward to the
+	// supervisor's configured writers (default os.Stdout / os.Stderr).
+	if app.rotator != nil {
+		cmd.Stdout = app.rotator.Stdout()
+		cmd.Stderr = app.rotator.Stderr()
+	} else {
+		cmd.Stdout = s.Stdout
+		cmd.Stderr = s.Stderr
+	}
 	cmd.WaitDelay = s.WaitDelay
 
 	if err := cmd.Start(); err != nil {
@@ -464,9 +494,20 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 
 // watch blocks on cmd.Wait() and restarts the process on exit, applying
 // exponential backoff and crash-loop detection. Runs in its own goroutine.
-// Closes app.done when it terminates (for graceful shutdown wait).
+// Closes app.done when it terminates (for graceful shutdown wait). Also
+// closes the log rotator if watch is exiting AND the app is no longer
+// tracked — covering crash-restart-failure paths where watch removes
+// the app from the registry itself (Stop closes the rotator on its own).
 func (s *Supervisor) watch(app *App, extraEnv []string) {
-	defer close(app.done)
+	defer func() {
+		close(app.done)
+		s.mu.RLock()
+		_, tracked := s.apps[app.ID]
+		s.mu.RUnlock()
+		if !tracked && app.rotator != nil {
+			_ = app.rotator.Close() // idempotent
+		}
+	}()
 
 	for {
 		cmd := app.snapshotCmd()
@@ -689,6 +730,17 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 	}
 	delete(s.apps, id)
 	s.mu.Unlock()
+
+	// Close the log rotator after the watch goroutine has finished
+	// draining the child's pipes (signalled by done close). Otherwise
+	// we'd close while io.Copy may still be writing.
+	defer func() {
+		if app.rotator != nil {
+			if err := app.rotator.Close(); err != nil {
+				s.logger.Warn("log rotator close failed", "id", id, "err", err)
+			}
+		}
+	}()
 
 	cmd := app.snapshotCmd()
 	done := app.waitDone()

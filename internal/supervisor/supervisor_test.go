@@ -2,10 +2,15 @@ package supervisor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -1325,6 +1330,173 @@ func TestSpawnRuntimeOnlyModeFailsWhenBinaryMissing(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for nonexistent runtime binary")
+	}
+}
+
+// --- M5.6: log capture wired into supervisor ----------------------------
+
+// readLogRecords reads the per-app log file and returns each JSON line
+// as a generic map. Returns nil if the file is missing or empty.
+func readLogRecords(t *testing.T, logDir, appID string) []map[string]any {
+	t.Helper()
+	path := filepath.Join(logDir, appID, "current.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	out := make([]map[string]any, 0, len(lines))
+	for _, ln := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(ln), &rec); err != nil {
+			t.Fatalf("decode %q: %v", ln, err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+// TestLogCaptureWritesStdoutAndStderr: with LogDir set, a child that
+// emits to both streams produces JSON records in the rotator file
+// tagged with the correct stream value.
+func TestLogCaptureWritesStdoutAndStderr(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.LogDir = t.TempDir()
+
+	// Child prints to stdout and stderr, then exits.
+	_, err := sup.Spawn(Config{
+		ID:      "logger",
+		Command: "sh",
+		Args:    []string{"-c", `echo "hello stdout"; echo "hello stderr" 1>&2`},
+		Port:    9900,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	// Child exits quickly; supervisor will see it as a crash and try to
+	// restart. To get a clean snapshot, Stop it after a brief settle.
+	time.Sleep(200 * time.Millisecond)
+	if err := sup.Stop("logger"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	recs := readLogRecords(t, sup.LogDir, "logger")
+	if len(recs) < 2 {
+		t.Fatalf("want ≥2 records (stdout + stderr), got %d: %+v", len(recs), recs)
+	}
+
+	streams := map[string]string{}
+	for _, r := range recs {
+		stream, _ := r["stream"].(string)
+		msg, _ := r["msg"].(string)
+		// Keep the first message we see per stream — restarts produce
+		// duplicates and we don't care here.
+		if _, ok := streams[stream]; !ok {
+			streams[stream] = msg
+		}
+		if app, _ := r["app"].(string); app != "logger" {
+			t.Errorf("record app=%q, want logger", app)
+		}
+		if _, ok := r["ts"].(string); !ok {
+			t.Errorf("record missing ts: %+v", r)
+		}
+	}
+
+	if streams["stdout"] != "hello stdout" {
+		t.Errorf("stdout msg = %q, want %q", streams["stdout"], "hello stdout")
+	}
+	if streams["stderr"] != "hello stderr" {
+		t.Errorf("stderr msg = %q, want %q", streams["stderr"], "hello stderr")
+	}
+}
+
+// TestLogCaptureDisabledWhenNoLogDir confirms backwards-compat: with
+// LogDir unset, the supervisor still works (forwarding to Stdout /
+// Stderr writers) and creates no log files.
+func TestLogCaptureDisabledWhenNoLogDir(t *testing.T) {
+	sup := newTestSupervisor()
+	// LogDir intentionally empty.
+	tempLogParent := t.TempDir()
+
+	_, err := sup.Spawn(Config{
+		ID:      "no-log",
+		Command: "sleep",
+		Args:    []string{"30"},
+		Port:    9901,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("no-log") })
+
+	// Confirm no log directory was created anywhere on the configured path.
+	if _, err := os.Stat(filepath.Join(tempLogParent, "no-log")); err == nil {
+		t.Errorf("log dir created despite LogDir unset")
+	}
+}
+
+// TestLogCaptureSurvivesRestart: when the child crashes and the
+// supervisor restarts it, log lines from both runs land in the same
+// file. This validates that the rotator is owned by the App across
+// restarts.
+func TestLogCaptureSurvivesRestart(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.LogDir = t.TempDir()
+	// Tight backoff so the restart happens during the test.
+	sup.InitialBackoff = 10 * time.Millisecond
+	sup.MaxBackoff = 20 * time.Millisecond
+	sup.CrashLoopThreshold = 100
+
+	// Each invocation prints a unique line then exits.
+	// Use a counter file so the child can detect run number.
+	counterFile := filepath.Join(t.TempDir(), "counter")
+	script := fmt.Sprintf(`
+		COUNT=$(cat %s 2>/dev/null || echo 0)
+		COUNT=$((COUNT + 1))
+		echo $COUNT > %s
+		echo "run-$COUNT"
+		exit 0
+	`, counterFile, counterFile)
+
+	_, err := sup.Spawn(Config{
+		ID:      "restarter",
+		Command: "sh",
+		Args:    []string{"-c", script},
+		Port:    9902,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+
+	// Wait for at least 2 distinct runs.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		data, _ := os.ReadFile(counterFile)
+		n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		return n >= 2
+	}) {
+		t.Fatalf("supervisor did not produce 2 runs; counter not advancing")
+	}
+
+	if err := sup.Stop("restarter"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	recs := readLogRecords(t, sup.LogDir, "restarter")
+	seen := map[string]bool{}
+	for _, r := range recs {
+		if msg, _ := r["msg"].(string); strings.HasPrefix(msg, "run-") {
+			seen[msg] = true
+		}
+	}
+	if !seen["run-1"] || !seen["run-2"] {
+		t.Errorf("log missing one of the runs; seen=%v records=%d", seen, len(recs))
 	}
 }
 
