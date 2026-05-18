@@ -28,6 +28,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/solcreek/creekd/internal/runtime"
 )
 
 // Status is the lifecycle state of a supervised application.
@@ -65,25 +67,35 @@ func (s Status) String() string {
 
 // Config describes how to spawn a supervised app.
 //
-// M5.4 will add Runtime to select bun / node / deno explicitly; for now
-// the supervisor assumes the Entry command is directly executable
-// (typically "bun some-file.ts").
+// Two ways to specify what to run:
+//
+//   - Explicit Command + Args (low-level escape hatch, used by tests
+//     and any caller that has already resolved the binary).
+//   - Runtime + Entry: the supervisor resolves via runtime.Command to
+//     pick "bun <entry>", "node <entry>", or "deno run -A <entry>".
+//
+// If both are set, Command + Args wins. Args passed alongside an
+// explicit Command are used verbatim; extra Args alongside Runtime +
+// Entry are appended after the entry script.
 type Config struct {
 	ID      string
 	Command string   // executable, e.g. "bun"
 	Args    []string // arguments, e.g. ["server.ts"]
+	Runtime runtime.Runtime // M5.4: "bun" | "node" | "deno"
+	Entry   string   // M5.4: entry script for Runtime resolution
 	Port    int      // assigned dispatch port, passed as PORT env var
 	Env     []string // additional environment variables
 }
 
 // App is one supervised application instance.
 //
-// Exported fields (ID, Command, Args, Port) are immutable after Spawn
-// and safe to read without locking. Mutable runtime state (cmd, status,
-// startedAt, restarts) is guarded by App.mu; access via the accessor
-// methods.
+// Exported fields (ID, Runtime, Command, Args, Port) are immutable
+// after Spawn and safe to read without locking. Mutable runtime state
+// (cmd, status, startedAt, restarts) is guarded by App.mu; access via
+// the accessor methods.
 type App struct {
 	ID      string
+	Runtime runtime.Runtime // empty when Spawn was called with explicit Command
 	Command string
 	Args    []string
 	Port    int
@@ -351,8 +363,10 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("supervisor: empty app id")
 	}
-	if cfg.Command == "" {
-		return nil, errors.New("supervisor: empty command")
+
+	cmd, args, rt, err := resolveExec(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -364,8 +378,9 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 
 	app := &App{
 		ID:      cfg.ID,
-		Command: cfg.Command,
-		Args:    cfg.Args,
+		Runtime: rt,
+		Command: cmd,
+		Args:    args,
 		Port:    cfg.Port,
 		done:    make(chan struct{}),
 	}
@@ -380,6 +395,30 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		go s.probe(app, app.waitDone())
 	}
 	return app, nil
+}
+
+// resolveExec converts Config's two input modes (explicit Command+Args,
+// or Runtime+Entry) into the executable + argv that startLocked needs.
+// Explicit Command wins when both are set. Returns the resolved Runtime
+// (or "" when an explicit Command was used).
+func resolveExec(cfg Config) (string, []string, runtime.Runtime, error) {
+	if cfg.Command != "" {
+		return cfg.Command, cfg.Args, cfg.Runtime, nil
+	}
+	if cfg.Runtime == "" {
+		return "", nil, "", errors.New("supervisor: empty command (set Command or Runtime+Entry)")
+	}
+	if !cfg.Runtime.Valid() {
+		return "", nil, "", fmt.Errorf("supervisor: invalid runtime %q", cfg.Runtime)
+	}
+	if cfg.Entry == "" {
+		return "", nil, "", errors.New("supervisor: empty entry for Runtime mode")
+	}
+	cmd, args, err := runtime.Command(cfg.Runtime, cfg.Entry, cfg.Args)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("supervisor: resolve runtime: %w", err)
+	}
+	return cmd, args, cfg.Runtime, nil
 }
 
 // healthEnabled reports whether the probe goroutine should be started.

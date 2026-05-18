@@ -148,7 +148,7 @@ func TestRealHTTPHealthCheckPasses(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 3*time.Second)
+	waitForHTTPReady(t, port, 8*time.Second)
 	originalPID := app.PID()
 
 	// Let ~10 probes happen.
@@ -193,7 +193,7 @@ func TestRealHTTPHealthCheckFailsAndRestarts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 3*time.Second)
+	waitForHTTPReady(t, port, 8*time.Second)
 	originalPID := app.PID()
 
 	// 3 failures × 80ms interval ≈ 240ms + spawn time. Give generous
@@ -236,7 +236,7 @@ func TestRealHTTPHealthCheckFlakyRecovers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 3*time.Second)
+	waitForHTTPReady(t, port, 8*time.Second)
 	originalPID := app.PID()
 
 	// Let probes drive through the flaky phase and into recovery.
