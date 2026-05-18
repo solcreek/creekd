@@ -1,0 +1,39 @@
+# Build artifacts
+/creekd
+/creekd-*
+/bin/
+/dist/
+
+# Go-specific
+*.test
+*.out
+*.prof
+coverage.out
+coverage.html
+*.cpu
+*.mem
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Dependencies
+vendor/
+
+# Local config
+*.local.yaml
+*.local.toml
+*.local.md
+*.local
+
+# Runtime artifacts
+/var/
+/data/
+*.log
+
+# Generated protobuf (regenerate from .proto)
+# Uncomment if we decide to gitignore generated code; keeping in tree by default
+# *.pb.go
