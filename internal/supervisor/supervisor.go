@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -35,7 +36,8 @@ const (
 	StatusStarting
 	StatusRunning
 	StatusCrashed
-	StatusStopped // terminal: removed from registry, will not restart
+	StatusCrashLooping // suspended: too many crashes in a short window
+	StatusStopped      // terminal: removed from registry, will not restart
 )
 
 // String returns the human-readable status name (for logs and admin API).
@@ -47,6 +49,8 @@ func (s Status) String() string {
 		return "running"
 	case StatusCrashed:
 		return "crashed"
+	case StatusCrashLooping:
+		return "crash-looping"
 	case StatusStopped:
 		return "stopped"
 	default:
@@ -71,7 +75,8 @@ type Config struct {
 //
 // Exported fields (ID, Command, Args, Port) are immutable after Spawn
 // and safe to read without locking. Mutable runtime state (cmd, status,
-// startedAt) is guarded by App.mu; access via the accessor methods.
+// startedAt, restarts) is guarded by App.mu; access via the accessor
+// methods.
 type App struct {
 	ID      string
 	Command string
@@ -82,6 +87,11 @@ type App struct {
 	cmd       *exec.Cmd
 	status    Status
 	startedAt time.Time
+
+	// restarts holds timestamps of recent restarts. Trimmed to entries
+	// within RestartWindow on every record. Used for crash-loop
+	// detection.
+	restarts []time.Time
 }
 
 // PID returns the OS process id, or 0 if the process is not running.
@@ -135,6 +145,42 @@ func (a *App) snapshotCmd() *exec.Cmd {
 	return a.cmd
 }
 
+// RestartCount returns the number of restarts observed within the
+// supervisor's RestartWindow.
+func (a *App) RestartCount() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return len(a.restarts)
+}
+
+// recordRestart appends now to the restart log and trims entries older
+// than window. Returns the resulting count for crash-loop comparison.
+func (a *App) recordRestart(now time.Time, window time.Duration) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.restarts = append(a.restarts, now)
+	cutoff := now.Add(-window)
+	// Trim in place: find first entry not before cutoff.
+	i := 0
+	for ; i < len(a.restarts); i++ {
+		if !a.restarts[i].Before(cutoff) {
+			break
+		}
+	}
+	if i > 0 {
+		a.restarts = a.restarts[i:]
+	}
+	return len(a.restarts)
+}
+
+// clearRestarts wipes the restart log. Used by Reset() to clear
+// crash-loop state.
+func (a *App) clearRestarts() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.restarts = nil
+}
+
 // Supervisor owns the registry of running apps and the goroutines that
 // watch them.
 type Supervisor struct {
@@ -142,22 +188,58 @@ type Supervisor struct {
 	apps   map[string]*App
 	logger *slog.Logger
 
-	// restartDelay is the time waited before re-spawning a crashed app.
-	// M5.1 uses a fixed 100 ms; M5.2 will replace this with exponential
-	// backoff + crash-loop detection.
-	restartDelay time.Duration
+	// Restart policy (M5.2). Tuned for tests via the constructor.
+	InitialBackoff     time.Duration // first restart delay (default 1s)
+	MaxBackoff         time.Duration // cap on backoff doubling (default 30s)
+	RestartWindow      time.Duration // sliding window for crash-loop detection (default 60s)
+	CrashLoopThreshold int           // restarts in window before suspending (default 5)
+
+	// Stdout / Stderr are inherited by each child process. Production
+	// uses os.Stdout / os.Stderr (M5.6 will replace with per-app log
+	// capture). Tests should set to io.Discard to avoid leaking pipes
+	// into the test process.
+	Stdout io.Writer
+	Stderr io.Writer
+
+	// WaitDelay bounds how long exec.Cmd.Wait waits for I/O drain after
+	// the child exits. Set non-zero to ensure tests don't hang when
+	// pipes are inherited.
+	WaitDelay time.Duration
 }
 
-// New returns a fresh Supervisor.
+// New returns a fresh Supervisor with production defaults.
 func New(logger *slog.Logger) *Supervisor {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Supervisor{
-		apps:         make(map[string]*App),
-		logger:       logger,
-		restartDelay: 100 * time.Millisecond,
+		apps:               make(map[string]*App),
+		logger:             logger,
+		InitialBackoff:     1 * time.Second,
+		MaxBackoff:         30 * time.Second,
+		RestartWindow:      60 * time.Second,
+		CrashLoopThreshold: 5,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
+		WaitDelay:          0,
 	}
+}
+
+// computeBackoff returns the delay before the (count+1)-th restart.
+// count is the number of restarts already in this window.
+// Sequence (with default settings): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+func (s *Supervisor) computeBackoff(count int) time.Duration {
+	if count <= 0 {
+		return s.InitialBackoff
+	}
+	d := s.InitialBackoff
+	for i := 0; i < count; i++ {
+		d *= 2
+		if d >= s.MaxBackoff {
+			return s.MaxBackoff
+		}
+	}
+	return d
 }
 
 // Spawn starts a new supervised app. Returns ErrAlreadyRunning if an
@@ -205,11 +287,12 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	}
 	cmd.Env = env
 
-	// M5.6 will replace these with structured log capture. For M5.1 we
-	// forward the child's output to creekd's stdout/stderr so manual
-	// testing works.
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// M5.6 will replace these with structured log capture. For M5.1-M5.2
+	// the supervisor forwards the child's output to its configured
+	// writers (default os.Stdout / os.Stderr; tests use io.Discard).
+	cmd.Stdout = s.Stdout
+	cmd.Stderr = s.Stderr
+	cmd.WaitDelay = s.WaitDelay
 
 	if err := cmd.Start(); err != nil {
 		app.setStatus(StatusCrashed)
@@ -226,8 +309,8 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	return nil
 }
 
-// watch blocks on cmd.Wait() and restarts the process on exit until the
-// app is explicitly Stop'd. Runs in its own goroutine.
+// watch blocks on cmd.Wait() and restarts the process on exit, applying
+// exponential backoff and crash-loop detection. Runs in its own goroutine.
 func (s *Supervisor) watch(app *App, extraEnv []string) {
 	for {
 		cmd := app.snapshotCmd()
@@ -241,11 +324,12 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 			exitCode = cmd.ProcessState.ExitCode()
 		}
 
-		s.mu.Lock()
 		// If Stop() removed this app from the registry while the
 		// process was running, treat exit as terminal.
-		if _, tracked := s.apps[app.ID]; !tracked {
-			s.mu.Unlock()
+		s.mu.RLock()
+		_, tracked := s.apps[app.ID]
+		s.mu.RUnlock()
+		if !tracked {
 			app.setStatus(StatusStopped)
 			s.logger.Info("app exited (stopped)",
 				"id", app.ID,
@@ -255,15 +339,31 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 		}
 
 		app.setStatus(StatusCrashed)
+
+		// Record restart and check for crash-loop.
+		restartCount := app.recordRestart(time.Now(), s.RestartWindow)
+		if restartCount > s.CrashLoopThreshold {
+			app.setStatus(StatusCrashLooping)
+			s.logger.Warn("app entered crash-loop; suspending restart",
+				"id", app.ID,
+				"restarts_in_window", restartCount,
+				"window", s.RestartWindow,
+				"threshold", s.CrashLoopThreshold,
+				"hint", "call Supervisor.Reset(id) to resume",
+			)
+			return
+		}
+
+		backoff := s.computeBackoff(restartCount - 1)
 		s.logger.Info("app exited; restarting",
 			"id", app.ID,
 			"exit_code", exitCode,
 			"err", err,
-			"delay", s.restartDelay,
+			"restart_count", restartCount,
+			"backoff", backoff,
 		)
-		s.mu.Unlock()
 
-		time.Sleep(s.restartDelay)
+		time.Sleep(backoff)
 
 		s.mu.Lock()
 		// Re-check tracking after the delay — Stop() may have raced.
@@ -287,6 +387,35 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 
 		// Loop and Wait() on the new process.
 	}
+}
+
+// Reset clears the crash-loop state for a suspended app and re-spawns
+// it. Returns an error if the app is not registered or not currently
+// crash-looping.
+func (s *Supervisor) Reset(id string) error {
+	s.mu.Lock()
+	app, exists := s.apps[id]
+	if !exists {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor: app %q not found: %w", id, ErrNotFound)
+	}
+	if app.Status() != StatusCrashLooping {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor: app %q not crash-looping (status=%s): %w",
+			id, app.Status(), ErrNotCrashLooping)
+	}
+
+	app.clearRestarts()
+
+	if err := s.startLocked(app, nil); err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("supervisor: reset start failed: %w", err)
+	}
+	s.mu.Unlock()
+
+	go s.watch(app, nil)
+	s.logger.Info("app reset; resuming", "id", id)
+	return nil
 }
 
 // Stop signals the named app to exit and removes it from the registry.
@@ -355,6 +484,7 @@ func (s *Supervisor) Get(id string) *App {
 
 // Errors returned by the supervisor package.
 var (
-	ErrAlreadyRunning = errors.New("app already running")
-	ErrNotFound       = errors.New("app not found")
+	ErrAlreadyRunning  = errors.New("app already running")
+	ErrNotFound        = errors.New("app not found")
+	ErrNotCrashLooping = errors.New("app not in crash-loop state")
 )

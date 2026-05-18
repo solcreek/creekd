@@ -19,6 +19,17 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// newTestSupervisor returns a Supervisor wired for tests: quiet logger,
+// discarded child stdout/stderr to avoid pipe-leak into the test
+// process, and a short WaitDelay so child cleanup is bounded.
+func newTestSupervisor() *Supervisor {
+	sup := New(quietLogger())
+	sup.Stdout = io.Discard
+	sup.Stderr = io.Discard
+	sup.WaitDelay = 500 * time.Millisecond
+	return sup
+}
+
 // eventuallyTrue polls the predicate until it returns true or timeout
 // elapses. Returns true if the condition was met, false on timeout.
 func eventuallyTrue(timeout time.Duration, f func() bool) bool {
@@ -33,7 +44,7 @@ func eventuallyTrue(timeout time.Duration, f func() bool) bool {
 }
 
 func TestSpawnLongRunning(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	app, err := sup.Spawn(Config{
 		ID:      "long-running",
@@ -58,7 +69,7 @@ func TestSpawnLongRunning(t *testing.T) {
 }
 
 func TestSpawnDuplicateRejected(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	_, err := sup.Spawn(Config{ID: "dup", Command: "sleep", Args: []string{"30"}, Port: 9002})
 	if err != nil {
@@ -73,7 +84,7 @@ func TestSpawnDuplicateRejected(t *testing.T) {
 }
 
 func TestSpawnEmptyIDRejected(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	_, err := sup.Spawn(Config{Command: "sleep", Args: []string{"1"}, Port: 9004})
 	if err == nil {
 		t.Fatal("expected error for empty id")
@@ -81,7 +92,7 @@ func TestSpawnEmptyIDRejected(t *testing.T) {
 }
 
 func TestStopRemovesFromRegistry(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	app, err := sup.Spawn(Config{ID: "to-stop", Command: "sleep", Args: []string{"30"}, Port: 9005})
 	if err != nil {
@@ -109,7 +120,7 @@ func TestStopRemovesFromRegistry(t *testing.T) {
 }
 
 func TestStopUnknownIDReturnsError(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	err := sup.Stop("does-not-exist")
 	if err == nil {
 		t.Fatal("expected error stopping unknown app")
@@ -120,7 +131,7 @@ func TestStopUnknownIDReturnsError(t *testing.T) {
 // short-lived process that exits with non-zero code; the supervisor
 // must observe the exit and start a new process.
 func TestCrashTriggersRestart(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	app, err := sup.Spawn(Config{
 		ID:      "crashy",
@@ -155,7 +166,7 @@ func TestCrashTriggersRestart(t *testing.T) {
 //
 // This is the core acceptance criterion for M5.1: process isolation.
 func TestIsolationOneCrashDoesNotAffectOthers(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	apps := make([]*App, 3)
 	for i := 0; i < 3; i++ {
@@ -214,7 +225,7 @@ func TestIsolationOneCrashDoesNotAffectOthers(t *testing.T) {
 }
 
 func TestSpawnEmptyCommandRejected(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	_, err := sup.Spawn(Config{ID: "no-cmd", Port: 9100})
 	if err == nil {
 		t.Fatal("expected error for empty command")
@@ -222,7 +233,7 @@ func TestSpawnEmptyCommandRejected(t *testing.T) {
 }
 
 func TestSpawnInvalidCommandReturnsError(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	_, err := sup.Spawn(Config{
 		ID:      "bad-binary",
 		Command: "/nonexistent/binary-that-does-not-exist",
@@ -237,7 +248,7 @@ func TestSpawnInvalidCommandReturnsError(t *testing.T) {
 }
 
 func TestGetReturnsApp(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	app, err := sup.Spawn(Config{ID: "gettable", Command: "sleep", Args: []string{"30"}, Port: 9102})
 	if err != nil {
 		t.Fatalf("Spawn failed: %v", err)
@@ -254,7 +265,7 @@ func TestGetReturnsApp(t *testing.T) {
 }
 
 func TestGetUnknownReturnsNil(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	if got := sup.Get("missing"); got != nil {
 		t.Errorf("Get on unknown id returned %v, want nil", got)
 	}
@@ -268,7 +279,7 @@ func TestPIDZeroWhenNoProcess(t *testing.T) {
 }
 
 func TestEnvVariablesPassedToChild(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	tmp, err := os.CreateTemp("", "creekd-env-*")
 	if err != nil {
@@ -326,9 +337,11 @@ func TestStatusStringValues(t *testing.T) {
 }
 
 func TestMultipleRestarts(t *testing.T) {
-	sup := New(quietLogger())
-	// Speed up the test by shrinking the restart delay.
-	sup.restartDelay = 20 * time.Millisecond
+	sup := newTestSupervisor()
+	// Tight backoff + disabled crash-loop so we can observe many restarts.
+	sup.InitialBackoff = 10 * time.Millisecond
+	sup.MaxBackoff = 20 * time.Millisecond
+	sup.CrashLoopThreshold = 1000
 
 	app, err := sup.Spawn(Config{
 		ID:      "multi-crash",
@@ -358,7 +371,7 @@ func TestMultipleRestarts(t *testing.T) {
 }
 
 func TestConcurrentSpawnsNoRace(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	var wg sync.WaitGroup
 	const n = 20
@@ -398,7 +411,7 @@ func TestConcurrentSpawnsNoRace(t *testing.T) {
 }
 
 func TestListReturnsSnapshot(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	_, err := sup.Spawn(Config{ID: "snap-1", Command: "sleep", Args: []string{"30"}, Port: 9300})
 	if err != nil {
 		t.Fatalf("Spawn failed: %v", err)
@@ -426,7 +439,7 @@ func TestListReturnsSnapshot(t *testing.T) {
 }
 
 func TestUptimeAdvances(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 	app, err := sup.Spawn(Config{ID: "uptime", Command: "sleep", Args: []string{"30"}, Port: 9400})
 	if err != nil {
 		t.Fatalf("Spawn failed: %v", err)
@@ -445,8 +458,225 @@ func TestUptimeAdvances(t *testing.T) {
 	}
 }
 
+// --- M5.2: restart policy + crash-loop detection -----------------------
+
+func TestComputeBackoffSequence(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 1 * time.Second
+	sup.MaxBackoff = 30 * time.Second
+
+	// Sequence: 1s, 2s, 4s, 8s, 16s, 30s, 30s, 30s, ...
+	want := []time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		16 * time.Second,
+		30 * time.Second,
+		30 * time.Second,
+		30 * time.Second,
+	}
+	for i, w := range want {
+		got := sup.computeBackoff(i)
+		if got != w {
+			t.Errorf("computeBackoff(%d) = %v, want %v", i, got, w)
+		}
+	}
+}
+
+func TestComputeBackoffNegative(t *testing.T) {
+	sup := newTestSupervisor()
+	if got := sup.computeBackoff(-1); got != sup.InitialBackoff {
+		t.Errorf("computeBackoff(-1) = %v, want %v", got, sup.InitialBackoff)
+	}
+}
+
+func TestCrashLoopDetectionTripsThreshold(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 5 * time.Millisecond
+	sup.MaxBackoff = 10 * time.Millisecond
+	sup.RestartWindow = 2 * time.Second
+	sup.CrashLoopThreshold = 3
+
+	app, err := sup.Spawn(Config{
+		ID:      "loopy",
+		Command: "sh",
+		Args:    []string{"-c", "exit 1"},
+		Port:    9500,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("loopy") })
+
+	// App should crash-loop quickly: 3 crashes accepted, 4th triggers
+	// suspension. Total time ~< 1s with millisecond backoff.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusCrashLooping
+	}) {
+		t.Errorf("expected StatusCrashLooping, got %s (restarts=%d)",
+			app.Status(), app.RestartCount())
+	}
+}
+
+func TestCrashLoopHealthyCrashDoesNotTrip(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 5 * time.Millisecond
+	sup.MaxBackoff = 10 * time.Millisecond
+	sup.RestartWindow = 60 * time.Second
+	sup.CrashLoopThreshold = 5
+
+	// Spawn an app that crashes ONCE then runs long.
+	tmp, err := os.CreateTemp("", "creekd-once-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	tmp.Close()
+	t.Cleanup(func() { os.Remove(tmp.Name()) })
+
+	// Script: first run exits 1, subsequent runs sleep 30s.
+	script := fmt.Sprintf(`if [ ! -f %s ]; then touch %s; exit 1; else sleep 30; fi`,
+		tmp.Name()+".marker", tmp.Name()+".marker")
+	t.Cleanup(func() { os.Remove(tmp.Name() + ".marker") })
+
+	app, err := sup.Spawn(Config{
+		ID:      "one-time-crash",
+		Command: "sh",
+		Args:    []string{"-c", script},
+		Port:    9501,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("one-time-crash") })
+
+	// After the second spawn, it should sleep and stay running.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusRunning && app.RestartCount() == 1
+	}) {
+		t.Errorf("expected single restart leading to running; status=%s restarts=%d",
+			app.Status(), app.RestartCount())
+	}
+
+	// Confirm it does NOT enter crash-loop.
+	time.Sleep(200 * time.Millisecond)
+	if app.Status() == StatusCrashLooping {
+		t.Errorf("healthy single crash tripped crash-loop")
+	}
+}
+
+func TestResetClearsCrashLoop(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 5 * time.Millisecond
+	sup.MaxBackoff = 10 * time.Millisecond
+	sup.RestartWindow = 60 * time.Second
+	sup.CrashLoopThreshold = 2
+
+	// Use a marker file so the FIRST 3 invocations crash (tripping the
+	// crash-loop), and subsequent invocations sleep (so Reset succeeds).
+	tmp, err := os.CreateTemp("", "creekd-reset-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	tmp.Close()
+	t.Cleanup(func() { os.Remove(tmp.Name()); os.Remove(tmp.Name() + ".counter") })
+
+	script := fmt.Sprintf(`
+		COUNTER_FILE=%s.counter
+		COUNT=$(cat $COUNTER_FILE 2>/dev/null || echo 0)
+		COUNT=$((COUNT + 1))
+		echo $COUNT > $COUNTER_FILE
+		if [ $COUNT -le 3 ]; then exit 1; fi
+		sleep 30
+	`, tmp.Name())
+
+	app, err := sup.Spawn(Config{
+		ID:      "resettable",
+		Command: "sh",
+		Args:    []string{"-c", script},
+		Port:    9502,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("resettable") })
+
+	// Wait for crash-loop.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusCrashLooping
+	}) {
+		t.Fatalf("expected StatusCrashLooping, got %s", app.Status())
+	}
+
+	// Reset → should succeed and the next spawn sleeps successfully.
+	if err := sup.Reset("resettable"); err != nil {
+		t.Fatalf("Reset failed: %v", err)
+	}
+
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusRunning
+	}) {
+		t.Errorf("after Reset expected StatusRunning, got %s", app.Status())
+	}
+
+	// Restart count was cleared.
+	if rc := app.RestartCount(); rc != 0 {
+		t.Errorf("after Reset expected RestartCount=0, got %d", rc)
+	}
+}
+
+func TestResetUnknownAppReturnsError(t *testing.T) {
+	sup := newTestSupervisor()
+	err := sup.Reset("does-not-exist")
+	if err == nil {
+		t.Fatal("expected error resetting unknown app")
+	}
+}
+
+func TestResetNonCrashLoopingReturnsError(t *testing.T) {
+	sup := newTestSupervisor()
+
+	_, err := sup.Spawn(Config{
+		ID:      "healthy",
+		Command: "sleep",
+		Args:    []string{"30"},
+		Port:    9503,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("healthy") })
+
+	err = sup.Reset("healthy")
+	if err == nil {
+		t.Fatal("expected error resetting a healthy app")
+	}
+}
+
+func TestRecordRestartTrimsOldEntries(t *testing.T) {
+	app := &App{ID: "trim-test"}
+	window := 100 * time.Millisecond
+	base := time.Now()
+
+	// Record entries: 3 within window, then 1 older.
+	app.recordRestart(base, window)
+	app.recordRestart(base.Add(10*time.Millisecond), window)
+	app.recordRestart(base.Add(20*time.Millisecond), window)
+
+	if got := app.RestartCount(); got != 3 {
+		t.Errorf("expected 3 restarts in window, got %d", got)
+	}
+
+	// Now add a record far in the future; old ones should fall out.
+	app.recordRestart(base.Add(200*time.Millisecond), window)
+
+	if got := app.RestartCount(); got != 1 {
+		t.Errorf("expected 1 restart after window slide, got %d", got)
+	}
+}
+
 func TestStopAllShutdownPath(t *testing.T) {
-	sup := New(quietLogger())
+	sup := newTestSupervisor()
 
 	for i := 0; i < 3; i++ {
 		id := []string{"x", "y", "z"}[i]
