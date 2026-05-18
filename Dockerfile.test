@@ -1,0 +1,30 @@
+# Dockerfile.test — Linux test runner for creekd.
+#
+# Used by `make test-linux` to run the full suite (including
+# Linux-only cgroup tests) inside a privileged container, regardless
+# of the host OS. cgroup tests need /sys/fs/cgroup mounted rw and
+# CAP_SYS_ADMIN, which the docker run flags in the Makefile provide.
+
+FROM golang:1.22-bookworm
+
+# Coreutils gives us `head` / `tr` which the OOM test relies on; sleep
+# is in coreutils too. Already part of bookworm-base but keep explicit
+# so the image is reproducible.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# Module cache layer — copy go.mod / go.sum first so dependencies
+# resolve before the rest of the source busts the cache.
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY . .
+
+# Default command runs the full suite with race + a generous timeout.
+# Callers can override (e.g. only the cgroup package).
+ENV GOFLAGS=-buildvcs=false
+CMD ["go", "test", "-race", "-count=1", "-timeout", "300s", "./..."]

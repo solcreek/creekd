@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/logs"
 	"github.com/solcreek/creekd/internal/runtime"
@@ -81,12 +82,19 @@ func (s Status) String() string {
 // Entry are appended after the entry script.
 type Config struct {
 	ID      string
-	Command string   // executable, e.g. "bun"
-	Args    []string // arguments, e.g. ["server.ts"]
+	Command string          // executable, e.g. "bun"
+	Args    []string        // arguments, e.g. ["server.ts"]
 	Runtime runtime.Runtime // M5.4: "bun" | "node" | "deno"
-	Entry   string   // M5.4: entry script for Runtime resolution
-	Port    int      // assigned dispatch port, passed as PORT env var
-	Env     []string // additional environment variables
+	Entry   string          // M5.4: entry script for Runtime resolution
+	Port    int             // assigned dispatch port, passed as PORT env var
+	Env     []string        // additional environment variables
+
+	// CgroupLimits opts into cgroup v2 enforcement (M5.5). When set
+	// AND the supervisor has CgroupParent configured AND the host is
+	// Linux, the child is spawned via CLONE_INTO_CGROUP under a
+	// dedicated sub-cgroup with these limits applied. Nil or a
+	// non-Linux host falls back to standard exec.
+	CgroupLimits *cgroup.Limits
 }
 
 // App is one supervised application instance.
@@ -127,6 +135,15 @@ type App struct {
 	// writers directly). Owned by the App for its full lifetime;
 	// closed during Stop.
 	rotator *logs.Rotator
+
+	// cg is the per-app cgroup, allocated when CgroupLimits is set
+	// and the host supports it. Lives for the App's lifetime; removed
+	// in stopApp after the process exits.
+	cg *cgroup.Cgroup
+	// cgLimits records the limits originally applied, so the same
+	// limits are re-applied across restarts (cgroup is reused, but
+	// kernel may reset some files on certain operations).
+	cgLimits *cgroup.Limits
 }
 
 // HealthFailures returns the cumulative count of failed health probes
@@ -299,6 +316,28 @@ type Supervisor struct {
 	// HealthChecker is the probe implementation. Defaults to an HTTP
 	// GET against /health on the app's PORT. Tests override with a mock.
 	HealthChecker HealthChecker
+
+	// CgroupParent is the cgroup v2 slice name that owns all per-app
+	// sub-cgroups (M5.5). Empty disables cgroup enforcement entirely.
+	// Example: "creekd.slice". Only meaningful on Linux; on other
+	// platforms the cgroup package is a no-op shim.
+	CgroupParent string
+
+	// cgMgr is lazily constructed from CgroupParent on first use.
+	cgMgrOnce sync.Once
+	cgMgr     *cgroup.Manager
+}
+
+// cgroupManager returns the lazily-constructed cgroup manager, or nil
+// when CgroupParent is empty (enforcement disabled).
+func (s *Supervisor) cgroupManager() *cgroup.Manager {
+	if s.CgroupParent == "" {
+		return nil
+	}
+	s.cgMgrOnce.Do(func() {
+		s.cgMgr = cgroup.NewManager(s.CgroupParent)
+	})
+	return s.cgMgr
 }
 
 // HealthChecker probes a running supervised app and returns nil if it
@@ -418,9 +457,34 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		app.rotator = rot
 	}
 
+	if cfg.CgroupLimits != nil {
+		mgr := s.cgroupManager()
+		if mgr == nil {
+			if app.rotator != nil {
+				_ = app.rotator.Close()
+			}
+			return nil, errors.New("supervisor: CgroupLimits set but Supervisor.CgroupParent is empty")
+		}
+		cg, err := mgr.Create(cfg.ID, *cfg.CgroupLimits)
+		if err != nil {
+			if app.rotator != nil {
+				_ = app.rotator.Close()
+			}
+			return nil, fmt.Errorf("supervisor: create cgroup: %w", err)
+		}
+		app.cg = cg
+		// Copy the limits so a later mutation of cfg.CgroupLimits by
+		// the caller does not silently affect restarts.
+		lim := *cfg.CgroupLimits
+		app.cgLimits = &lim
+	}
+
 	if err := s.startLocked(app, cfg.Env); err != nil {
 		if app.rotator != nil {
 			_ = app.rotator.Close()
+		}
+		if app.cg != nil {
+			_ = app.cg.Remove()
 		}
 		return nil, err
 	}
@@ -501,9 +565,31 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	}
 	cmd.WaitDelay = s.WaitDelay
 
+	// M5.5: if this app has a cgroup, spawn the child *inside* it via
+	// CLONE_INTO_CGROUP so enforcement is active from the first
+	// instruction — no race window where the child runs un-capped.
+	// We open the fd here, hand it to the kernel via SysProcAttr,
+	// and close it after Start (the kernel duplicated it during clone3).
+	var cgFD *os.File
+	if app.cg != nil {
+		fd, err := app.cg.OpenFD()
+		if err != nil {
+			app.setStatus(StatusCrashed)
+			return fmt.Errorf("supervisor: open cgroup fd: %w", err)
+		}
+		cgFD = fd
+		attachCgroup(cmd, int(fd.Fd()))
+	}
+
 	if err := cmd.Start(); err != nil {
+		if cgFD != nil {
+			_ = cgFD.Close()
+		}
 		app.setStatus(StatusCrashed)
 		return fmt.Errorf("supervisor: starting %q: %w", app.ID, err)
+	}
+	if cgFD != nil {
+		_ = cgFD.Close()
 	}
 
 	app.setState(cmd, StatusRunning, time.Now())
@@ -769,12 +855,18 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 // down the v1 process after the registry swap.
 func (s *Supervisor) stopApp(app *App, timeout time.Duration) error {
 	// Close the log rotator after the watch goroutine has finished
-	// draining the child's pipes (signalled by done close). Otherwise
-	// we'd close while io.Copy may still be writing.
+	// draining the child's pipes (signalled by done close), then
+	// remove the per-app cgroup directory. Both are best-effort —
+	// failures are logged but don't fail the stop.
 	defer func() {
 		if app.rotator != nil {
 			if err := app.rotator.Close(); err != nil {
 				s.logger.Warn("log rotator close failed", "id", app.ID, "err", err)
+			}
+		}
+		if app.cg != nil {
+			if err := app.cg.Remove(); err != nil {
+				s.logger.Warn("cgroup remove failed", "id", app.ID, "err", err)
 			}
 		}
 	}()

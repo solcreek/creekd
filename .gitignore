@@ -6,6 +6,7 @@
 
 # Go-specific
 *.test
+!Dockerfile.test
 *.out
 *.prof
 coverage.out
