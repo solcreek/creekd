@@ -4,21 +4,34 @@
 // runs as a child process; this binary spawns them, watches their
 // lifecycle, routes HTTP traffic to them, and enforces resource limits.
 //
-// M5.1 wires the supervisor package and exposes a manual smoke-test
-// path via CREEK_SMOKE_TEST=1. The HTTP admin API and gRPC layer come
-// in later sub-tasks.
+// Environment knobs (Phase 1):
+//
+//	CREEKD_ADMIN_ADDR    listen address for the admin HTTP/JSON API
+//	                     (default 127.0.0.1:9080)
+//	CREEKD_ADMIN_TOKEN   bearer token required on admin requests;
+//	                     empty disables auth (only safe for loopback)
+//	CREEKD_DISPATCH_ADDR listen address for the public dispatch proxy
+//	                     (default 127.0.0.1:9000); empty disables it
+//	CREEKD_LOG_DIR       per-app log capture root; empty forwards
+//	                     child stdout/stderr to creekd's own writers
+//	CREEKD_CGROUP_PARENT cgroup v2 slice owning per-app sub-cgroups;
+//	                     empty disables cgroup enforcement
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -51,23 +64,77 @@ func main() {
 
 func run(ctx context.Context, logger *slog.Logger) error {
 	sup := supervisor.New(logger)
-
-	// M5.1 smoke-test path. When CREEK_SMOKE_TEST=1 we spawn a small
-	// fleet of long-running children and demonstrate the supervisor
-	// is working. M5.7 will replace this with the real deploy API.
-	if os.Getenv("CREEK_SMOKE_TEST") == "1" {
-		smokeTest(sup, logger)
+	if v := os.Getenv("CREEKD_LOG_DIR"); v != "" {
+		sup.LogDir = v
+	}
+	if v := os.Getenv("CREEKD_CGROUP_PARENT"); v != "" {
+		sup.CgroupParent = v
 	}
 
-	logger.Info("creekd ready",
-		"apps", len(sup.List()),
-		"note", "HTTP admin API arrives in later sub-tasks",
-	)
+	router := dispatch.NewRouter()
+
+	// Public dispatch listener (data plane).
+	var dispatchSrv *http.Server
+	if addr := envOr("CREEKD_DISPATCH_ADDR", "127.0.0.1:9000"); addr != "" {
+		dispatchSrv = &http.Server{
+			Addr:              addr,
+			Handler:           router,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("dispatch listen %s: %w", addr, err)
+		}
+		go func() {
+			logger.Info("dispatch listening", "addr", ln.Addr().String())
+			if err := dispatchSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("dispatch server error", "err", err)
+			}
+		}()
+	}
+
+	// Admin listener (control plane).
+	adminAddr := envOr("CREEKD_ADMIN_ADDR", "127.0.0.1:9080")
+	adminToken := os.Getenv("CREEKD_ADMIN_TOKEN")
+	if adminToken == "" && !isLoopback(adminAddr) {
+		return fmt.Errorf("admin: refusing to listen on %s without CREEKD_ADMIN_TOKEN", adminAddr)
+	}
+	adminServer := adminapi.New(sup, router, adminToken)
+	adminSrv := &http.Server{
+		Addr:              adminAddr,
+		Handler:           adminServer.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	adminLn, err := net.Listen("tcp", adminAddr)
+	if err != nil {
+		return fmt.Errorf("admin listen %s: %w", adminAddr, err)
+	}
+	go func() {
+		logger.Info("admin api listening",
+			"addr", adminLn.Addr().String(),
+			"auth", adminToken != "",
+		)
+		if err := adminSrv.Serve(adminLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("admin server error", "err", err)
+		}
+	}()
+
+	logger.Info("creekd ready")
 
 	<-ctx.Done()
-	logger.Info("stopping all apps")
-	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	logger.Info("stopping listeners + apps")
+
+	// Drain listeners first so no new admin/data traffic lands while
+	// supervised processes are winding down.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if dispatchSrv != nil {
+		_ = dispatchSrv.Shutdown(shutdownCtx)
+	}
+	_ = adminSrv.Shutdown(shutdownCtx)
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stopCancel()
 	sup.StopAll(stopCtx)
 
 	// Give watch goroutines a moment to observe the stop.
@@ -76,32 +143,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	return nil
 }
 
-// smokeTest spawns a few example apps to exercise the supervisor on
-// manual runs. Useful while M5.2-M5.7 are still under construction and
-// there is no admin API yet.
-func smokeTest(sup *supervisor.Supervisor, logger *slog.Logger) {
-	count := 3
-	if v := os.Getenv("CREEK_SMOKE_COUNT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			count = n
-		}
+// envOr returns os.Getenv(key) or fallback when empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	for i := 0; i < count; i++ {
-		id := fmt.Sprintf("smoke-%d", i)
-		app, err := sup.Spawn(supervisor.Config{
-			ID:      id,
-			Command: "sleep",
-			Args:    []string{"3600"},
-			Port:    9000 + i,
-		})
-		if err != nil {
-			logger.Error("smoke spawn failed", "id", id, "err", err)
-			continue
-		}
-		logger.Info("smoke app up",
-			"id", app.ID,
-			"pid", app.PID(),
-			"port", app.Port,
-		)
+	return fallback
+}
+
+// isLoopback returns true if addr's host portion resolves to a
+// loopback IP. Used to gate unauthenticated admin listeners.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Treat malformed addresses as non-loopback so we err on the
+		// side of demanding a token.
+		return false
 	}
+	if host == "" {
+		// Empty host means "any interface" — not loopback.
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Hostnames: refuse to call them loopback without resolution.
+		// "localhost" is the common case; accept it explicitly.
+		return host == "localhost"
+	}
+	return ip.IsLoopback()
 }
