@@ -2,9 +2,12 @@ package supervisor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -207,6 +210,238 @@ func TestIsolationOneCrashDoesNotAffectOthers(t *testing.T) {
 	if !restarted {
 		t.Errorf("app b not restarted after kill (was %d, now %d)",
 			bPID, apps[1].PID())
+	}
+}
+
+func TestSpawnEmptyCommandRejected(t *testing.T) {
+	sup := New(quietLogger())
+	_, err := sup.Spawn(Config{ID: "no-cmd", Port: 9100})
+	if err == nil {
+		t.Fatal("expected error for empty command")
+	}
+}
+
+func TestSpawnInvalidCommandReturnsError(t *testing.T) {
+	sup := New(quietLogger())
+	_, err := sup.Spawn(Config{
+		ID:      "bad-binary",
+		Command: "/nonexistent/binary-that-does-not-exist",
+		Port:    9101,
+	})
+	if err == nil {
+		t.Fatal("expected error for nonexistent command")
+	}
+	if got := sup.Get("bad-binary"); got != nil {
+		t.Errorf("failed spawn left entry in registry: %v", got)
+	}
+}
+
+func TestGetReturnsApp(t *testing.T) {
+	sup := New(quietLogger())
+	app, err := sup.Spawn(Config{ID: "gettable", Command: "sleep", Args: []string{"30"}, Port: 9102})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("gettable") })
+
+	got := sup.Get("gettable")
+	if got == nil {
+		t.Fatal("Get returned nil for known id")
+	}
+	if got.ID != app.ID {
+		t.Errorf("Get returned wrong app: %v vs %v", got.ID, app.ID)
+	}
+}
+
+func TestGetUnknownReturnsNil(t *testing.T) {
+	sup := New(quietLogger())
+	if got := sup.Get("missing"); got != nil {
+		t.Errorf("Get on unknown id returned %v, want nil", got)
+	}
+}
+
+func TestPIDZeroWhenNoProcess(t *testing.T) {
+	app := &App{ID: "no-process"}
+	if pid := app.PID(); pid != 0 {
+		t.Errorf("PID() on uninitialized app = %d, want 0", pid)
+	}
+}
+
+func TestEnvVariablesPassedToChild(t *testing.T) {
+	sup := New(quietLogger())
+
+	tmp, err := os.CreateTemp("", "creekd-env-*")
+	if err != nil {
+		t.Fatalf("temp file: %v", err)
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	t.Cleanup(func() { os.Remove(tmpPath) })
+
+	// Child writes its env to the temp file then exits cleanly.
+	// We assert PORT and our custom variable land in the child.
+	_, err = sup.Spawn(Config{
+		ID:      "env-check",
+		Command: "sh",
+		Args:    []string{"-c", `printenv > ` + tmpPath + `; sleep 0.5`},
+		Port:    9103,
+		Env:     []string{"CREEK_TEST_KEY=test-value-xyz"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("env-check") })
+
+	// Wait for the child to write the file.
+	if !eventuallyTrue(2*time.Second, func() bool {
+		data, err := os.ReadFile(tmpPath)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(data), "PORT=9103") &&
+			strings.Contains(string(data), "CREEK_TEST_KEY=test-value-xyz")
+	}) {
+		data, _ := os.ReadFile(tmpPath)
+		t.Errorf("env file missing expected vars; got:\n%s", string(data))
+	}
+}
+
+func TestStatusStringValues(t *testing.T) {
+	cases := []struct {
+		s    Status
+		want string
+	}{
+		{StatusUnknown, "unknown"},
+		{StatusStarting, "starting"},
+		{StatusRunning, "running"},
+		{StatusCrashed, "crashed"},
+		{StatusStopped, "stopped"},
+		{Status(99), "unknown"},
+	}
+	for _, c := range cases {
+		if got := c.s.String(); got != c.want {
+			t.Errorf("Status(%d).String() = %q, want %q", c.s, got, c.want)
+		}
+	}
+}
+
+func TestMultipleRestarts(t *testing.T) {
+	sup := New(quietLogger())
+	// Speed up the test by shrinking the restart delay.
+	sup.restartDelay = 20 * time.Millisecond
+
+	app, err := sup.Spawn(Config{
+		ID:      "multi-crash",
+		Command: "sh",
+		Args:    []string{"-c", "exit 1"},
+		Port:    9104,
+	})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("multi-crash") })
+
+	// Collect 4 distinct PIDs over time — proves we restart repeatedly.
+	seen := map[int]bool{}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(seen) < 4 {
+		if pid := app.PID(); pid != 0 {
+			seen[pid] = true
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	if len(seen) < 4 {
+		t.Errorf("expected ≥4 distinct PIDs from multiple restarts, got %d: %v",
+			len(seen), seen)
+	}
+}
+
+func TestConcurrentSpawnsNoRace(t *testing.T) {
+	sup := New(quietLogger())
+
+	var wg sync.WaitGroup
+	const n = 20
+	errs := make(chan error, n)
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := sup.Spawn(Config{
+				ID:      fmt.Sprintf("concurrent-%d", i),
+				Command: "sleep",
+				Args:    []string{"30"},
+				Port:    9200 + i,
+			})
+			if err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent spawn err: %v", err)
+	}
+
+	if got := len(sup.List()); got != n {
+		t.Errorf("expected %d apps after concurrent spawns, got %d", n, got)
+	}
+
+	t.Cleanup(func() {
+		for i := 0; i < n; i++ {
+			_ = sup.Stop(fmt.Sprintf("concurrent-%d", i))
+		}
+	})
+}
+
+func TestListReturnsSnapshot(t *testing.T) {
+	sup := New(quietLogger())
+	_, err := sup.Spawn(Config{ID: "snap-1", Command: "sleep", Args: []string{"30"}, Port: 9300})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("snap-1") })
+
+	list := sup.List()
+	initialLen := len(list)
+
+	_, err = sup.Spawn(Config{ID: "snap-2", Command: "sleep", Args: []string{"30"}, Port: 9301})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("snap-2") })
+
+	if len(list) != initialLen {
+		t.Errorf("List() result mutated after later Spawn; snapshot leak (was %d, now %d)",
+			initialLen, len(list))
+	}
+
+	freshList := sup.List()
+	if len(freshList) != initialLen+1 {
+		t.Errorf("fresh List() did not see new app: %d vs %d", len(freshList), initialLen+1)
+	}
+}
+
+func TestUptimeAdvances(t *testing.T) {
+	sup := New(quietLogger())
+	app, err := sup.Spawn(Config{ID: "uptime", Command: "sleep", Args: []string{"30"}, Port: 9400})
+	if err != nil {
+		t.Fatalf("Spawn failed: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("uptime") })
+
+	u1 := app.Uptime()
+	time.Sleep(50 * time.Millisecond)
+	u2 := app.Uptime()
+
+	if u1 <= 0 {
+		t.Errorf("Uptime immediately after spawn = %v, want > 0", u1)
+	}
+	if u2 <= u1 {
+		t.Errorf("Uptime did not advance: %v then %v", u1, u2)
 	}
 }
 

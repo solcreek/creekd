@@ -69,14 +69,16 @@ type Config struct {
 
 // App is one supervised application instance.
 //
-// Exported fields are safe to read while the app is alive. Internal
-// fields are guarded by the supervisor's mu.
+// Exported fields (ID, Command, Args, Port) are immutable after Spawn
+// and safe to read without locking. Mutable runtime state (cmd, status,
+// startedAt) is guarded by App.mu; access via the accessor methods.
 type App struct {
 	ID      string
 	Command string
 	Args    []string
 	Port    int
 
+	mu        sync.RWMutex
 	cmd       *exec.Cmd
 	status    Status
 	startedAt time.Time
@@ -84,6 +86,8 @@ type App struct {
 
 // PID returns the OS process id, or 0 if the process is not running.
 func (a *App) PID() int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.cmd == nil || a.cmd.Process == nil {
 		return 0
 	}
@@ -91,14 +95,44 @@ func (a *App) PID() int {
 }
 
 // Status returns the current lifecycle state.
-func (a *App) Status() Status { return a.status }
+func (a *App) Status() Status {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.status
+}
 
 // Uptime returns time since the current process started.
 func (a *App) Uptime() time.Duration {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	if a.startedAt.IsZero() {
 		return 0
 	}
 	return time.Since(a.startedAt)
+}
+
+// setState mutates the runtime state under App.mu.
+func (a *App) setState(cmd *exec.Cmd, status Status, startedAt time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cmd = cmd
+	a.status = status
+	a.startedAt = startedAt
+}
+
+// setStatus updates just the status under App.mu.
+func (a *App) setStatus(status Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status = status
+}
+
+// snapshotCmd returns the current exec.Cmd reference under lock so the
+// caller can wait/signal without racing with restarts.
+func (a *App) snapshotCmd() *exec.Cmd {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cmd
 }
 
 // Supervisor owns the registry of running apps and the goroutines that
@@ -159,9 +193,10 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 	return app, nil
 }
 
-// startLocked spawns the OS process. Caller must hold s.mu.
+// startLocked spawns the OS process. Caller must hold s.mu. Mutates
+// app via setState/setStatus which take App.mu internally.
 func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
-	app.status = StatusStarting
+	app.setStatus(StatusStarting)
 
 	cmd := exec.Command(app.Command, app.Args...)
 	env := append(os.Environ(), fmt.Sprintf("PORT=%d", app.Port))
@@ -177,13 +212,11 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
-		app.status = StatusCrashed
+		app.setStatus(StatusCrashed)
 		return fmt.Errorf("supervisor: starting %q: %w", app.ID, err)
 	}
 
-	app.cmd = cmd
-	app.status = StatusRunning
-	app.startedAt = time.Now()
+	app.setState(cmd, StatusRunning, time.Now())
 
 	s.logger.Info("app spawned",
 		"id", app.ID,
@@ -197,18 +230,23 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 // app is explicitly Stop'd. Runs in its own goroutine.
 func (s *Supervisor) watch(app *App, extraEnv []string) {
 	for {
-		err := app.cmd.Wait()
+		cmd := app.snapshotCmd()
+		if cmd == nil {
+			s.logger.Error("watch: cmd snapshot nil; aborting", "id", app.ID)
+			return
+		}
+		err := cmd.Wait()
 		exitCode := -1
-		if app.cmd.ProcessState != nil {
-			exitCode = app.cmd.ProcessState.ExitCode()
+		if cmd.ProcessState != nil {
+			exitCode = cmd.ProcessState.ExitCode()
 		}
 
 		s.mu.Lock()
 		// If Stop() removed this app from the registry while the
 		// process was running, treat exit as terminal.
 		if _, tracked := s.apps[app.ID]; !tracked {
-			app.status = StatusStopped
 			s.mu.Unlock()
+			app.setStatus(StatusStopped)
 			s.logger.Info("app exited (stopped)",
 				"id", app.ID,
 				"exit_code", exitCode,
@@ -216,7 +254,7 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 			return
 		}
 
-		app.status = StatusCrashed
+		app.setStatus(StatusCrashed)
 		s.logger.Info("app exited; restarting",
 			"id", app.ID,
 			"exit_code", exitCode,
@@ -230,8 +268,8 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 		s.mu.Lock()
 		// Re-check tracking after the delay — Stop() may have raced.
 		if _, tracked := s.apps[app.ID]; !tracked {
-			app.status = StatusStopped
 			s.mu.Unlock()
+			app.setStatus(StatusStopped)
 			return
 		}
 
@@ -241,8 +279,8 @@ func (s *Supervisor) watch(app *App, extraEnv []string) {
 				"err", err,
 			)
 			delete(s.apps, app.ID)
-			app.status = StatusStopped
 			s.mu.Unlock()
+			app.setStatus(StatusStopped)
 			return
 		}
 		s.mu.Unlock()
@@ -264,9 +302,9 @@ func (s *Supervisor) Stop(id string) error {
 		return fmt.Errorf("supervisor: app %q not running: %w", id, ErrNotFound)
 	}
 	delete(s.apps, id)
-	cmd := app.cmd
 	s.mu.Unlock()
 
+	cmd := app.snapshotCmd()
 	if cmd != nil && cmd.Process != nil {
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			// Process may already be dead; that's OK.
