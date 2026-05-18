@@ -1,0 +1,58 @@
+package sandbox
+
+import (
+	"errors"
+	"fmt"
+	"os/exec"
+)
+
+// Spec describes the namespace + chroot isolation applied to a child
+// process. The zero value is "no isolation"; each bool flag opts in
+// to one namespace flag at clone time.
+//
+// Chroot, when non-empty, must reference a directory that already
+// contains everything the child needs to exec (binary + libraries +
+// /dev nodes the child opens). The kernel performs the chroot AFTER
+// any namespace flags take effect, so Chroot combined with
+// MountNamespace gives a private filesystem view that cannot leak
+// new mounts back to the host.
+type Spec struct {
+	PIDNamespace   bool
+	UTSNamespace   bool
+	IPCNamespace   bool
+	MountNamespace bool
+
+	Chroot string
+}
+
+// Any reports whether any isolation knob is enabled.
+func (s Spec) Any() bool {
+	return s.PIDNamespace || s.UTSNamespace || s.IPCNamespace || s.MountNamespace || s.Chroot != ""
+}
+
+// ErrUnsupported is returned by Apply on non-Linux hosts when a non-empty
+// Spec is requested. macOS dev builds compile via the shim in
+// sandbox_other.go; runtime use on those hosts surfaces this error
+// instead of silently ignoring requested isolation.
+var ErrUnsupported = errors.New("sandbox: not supported on this platform")
+
+// Apply mutates cmd's SysProcAttr so that Start spawns the child with
+// the namespaces and chroot described by spec. Existing fields on
+// SysProcAttr (e.g. UseCgroupFD set by the cgroup attach helper) are
+// preserved — Apply only ORs in additional flags. Calling Apply with
+// the zero spec is a no-op and never errors.
+//
+// On non-Linux platforms, calling Apply with any flag set returns
+// ErrUnsupported; the cmd is left untouched.
+func Apply(cmd *exec.Cmd, spec Spec) error {
+	if cmd == nil {
+		return errors.New("sandbox: nil cmd")
+	}
+	if !spec.Any() {
+		return nil
+	}
+	if err := platformApply(cmd, spec); err != nil {
+		return fmt.Errorf("sandbox: %w", err)
+	}
+	return nil
+}

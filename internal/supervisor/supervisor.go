@@ -34,6 +34,7 @@ import (
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/logs"
 	"github.com/solcreek/creekd/internal/runtime"
+	"github.com/solcreek/creekd/internal/sandbox"
 )
 
 // Status is the lifecycle state of a supervised application.
@@ -96,6 +97,12 @@ type Config struct {
 	// dedicated sub-cgroup with these limits applied. Nil or a
 	// non-Linux host falls back to standard exec.
 	CgroupLimits *cgroup.Limits
+
+	// Sandbox opts into Linux namespace isolation + optional chroot.
+	// Composes with CgroupLimits in a single clone3: cgroup attach,
+	// CLONE_NEW* flags, and Chroot are applied to the same child.
+	// Nil disables namespace isolation entirely.
+	Sandbox *sandbox.Spec
 }
 
 // App is one supervised application instance.
@@ -145,6 +152,10 @@ type App struct {
 	// limits are re-applied across restarts (cgroup is reused, but
 	// kernel may reset some files on certain operations).
 	cgLimits *cgroup.Limits
+
+	// sandbox stores the namespace/chroot spec to apply on every
+	// (re)start. Nil disables isolation.
+	sandbox *sandbox.Spec
 }
 
 // HealthFailures returns the cumulative count of failed health probes
@@ -449,6 +460,12 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		Port:    cfg.Port,
 		done:    make(chan struct{}),
 	}
+	if cfg.Sandbox != nil {
+		// Defensive copy so a mutation of cfg.Sandbox by the caller
+		// after Spawn does not silently affect restarts.
+		spec := *cfg.Sandbox
+		app.sandbox = &spec
+	}
 
 	if s.LogDir != "" {
 		rot, err := logs.NewRotator(s.LogDir, cfg.ID, logs.Options{})
@@ -565,6 +582,19 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 		cmd.Stderr = s.Stderr
 	}
 	cmd.WaitDelay = s.WaitDelay
+
+	// Apply namespace + chroot isolation (M5.9) BEFORE attaching the
+	// cgroup fd. Both mutate SysProcAttr; sandbox.Apply sets
+	// Cloneflags / Chroot, attachCgroup adds UseCgroupFD / CgroupFD.
+	// Order doesn't affect correctness — they're additive — but doing
+	// sandbox first surfaces an unsupported-platform error early,
+	// before any cgroup fd is opened.
+	if app.sandbox != nil {
+		if err := sandbox.Apply(cmd, *app.sandbox); err != nil {
+			app.setStatus(StatusCrashed)
+			return fmt.Errorf("supervisor: apply sandbox: %w", err)
+		}
+	}
 
 	// M5.5: if this app has a cgroup, spawn the child *inside* it via
 	// CLONE_INTO_CGROUP so enforcement is active from the first
