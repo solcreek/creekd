@@ -608,6 +608,12 @@ func (s *Supervisor) computeBackoff(count int) time.Duration {
 
 // Spawn starts a new supervised app. Returns ErrAlreadyRunning if an
 // app with the same ID is already in the registry.
+//
+// Callers that accept user input — e.g. the admin API handler and
+// the state-file restore path — are responsible for calling
+// ValidateID first. Spawn itself accepts any non-empty ID so that
+// Deploy can use synthetic temp keys (deployTempID) that wouldn't
+// pass the user-facing grammar.
 func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("supervisor: empty app id")

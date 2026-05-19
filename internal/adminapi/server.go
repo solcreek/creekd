@@ -125,8 +125,8 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 		return
 	}
-	if req.ID == "" {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, "id is required")
+	if err := supervisor.ValidateID(req.ID); err != nil {
+		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 		return
 	}
 	if req.Port == 0 {

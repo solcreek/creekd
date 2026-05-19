@@ -197,6 +197,17 @@ func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 	router *dispatch.Router, store *state.Store) int {
 	restored := 0
 	for _, cfg := range store.Apps() {
+		// Defense in depth: reject obviously-malformed IDs from the
+		// state file even though the daemon would never write them
+		// itself. Protects against hand-edited / corrupted state.json
+		// where an attacker-controlled ID could become a cgroup
+		// slice name, log directory, or netns name.
+		if err := supervisor.ValidateID(cfg.ID); err != nil {
+			logger.Error("restore: skipping invalid id",
+				"id", cfg.ID, "err", err,
+			)
+			continue
+		}
 		app, err := sup.Spawn(cfg)
 		if err != nil {
 			logger.Error("restore: spawn failed",

@@ -178,6 +178,32 @@ func TestSpawnValidatesRequired(t *testing.T) {
 	}
 }
 
+func TestSpawnRejectsInvalidID(t *testing.T) {
+	ts := newTestServer(t, "")
+	// Each of these IDs would, if accepted, become a directory name,
+	// cgroup slice element, netns name, and state-file key. The
+	// admin handler must reject before any of those derived names is
+	// produced.
+	invalid := []string{
+		"",            // empty
+		"../etc",      // path traversal
+		"foo/bar",     // path separator
+		"FooBar",      // uppercase
+		"foo bar",     // whitespace
+		"foo_bar",     // underscore (reserved for internal deploy temp keys)
+		"-leading",    // leading hyphen
+		"foo\x00bar",  // null byte
+		"$(rm -rf /)", // shell metachar
+	}
+	for _, id := range invalid {
+		req := SpawnRequest{ID: id, Command: "sleep", Args: []string{"30"}, Port: 9000}
+		status, body := ts.do(t, "POST", "/v1/apps", req, "")
+		if status != http.StatusBadRequest {
+			t.Errorf("id=%q: status = %d, want 400; body=%s", id, status, string(body))
+		}
+	}
+}
+
 func TestSpawnRejectsUnknownFields(t *testing.T) {
 	ts := newTestServer(t, "")
 	// Build raw JSON with a bogus field.
