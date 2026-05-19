@@ -1,0 +1,8 @@
+{
+  "name": "creekd-bun-app-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun server.ts"
+  }
+}
