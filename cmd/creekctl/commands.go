@@ -284,6 +284,7 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
 		runtimeArg = fs.String("runtime", "", "bun|node|deno (with --entry)")
 		port       = fs.Int("port", 0, "dispatch port the app listens on")
+		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		netIso     = fs.Bool("net-isolation", false, "spawn inside a per-app netns")
@@ -308,6 +309,13 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		Limits:       limits,
 		NetIsolation: *netIso,
 		Sandbox:      sf.toAPI(),
+	}
+	if *fromPath != "" {
+		manifest, projectDir, err := loadManifest(*fromPath)
+		if err != nil {
+			return err
+		}
+		applyManifestTo(&req, manifest, projectDir)
 	}
 	app, err := cf.client().Spawn(ctx, req)
 	if err != nil {

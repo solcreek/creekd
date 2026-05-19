@@ -6,7 +6,9 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `creekctl up --from <manifest.json>` reads a manifest written by [`@solcreek/adapter-creekd`](https://github.com/solcreek/adapter-creekd) and seeds the spawn request (runtime, entrypoint, port). CLI flags retain priority — any value the user passes on the command line overrides the corresponding manifest field. Validates manifest version, target, framework, runtime, and port range; rejects malformed JSON with a clear error.
 
 ## [0.1.1] - 2026-05-19
 
