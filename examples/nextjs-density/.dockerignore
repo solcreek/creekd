@@ -1,0 +1,7 @@
+app/node_modules
+app/.next/cache
+**/.git
+**/*.log
+bench/bench
+state/
+bin/

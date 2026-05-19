@@ -1,6 +1,6 @@
 # Examples
 
-Four runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All four self-contained — no shared state between them.
+Five runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
 
 | Example | What it proves | Compares to | Linux required? |
 |---|---|---|---|
@@ -8,6 +8,7 @@ Four runnable recipes that each prove one slice of what creekd is for. Every exa
 | [`sandboxed-eval/`](sandboxed-eval/) | Per-spawn Linux sandbox (chroot + PID/mount/UTS namespaces + hard memory cap + kernel OOM) for cooperative-but-buggy workloads | **docker run** — measured 2.6× faster cold spawn for matched isolation ([COMPARISON.md](sandboxed-eval/COMPARISON.md)) | yes |
 | [`review-apps/`](review-apps/) | Side-by-side preview environments + zero-downtime blue-green redeploy on one host | Heroku Review Apps / Vercel Preview Deployments shape, without their build pipeline | no (degrades on macOS) |
 | [`bun-app/`](bun-app/) | `--runtime bun --entry server.ts` end-to-end: Bun.serve, bun:sqlite, SSE streaming through the dispatch reverse proxy | n/a — this is the runtime-coverage demo | no (needs Bun installed) |
+| [`nextjs-density/`](nextjs-density/) | Idle RAM density: how many Next.js apps fit on one host with `@solcreek/adapter-creekd` | **`docker run`** — measured +13 MB / app docker tax at N=10, 71× faster spawn at N=50 ([COMPARISON.md](nextjs-density/COMPARISON.md)) | no (uses docker for the comparison side; bare side runs anywhere) |
 
 ## How to run any one of them
 
@@ -34,6 +35,7 @@ Two of the examples (`pm2-replacement` and `sandboxed-eval`) carry runnable benc
 ```bash
 cd examples/pm2-replacement && ./up.sh && go run ./bench -n 20
 cd examples/sandboxed-eval  && ./bench/run.sh
+cd examples/nextjs-density  && ./up.sh && go run ./bench -n 10
 ```
 
 The numbers in the comparison docs were measured on a darwin/amd64 host with Docker Desktop. Your absolute numbers will differ; the ratios should be in the same ballpark.

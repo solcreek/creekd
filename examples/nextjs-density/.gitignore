@@ -1,0 +1,8 @@
+app/node_modules/
+app/.next/
+app/.creek-creekd/
+app/next-env.d.ts
+app/*.tsbuildinfo
+bench/bench
+state/
+bin/
