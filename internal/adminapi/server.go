@@ -150,6 +150,7 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		Env:          req.Env,
 		CgroupLimits: req.Limits.toCgroupLimits(),
 		NetIsolation: req.NetIsolation,
+		Sandbox:      req.Sandbox.toSandboxSpec(),
 	}
 
 	app, err := s.sup.Spawn(cfg)
@@ -284,6 +285,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			Env:          req.Env,
 			CgroupLimits: req.Limits.toCgroupLimits(),
 			NetIsolation: req.NetIsolation,
+			Sandbox:      req.Sandbox.toSandboxSpec(),
 		},
 		ReadyTimeout:      msOr(req.ReadyTimeoutMS, 0),
 		PollInterval:      msOr(req.PollIntervalMS, 0),

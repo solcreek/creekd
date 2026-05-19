@@ -5,6 +5,7 @@ import (
 
 	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/runtime"
+	"github.com/solcreek/creekd/internal/sandbox"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -21,6 +22,7 @@ type SpawnRequest struct {
 	Env          []string `json:"env,omitempty"`
 	Limits       *Limits  `json:"limits,omitempty"`
 	NetIsolation bool     `json:"net_isolation,omitempty"`
+	Sandbox      *Sandbox `json:"sandbox,omitempty"`
 }
 
 // RestartRequest is the body of POST /v1/apps/{id}/restart. An empty
@@ -42,6 +44,7 @@ type DeployRequest struct {
 	Env               []string `json:"env,omitempty"`
 	Limits            *Limits  `json:"limits,omitempty"`
 	NetIsolation      bool     `json:"net_isolation,omitempty"`
+	Sandbox           *Sandbox `json:"sandbox,omitempty"`
 	ReadyTimeoutMS    int64    `json:"ready_timeout_ms,omitempty"`
 	PollIntervalMS    int64    `json:"poll_interval_ms,omitempty"`
 	GracefulV1MS      int64    `json:"graceful_v1_ms,omitempty"`
@@ -71,6 +74,42 @@ func (l *Limits) toCgroupLimits() *cgroup.Limits {
 		CPUQuota:  l.CPUQuotaUS,
 		CPUPeriod: l.CPUPeriodUS,
 	}
+}
+
+// Sandbox is the wire-format counterpart of sandbox.Spec. Every
+// field is opt-in (zero value = host-shared, no isolation). UID/GID
+// mapping is not exposed here — callers needing it should construct
+// a request body manually. v0.1.0 CLI surface keeps to the booleans
+// + chroot.
+type Sandbox struct {
+	PIDNamespace   bool   `json:"pid_namespace,omitempty"`
+	UTSNamespace   bool   `json:"uts_namespace,omitempty"`
+	IPCNamespace   bool   `json:"ipc_namespace,omitempty"`
+	MountNamespace bool   `json:"mount_namespace,omitempty"`
+	UserNamespace  bool   `json:"user_namespace,omitempty"`
+	NoNewPrivs     bool   `json:"no_new_privs,omitempty"`
+	Chroot         string `json:"chroot,omitempty"`
+}
+
+// toSandboxSpec returns the supervisor-facing spec, or nil when the
+// API value is nil or has no knob set.
+func (s *Sandbox) toSandboxSpec() *sandbox.Spec {
+	if s == nil {
+		return nil
+	}
+	spec := sandbox.Spec{
+		PIDNamespace:   s.PIDNamespace,
+		UTSNamespace:   s.UTSNamespace,
+		IPCNamespace:   s.IPCNamespace,
+		MountNamespace: s.MountNamespace,
+		UserNamespace:  s.UserNamespace,
+		NoNewPrivs:     s.NoNewPrivs,
+		Chroot:         s.Chroot,
+	}
+	if !spec.Any() {
+		return nil
+	}
+	return &spec
 }
 
 // AppView is the JSON representation of a supervised app — returned

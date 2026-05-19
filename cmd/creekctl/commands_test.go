@@ -164,6 +164,46 @@ func TestLimitsFlagsToAPI(t *testing.T) {
 	})
 }
 
+func TestSandboxFlagsToAPI(t *testing.T) {
+	t.Run("zero is nil", func(t *testing.T) {
+		var sf sandboxFlags
+		if got := sf.toAPI(); got != nil {
+			t.Errorf("zero sandboxFlags should be nil, got %+v", got)
+		}
+	})
+	t.Run("pid only", func(t *testing.T) {
+		sf := sandboxFlags{pid: true}
+		got := sf.toAPI()
+		if got == nil || !got.PIDNamespace {
+			t.Errorf("pid=true should produce PIDNamespace=true, got %+v", got)
+		}
+	})
+	t.Run("chroot only", func(t *testing.T) {
+		sf := sandboxFlags{chroot: "/tmp/jail"}
+		got := sf.toAPI()
+		if got == nil || got.Chroot != "/tmp/jail" {
+			t.Errorf("chroot should propagate, got %+v", got)
+		}
+	})
+	t.Run("full combo", func(t *testing.T) {
+		sf := sandboxFlags{
+			pid: true, uts: true, ipc: true, mount: true, user: true,
+			noNewPrivs: true, chroot: "/jail",
+		}
+		got := sf.toAPI()
+		if got == nil {
+			t.Fatal("got nil")
+		}
+		if !(got.PIDNamespace && got.UTSNamespace && got.IPCNamespace &&
+			got.MountNamespace && got.UserNamespace && got.NoNewPrivs) {
+			t.Errorf("missing boolean: %+v", got)
+		}
+		if got.Chroot != "/jail" {
+			t.Errorf("chroot = %q, want /jail", got.Chroot)
+		}
+	})
+}
+
 func TestStringSliceFlagAccumulates(t *testing.T) {
 	var s stringSliceFlag
 	_ = s.Set("a")

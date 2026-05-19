@@ -116,6 +116,44 @@ func (lf *limitsFlags) toAPI() (*adminapi.Limits, error) {
 	}, nil
 }
 
+// sandboxFlags registers the namespace / chroot / NoNewPrivs flags
+// shared by `up` and `deploy`. Every knob is opt-in; the resulting
+// API object is nil unless at least one is set.
+type sandboxFlags struct {
+	pid        bool
+	uts        bool
+	ipc        bool
+	mount      bool
+	user       bool
+	noNewPrivs bool
+	chroot     string
+}
+
+func (sf *sandboxFlags) register(fs *flag.FlagSet) {
+	fs.BoolVar(&sf.pid, "pid-namespace", false, "isolate PIDs (child sees itself as pid 1)")
+	fs.BoolVar(&sf.uts, "uts-namespace", false, "isolate hostname/domainname")
+	fs.BoolVar(&sf.ipc, "ipc-namespace", false, "isolate sysv IPC / posix MQ")
+	fs.BoolVar(&sf.mount, "mount-namespace", false, "isolate mounts (compose with --chroot)")
+	fs.BoolVar(&sf.user, "user-namespace", false, "isolate UIDs/GIDs (no mapping = root-in-ns maps to current real uid)")
+	fs.BoolVar(&sf.noNewPrivs, "no-new-privs", false, "set PR_SET_NO_NEW_PRIVS via setpriv wrapper (sticky for life)")
+	fs.StringVar(&sf.chroot, "chroot", "", "chroot the child into this directory (path must be absolute)")
+}
+
+func (sf *sandboxFlags) toAPI() *adminapi.Sandbox {
+	if !sf.pid && !sf.uts && !sf.ipc && !sf.mount && !sf.user && !sf.noNewPrivs && sf.chroot == "" {
+		return nil
+	}
+	return &adminapi.Sandbox{
+		PIDNamespace:   sf.pid,
+		UTSNamespace:   sf.uts,
+		IPCNamespace:   sf.ipc,
+		MountNamespace: sf.mount,
+		UserNamespace:  sf.user,
+		NoNewPrivs:     sf.noNewPrivs,
+		Chroot:         sf.chroot,
+	}
+}
+
 // parseSize parses a human-friendly byte count: a bare integer
 // (bytes) or an integer followed by K/M/G/T (binary, *1024). The
 // optional "i"/"iB"/"B" suffix is accepted and ignored — "256M",
@@ -239,6 +277,8 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 	cf.register(fs)
 	var lf limitsFlags
 	lf.register(fs)
+	var sf sandboxFlags
+	sf.register(fs)
 	var (
 		command    = fs.String("command", "", "executable to run (explicit mode)")
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
@@ -267,6 +307,7 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		Port:         *port,
 		Limits:       limits,
 		NetIsolation: *netIso,
+		Sandbox:      sf.toAPI(),
 	}
 	app, err := cf.client().Spawn(ctx, req)
 	if err != nil {
@@ -357,6 +398,8 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	cf.register(fs)
 	var lf limitsFlags
 	lf.register(fs)
+	var sf sandboxFlags
+	sf.register(fs)
 	var (
 		command    = fs.String("command", "", "executable to run (explicit mode)")
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
@@ -386,6 +429,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		Limits:         limits,
 		ReadyTimeoutMS: *readyMS,
 		NetIsolation:   *netIso,
+		Sandbox:        sf.toAPI(),
 	}
 	app, err := cf.client().Deploy(ctx, id, req)
 	if err != nil {
