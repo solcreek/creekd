@@ -34,6 +34,15 @@ test-cover:
 bench:
 	$(GO) test -bench=. -benchmem -run=^$$ -benchtime=3s -short ./...
 
+# bench-smoke runs every Benchmark* exactly once — proves they
+# compile and execute end-to-end but does not produce statistically
+# meaningful numbers. Used by CI where the 7 GB ubuntu-latest runner
+# OOMs trying to hold 3s worth of spawned child processes across
+# every bench. Local devs should use `make bench` instead.
+.PHONY: bench-smoke
+bench-smoke:
+	$(GO) test -bench=. -benchmem -run=^$$ -benchtime=1x -short ./...
+
 # bench-cpu drops a cpu.pprof next to each bench package so you can
 # `go tool pprof -top cpu.pprof` to find hot paths.
 .PHONY: bench-cpu

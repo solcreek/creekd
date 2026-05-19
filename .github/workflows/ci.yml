@@ -53,7 +53,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: make bench
+      - name: make bench-smoke
         # Smoke-only: ensures every Benchmark* still compiles and
-        # produces output. No numeric assertion — runner CPU is noisy.
-        run: make bench
+        # produces output. -benchtime=1x runs each Benchmark exactly
+        # once so the runner doesn't OOM holding 3s worth of spawned
+        # child processes per bench.
+        run: make bench-smoke
