@@ -1,18 +1,39 @@
 // Package supervisor manages the lifecycle of child application
 // processes.
 //
-// M5.1 — child-process spawn + basic supervision
+// Each app is spawned as a direct child of the supervisor (no
+// container daemon, no init shim). A per-app watch goroutine drives
+// the lifecycle: it observes the child via cmd.Wait(), records exit,
+// applies the restart policy (exponential backoff + crash-loop
+// detection inside RestartWindow), and re-spawns. Stop() removes the
+// app from the registry so its watcher won't restart it; StopAll()
+// drains every supervised process during graceful shutdown.
 //
-// Each app is spawned as an isolated child process. A goroutine watches
-// each child via cmd.Wait(); on exit the supervisor logs the reason and
-// performs a naive immediate restart (after a 100 ms delay to avoid
-// tight loops). Stop() removes the app from the registry, so its watch
-// goroutine will not restart it.
+// Beyond bare spawning the package owns:
 //
-// Restart policy hardening (exponential backoff, crash-loop detection)
-// is M5.2. Health probing and graceful shutdown drain are M5.3.
-// Multi-runtime dispatch is M5.4. This package contains only what M5.1
-// promises.
+//   - Multi-runtime resolution (Bun / Node / Deno entry → exec via
+//     internal/runtime) alongside the explicit Command + Args mode.
+//   - Health probing through a pluggable HealthChecker, with
+//     consecutive-failure → SIGKILL → restart escalation gated by
+//     HealthCheckFailureThreshold.
+//   - Blue-green Deploy: spawn v2 under a synthetic temp registry
+//     key, await healthy, atomically swap the canonical key and the
+//     dispatch route, then drain v1.
+//   - cgroup v2 limits via internal/cgroup (memory + swap=0, pids,
+//     cpu.max) attached via CLONE_INTO_CGROUP at clone3 time.
+//   - Linux sandbox composition (PID / UTS / IPC / mount / user
+//     namespaces, chroot, NoNewPrivs via setpriv wrap) via
+//     internal/sandbox.
+//   - Per-app network namespace + veth + bridge + masquerade via
+//     internal/network. NetIP propagates to dispatch routing and
+//     health probes for net-isolated apps.
+//   - Per-app log capture and rotation via internal/logs.
+//
+// The package is intentionally a single file rather than carved
+// into health/deploy/network sub-packages; the abstractions don't
+// pay for themselves yet and the lifecycle is the natural unit. The
+// public API surface (Spawn, Stop, Restart, Reset, Deploy, Get) is
+// small even though the implementation isn't.
 package supervisor
 
 import (

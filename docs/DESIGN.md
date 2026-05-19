@@ -44,7 +44,7 @@ Rust was the obvious alternative. We chose Go for development velocity; the supe
 Two listeners, two purposes:
 
 - **Admin (control plane):** HTTP/JSON, bearer-auth'd, defaults to loopback. `creekctl` and operator tooling talk here. Operations: spawn, stop, deploy, ps, logs, stats, restart, reset. Idempotent where it can be.
-- **Dispatch (data plane):** Public HTTP. Routes incoming requests to the right app by hostname or `X-Creek-App` header. Reverse-proxy in Go's `net/http/httputil` — no extra dependency.
+- **Dispatch (data plane):** Public HTTP. Routes incoming requests to the right app by the `X-Creek-App` header (or `?app=<id>` query fallback for tooling that can't set headers). Reverse-proxy in Go's `net/http/httputil` — no extra dependency. Hostname-style routing (`Host: pr-123.example.com` → app `pr-123`) is not built in; put Caddy / nginx / Cloudflare in front and have it copy the relevant `Host` substring into `X-Creek-App` before forwarding.
 
 The split exists because the two have very different threat models. Admin is a high-privilege surface that should never face the public internet; dispatch is a high-volume surface that should never trust its caller. Putting them on one listener with path-based gating ("`/admin/*` is privileged") collapses both into one auth boundary, and it's exactly the kind of thing that ends up CVE'd.
 
