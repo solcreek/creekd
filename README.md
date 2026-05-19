@@ -39,22 +39,32 @@ See [`examples/`](examples/) for three runnable recipes: pm2 replacement, sandbo
 - **You need multi-host scheduling.** One host per `creekd`; no clustering.
 - **You're running hostile multi-tenant workloads.** Phase 1 sandbox (cgroup + namespaces + chroot + NoNewPrivs) is meaningful but not full — seccomp and capability drop land in Phase 2.
 
-## Quickstart
+## Install
 
-Requires Go 1.22+. Linux for full feature set; macOS for dev (cgroup / namespace features self-skip).
+Released binaries for linux + darwin × amd64 + arm64:
 
 ```bash
-# Build both binaries.
+curl -fsSL https://raw.githubusercontent.com/solcreek/creekd/main/install.sh | sh
+```
+
+Or build from source — requires Go 1.22+, Linux for the full feature set, macOS for dev (cgroup / namespace paths self-skip):
+
+```bash
 go build -o bin/creekd  ./cmd/creekd
 go build -o bin/creekctl ./cmd/creekctl
+```
 
+## Quickstart
+
+```bash
 # Run the daemon (loopback only, no auth — dev mode).
-./bin/creekd &
+creekd &
 
 # In another shell: spawn an app.
-./bin/creekctl up hello \
+creekctl up hello \
     --command /bin/sh \
-    --args "-c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: 5\\r\\n\\r\\nhello\" | nc -l -p 18000 -q 1; done'" \
+    --arg -c \
+    --arg 'while true; do printf "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 18000 -q 1; done' \
     --port 18000
 
 # Route to it via the dispatch listener.
@@ -62,8 +72,8 @@ curl -H 'X-Creek-App: hello' http://127.0.0.1:9000/
 # => hello
 
 # Inspect, then stop.
-./bin/creekctl ps
-./bin/creekctl rm hello
+creekctl ps
+creekctl rm hello
 ```
 
 For real apps see [`docs/CONFIG.md`](docs/CONFIG.md) and the runtime profiles in [`internal/runtime/`](internal/runtime).
