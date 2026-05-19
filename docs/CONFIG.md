@@ -1,0 +1,90 @@
+# Configuration
+
+`creekd` is configured entirely through environment variables — no config file. Each variable is independent; unset variables fall back to the documented default.
+
+## Listeners
+
+### `CREEKD_ADMIN_ADDR`
+
+Listen address for the admin HTTP/JSON API (control plane).
+
+- **Default**: `127.0.0.1:9080`
+- **Format**: `host:port`
+
+This is the API that `creekctl` and any operator tooling talks to. Operations include spawn, stop, deploy, restart, logs, and stats.
+
+### `CREEKD_ADMIN_TOKEN`
+
+Bearer token required on every admin request.
+
+- **Default**: empty (no auth)
+- **Hard requirement** when the admin listener is bound to a non-loopback address. If the listener is not loopback and the token is empty, creekd refuses to start.
+
+Clients send the token in the `Authorization: Bearer <token>` header.
+
+### `CREEKD_DISPATCH_ADDR`
+
+Listen address for the public dispatch proxy (data plane). This is where end-user HTTP traffic arrives; the router forwards each request to the right app process based on a hostname / route key.
+
+- **Default**: `127.0.0.1:9000`
+- **Format**: `host:port`
+- **Empty** (`CREEKD_DISPATCH_ADDR=`) disables the dispatch listener. Useful for admin-only deployments.
+
+## App runtime
+
+### `CREEKD_LOG_DIR`
+
+Per-app log capture root. When set, each app's stdout / stderr is captured to `<dir>/<app-id>/` with size-based rotation. When unset, child output is forwarded to creekd's own stdout / stderr (test / dev mode).
+
+- **Default**: empty
+- **Recommended in production**: yes — without it there is no log retention.
+
+### `CREEKD_CGROUP_PARENT`
+
+Name of the cgroup v2 slice that owns per-app sub-cgroups. Required for any per-app resource enforcement (memory, pids, cpu).
+
+- **Default**: empty
+- **Example**: `creekd.slice`
+- **Requires**: Linux, cgroup v2, and creekd running with permission to write under the parent slice (typically root, or `Delegate=yes` in a systemd unit).
+- **Empty** disables cgroup enforcement — apps run with the same limits as creekd itself.
+
+### `CREEKD_STATE_DIR`
+
+Directory holding `state.json`, the persisted set of declared apps.
+
+- **Default**: empty (no persistence — apps vanish when creekd restarts)
+- **When set**: creekd loads `<dir>/state.json` at startup and replays every recorded app through `Spawn` before opening listeners. Spawn / deploy / stop operations write through to the file atomically.
+- **Semantics**: declarations persist, processes do not. After a creekd restart the supervisor re-spawns fresh processes from the saved configs.
+
+## Operations
+
+### `CREEKD_DEBUG_PPROF`
+
+Mounts `/debug/pprof/*` on the admin listener.
+
+- **Default**: unset (off)
+- **Set to `1`** to enable.
+- **Auth**: the same `CREEKD_ADMIN_TOKEN` gates the pprof endpoints.
+
+Useful for live CPU / heap / goroutine profiling. Off by default because exposing pprof on production listeners is a known DoS / info-disclosure surface.
+
+## Example: production-ish
+
+```bash
+export CREEKD_ADMIN_ADDR=0.0.0.0:9080
+export CREEKD_ADMIN_TOKEN="$(openssl rand -hex 32)"
+export CREEKD_DISPATCH_ADDR=0.0.0.0:80
+export CREEKD_LOG_DIR=/var/lib/creekd/logs
+export CREEKD_CGROUP_PARENT=creekd.slice
+export CREEKD_STATE_DIR=/var/lib/creekd
+creekd
+```
+
+## Example: local dev
+
+```bash
+# Loopback-only admin without a token; in-process logs; no cgroup.
+creekd
+```
+
+This is equivalent to all defaults: admin on `127.0.0.1:9080`, dispatch on `127.0.0.1:9000`, no log files, no cgroup enforcement, no persistence.
