@@ -33,9 +33,20 @@ type Spec struct {
 	MountNamespace bool
 	UserNamespace  bool
 
-	UIDMappings     []IDMap
-	GIDMappings     []IDMap
-	AllowSetgroups  bool
+	UIDMappings    []IDMap
+	GIDMappings    []IDMap
+	AllowSetgroups bool
+
+	// NoNewPrivs sets PR_SET_NO_NEW_PRIVS on the child via prctl
+	// during clone. Once enabled the process cannot acquire new
+	// privileges across exec — setuid / setgid bits are ignored,
+	// file capabilities are stripped, and the syscall is sticky
+	// (cannot be unset for the lifetime of the process tree).
+	// Cheap, high-leverage hardening that pairs well with the user
+	// namespace: even if an attacker pivots through a misconfigured
+	// suid binary inside the chroot, they cannot gain real-uid
+	// privileges outside the sandbox.
+	NoNewPrivs bool
 
 	Chroot string
 }
@@ -53,7 +64,8 @@ type IDMap struct {
 // Any reports whether any isolation knob is enabled.
 func (s Spec) Any() bool {
 	return s.PIDNamespace || s.UTSNamespace || s.IPCNamespace ||
-		s.MountNamespace || s.UserNamespace || s.Chroot != ""
+		s.MountNamespace || s.UserNamespace || s.NoNewPrivs ||
+		s.Chroot != ""
 }
 
 // ErrUnsupported is returned by Apply on non-Linux hosts when a non-empty

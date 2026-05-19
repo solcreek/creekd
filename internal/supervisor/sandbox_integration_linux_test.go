@@ -112,6 +112,71 @@ func TestSupervisorSandboxComposesWithCgroup(t *testing.T) {
 	}
 }
 
+// TestSupervisorSandboxNoNewPrivs spawns a child with
+// Sandbox.NoNewPrivs=true and reads /proc/<pid>/status to confirm
+// the kernel marked PR_SET_NO_NEW_PRIVS active. The supervisor wraps
+// the spawn with `setpriv --no-new-privs --` (from util-linux); the
+// inner binary then exec's with the no-new-privs bit sticky for life.
+func TestSupervisorSandboxNoNewPrivs(t *testing.T) {
+	requirePrivilegedCgroupSup(t)
+
+	if _, err := exec.LookPath("setpriv"); err != nil {
+		t.Skipf("setpriv not installed: %v", err)
+	}
+
+	sup := newTestSupervisor()
+	_, err := sup.Spawn(Config{
+		ID:      "nnp",
+		Command: "/bin/sleep",
+		Args:    []string{"30"},
+		Port:    19700,
+		Sandbox: &sandbox.Spec{NoNewPrivs: true},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("nnp") })
+
+	// Poll the status file — setpriv → exec is async after Start.
+	pid := sup.Get("nnp").PID()
+	if pid == 0 {
+		t.Fatal("no PID")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+		if err == nil && containsNoNewPrivs1(string(data)) {
+			return // success
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	t.Errorf("PR_SET_NO_NEW_PRIVS not set; /proc/%d/status:\n%s",
+		pid, headLines(string(data), 20))
+}
+
+// containsNoNewPrivs1 returns true when /proc/<pid>/status contains
+// "NoNewPrivs:\t1" — the exact wording the kernel emits.
+func containsNoNewPrivs1(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(line, "NoNewPrivs:") && strings.Contains(line, "1") {
+			return true
+		}
+	}
+	return false
+}
+
+// headLines returns the first n lines of s — keeps the test
+// failure message readable when /proc/<pid>/status is dumped.
+func headLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
+}
+
 // TestSupervisorSandboxChrootEndToEnd: build a minimal rootfs with a
 // busybox-static copy at /bin/sh (so argv[0]="/bin/sh" dispatches the
 // shell applet) and spawn a child via Supervisor. The child writes

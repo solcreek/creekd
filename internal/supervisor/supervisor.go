@@ -751,14 +751,22 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 
 	cmd := exec.Command(app.Command, app.Args...)
 
-	// When the app has a pre-configured netns, wrap the command in
-	// `ip netns exec <ns> <orig command> <orig args...>`. iproute2's
-	// `ip netns exec` setns()'s into the target namespace and then
-	// exec()s the inner command, replacing itself — the PID we
-	// observe is the real child, not the `ip` wrapper.
+	// Wrap the cmd from the inside out:
+	//   1. setpriv --no-new-privs (if Spec.NoNewPrivs) — the
+	//      innermost wrapper applies prctl(PR_SET_NO_NEW_PRIVS, 1)
+	//      then exec's the real binary
+	//   2. ip netns exec (if Sandbox.NetNamespace via setupAppNetwork
+	//      wired app.netNS) — setns into the configured network
+	//      namespace, then exec's the rest of the chain
+	// iproute2's `ip` and util-linux's `setpriv` both replace
+	// themselves with exec, so cmd.Process.Pid is the leaf binary
+	// throughout.
+	if app.sandbox != nil && app.sandbox.NoNewPrivs {
+		cmd = sandbox.WrapNoNewPrivs(cmd)
+	}
 	if app.netNS != nil {
 		origPath := cmd.Path
-		origArgs := cmd.Args // includes argv[0] convention
+		origArgs := cmd.Args
 		cmd = exec.Command("ip", append([]string{
 			"netns", "exec", app.netNS.Name, origPath,
 		}, origArgs[1:]...)...)
