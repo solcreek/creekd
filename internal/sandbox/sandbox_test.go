@@ -17,10 +17,12 @@ func TestSpecAny(t *testing.T) {
 		{"ipc", Spec{IPCNamespace: true}, true},
 		{"mount", Spec{MountNamespace: true}, true},
 		{"chroot", Spec{Chroot: "/tmp/x"}, true},
+		{"user", Spec{UserNamespace: true}, true},
 		{"all", Spec{
 			PIDNamespace: true, UTSNamespace: true,
 			IPCNamespace: true, MountNamespace: true,
-			Chroot: "/tmp/y",
+			UserNamespace: true,
+			Chroot:        "/tmp/y",
 		}, true},
 	}
 	for _, c := range cases {

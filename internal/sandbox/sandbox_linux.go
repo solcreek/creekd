@@ -27,10 +27,33 @@ func platformApply(cmd *exec.Cmd, spec Spec) error {
 	if spec.MountNamespace {
 		cf |= syscall.CLONE_NEWNS
 	}
+	if spec.UserNamespace {
+		cf |= syscall.CLONE_NEWUSER
+		cmd.SysProcAttr.UidMappings = toSysIDMap(spec.UIDMappings)
+		cmd.SysProcAttr.GidMappings = toSysIDMap(spec.GIDMappings)
+		cmd.SysProcAttr.GidMappingsEnableSetgroups = spec.AllowSetgroups
+	}
 	cmd.SysProcAttr.Cloneflags |= cf
 
 	if spec.Chroot != "" {
 		cmd.SysProcAttr.Chroot = spec.Chroot
 	}
 	return nil
+}
+
+// toSysIDMap converts the public IDMap slice into the syscall-level
+// representation Go's exec.Cmd expects.
+func toSysIDMap(in []IDMap) []syscall.SysProcIDMap {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]syscall.SysProcIDMap, len(in))
+	for i, m := range in {
+		out[i] = syscall.SysProcIDMap{
+			ContainerID: m.ContainerID,
+			HostID:      m.HostID,
+			Size:        m.Size,
+		}
+	}
+	return out
 }

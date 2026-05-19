@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -128,6 +129,99 @@ func TestApplyChrootConfinesChild(t *testing.T) {
 	}
 	if strings.TrimSpace(string(got)) != "hello" {
 		t.Errorf("marker = %q, want %q (child not confined to chroot)", string(got), "hello")
+	}
+}
+
+// TestApplyUserNamespaceSetsFlagAndMappings checks that Apply wires
+// the user-namespace flag + UID/GID maps onto the underlying
+// SysProcAttr. We don't spawn here — the round-trip from a
+// successful spawn is covered by TestApplyUserNamespaceProcUIDMap.
+func TestApplyUserNamespaceSetsFlagAndMappings(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	spec := Spec{
+		UserNamespace: true,
+		UIDMappings:   []IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+		GIDMappings:   []IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+	}
+	if err := Apply(cmd, spec); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if cmd.SysProcAttr.Cloneflags&syscall.CLONE_NEWUSER == 0 {
+		t.Errorf("Cloneflags missing CLONE_NEWUSER: %#x", cmd.SysProcAttr.Cloneflags)
+	}
+	if len(cmd.SysProcAttr.UidMappings) != 1 {
+		t.Fatalf("UidMappings = %v, want 1 entry", cmd.SysProcAttr.UidMappings)
+	}
+	got := cmd.SysProcAttr.UidMappings[0]
+	if got.ContainerID != 0 || got.HostID != 100000 || got.Size != 65536 {
+		t.Errorf("UidMappings[0] = %+v, want {0, 100000, 65536}", got)
+	}
+	if cmd.SysProcAttr.GidMappingsEnableSetgroups {
+		t.Errorf("AllowSetgroups default should be false (kernel writes 'deny')")
+	}
+}
+
+// TestApplyUserNamespaceProcUIDMap actually spawns a child inside a
+// user namespace and inspects /proc/<pid>/uid_map from the host to
+// verify the kernel applied the requested mapping. Uses a 1:1 root
+// mapping so the spawn works without subuid configuration.
+func TestApplyUserNamespaceProcUIDMap(t *testing.T) {
+	requireNamespacePrivilege(t)
+
+	cmd := exec.Command("/bin/sleep", "30")
+	spec := Spec{
+		UserNamespace: true,
+		// Map root inside ↔ root outside. The container is already
+		// privileged, so this is a no-op mapping but exercises every
+		// kernel codepath.
+		UIDMappings: []IDMap{{ContainerID: 0, HostID: 0, Size: 1}},
+		GIDMappings: []IDMap{{ContainerID: 0, HostID: 0, Size: 1}},
+	}
+	if err := Apply(cmd, spec); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v output=%s", err, exitErrStderr(err))
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	pid := cmd.Process.Pid
+
+	// /proc/<pid>/ns/user must be a different namespace than ours.
+	childNS, err := os.Readlink(fmt.Sprintf("/proc/%d/ns/user", pid))
+	if err != nil {
+		t.Fatalf("readlink child ns/user: %v", err)
+	}
+	selfNS, err := os.Readlink("/proc/self/ns/user")
+	if err != nil {
+		t.Fatalf("readlink self ns/user: %v", err)
+	}
+	if childNS == selfNS {
+		t.Errorf("child ns/user = %s, same as host — user namespace not applied", childNS)
+	}
+
+	// /proc/<pid>/uid_map carries the configured mapping. Format:
+	// "  inside  outside  size" (whitespace-separated decimals).
+	mapData, err := os.ReadFile(fmt.Sprintf("/proc/%d/uid_map", pid))
+	if err != nil {
+		t.Fatalf("read uid_map: %v", err)
+	}
+	mapStr := strings.TrimSpace(string(mapData))
+	fields := strings.Fields(mapStr)
+	if len(fields) < 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "1" {
+		t.Errorf("uid_map = %q, want \"0 0 1\"", mapStr)
+	}
+
+	// /proc/<pid>/setgroups should be "deny" (AllowSetgroups=false).
+	sgData, err := os.ReadFile(fmt.Sprintf("/proc/%d/setgroups", pid))
+	if err != nil {
+		t.Fatalf("read setgroups: %v", err)
+	}
+	if got := strings.TrimSpace(string(sgData)); got != "deny" {
+		t.Errorf("setgroups = %q, want deny", got)
 	}
 }
 

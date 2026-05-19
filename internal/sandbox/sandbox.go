@@ -16,18 +16,44 @@ import (
 // any namespace flags take effect, so Chroot combined with
 // MountNamespace gives a private filesystem view that cannot leak
 // new mounts back to the host.
+//
+// UserNamespace shifts the child into its own UID/GID namespace.
+// The mapping must be supplied via UIDMappings / GIDMappings: each
+// entry is a contiguous range from ContainerID through Size,
+// mapped onto HostID..HostID+Size-1 on the host. The container's
+// 0 (root inside) typically maps to a non-root subuid on the host
+// — the standard rootless-container trick. AllowSetgroups gates
+// whether the child can call setgroups(2); the safe default
+// (false) writes "deny" to /proc/<pid>/setgroups, blocking the
+// classic CVE-2014-3158-style escape.
 type Spec struct {
 	PIDNamespace   bool
 	UTSNamespace   bool
 	IPCNamespace   bool
 	MountNamespace bool
+	UserNamespace  bool
+
+	UIDMappings     []IDMap
+	GIDMappings     []IDMap
+	AllowSetgroups  bool
 
 	Chroot string
 }
 
+// IDMap mirrors syscall.SysProcIDMap so callers don't need to import
+// "syscall" just to construct a Spec. ContainerID is the start of
+// the range inside the new namespace; HostID is the start outside;
+// Size is the range length.
+type IDMap struct {
+	ContainerID int
+	HostID      int
+	Size        int
+}
+
 // Any reports whether any isolation knob is enabled.
 func (s Spec) Any() bool {
-	return s.PIDNamespace || s.UTSNamespace || s.IPCNamespace || s.MountNamespace || s.Chroot != ""
+	return s.PIDNamespace || s.UTSNamespace || s.IPCNamespace ||
+		s.MountNamespace || s.UserNamespace || s.Chroot != ""
 }
 
 // ErrUnsupported is returned by Apply on non-Linux hosts when a non-empty
