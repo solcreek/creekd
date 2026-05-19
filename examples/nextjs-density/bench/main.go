@@ -82,18 +82,36 @@ func main() {
 	}
 
 	if bareResult != nil && dockerResult != nil {
-		fmt.Println()
 		fmt.Println("ratio (docker / bare):")
 		fmt.Printf("  per-app RSS p50: %.2fx\n",
 			float64(dockerResult.PerAppP50)/float64(bareResult.PerAppP50))
 		fmt.Printf("  total RSS:       %.2fx\n",
 			float64(dockerResult.TotalRSS)/float64(bareResult.TotalRSS))
+		// On Linux, PSS for bare is the apples-to-apples comparison
+		// against docker's cgroup-scoped accounting. Show the PSS-
+		// based ratio when we have it — that's the honest number.
+		if bareResult.TotalPSS > 0 {
+			fmt.Printf("  per-app docker_rss / bare_pss p50: %.2fx (apples-to-apples on Linux)\n",
+				float64(dockerResult.PerAppP50)/float64(bareResult.PerAppPssP50))
+			fmt.Printf("  total docker_rss / bare_pss:       %.2fx\n",
+				float64(dockerResult.TotalRSS)/float64(bareResult.TotalPSS))
+		}
+		if bareResult.MemAvailableDeltaKB > 0 && dockerResult.MemAvailableDeltaKB > 0 {
+			fmt.Printf("  MemAvailable delta docker / bare:  %.2fx\n",
+				float64(dockerResult.MemAvailableDeltaKB)/float64(bareResult.MemAvailableDeltaKB))
+		}
 	}
 }
 
-// Result is a per-scenario measurement bundle. All RSS values in KB
-// (matching `ps axo rss` and `docker stats --format json` after
-// conversion).
+// Result is a per-scenario measurement bundle. All values in KB.
+//
+// On Linux the bench reports BOTH RSS (raw `ps -o rss=`) and PSS
+// (Proportional Set Size, from `/proc/<pid>/smaps_rollup`). PSS
+// amortises shared library pages across the processes that map them,
+// so for 50 bare bun processes each holding ~30 MB of shared
+// libbun.so, RSS double-counts but PSS does not. docker stats reports
+// cgroup-scoped memory, which is closer to PSS in spirit. On macOS
+// PSS isn't available; we only report RSS there.
 type Result struct {
 	N            int
 	SpawnAllMs   float64
@@ -103,6 +121,16 @@ type Result struct {
 	PerAppMin    int
 	PerAppMax    int
 	TotalRSS     int
+	// PSS is populated only when /proc/<pid>/smaps_rollup is readable
+	// (Linux). Zero on macOS / docker stats path.
+	PerAppPssP50 int
+	PerAppPssP95 int
+	TotalPSS     int
+	// MemAvailableDeltaKB captures the difference in
+	// /proc/meminfo MemAvailable between bench-start and post-settle —
+	// the most honest "how much RAM did this consume on the box"
+	// number, but coarse (includes page cache shifts).
+	MemAvailableDeltaKB int
 }
 
 func runBare(serverJS string, n, settleSec int) *Result {
@@ -112,6 +140,8 @@ func runBare(serverJS string, n, settleSec int) *Result {
 			_ = exec.Command("kill", strconv.Itoa(pid)).Run()
 		}
 	}()
+
+	memAvailBefore := memAvailableKB()
 
 	t0 := time.Now()
 	for i := 0; i < n; i++ {
@@ -143,12 +173,23 @@ func runBare(serverJS string, n, settleSec int) *Result {
 	time.Sleep(time.Duration(settleSec) * time.Second)
 
 	rsss := make([]int, 0, n)
+	psss := make([]int, 0, n)
 	for _, pid := range pids {
 		if r := pidRSS(pid); r > 0 {
 			rsss = append(rsss, r)
 		}
+		if p := pidPSS(pid); p > 0 {
+			psss = append(psss, p)
+		}
 	}
-	return summarize(n, spawnMs, healthyMs, rsss)
+	res := summarize(n, spawnMs, healthyMs, rsss)
+	res.PerAppPssP50, res.PerAppPssP95, res.TotalPSS = summarizePSS(psss)
+	if memAvailBefore > 0 {
+		if after := memAvailableKB(); after > 0 {
+			res.MemAvailableDeltaKB = memAvailBefore - after
+		}
+	}
+	return res
 }
 
 func runDocker(n, settleSec int) *Result {
@@ -168,6 +209,8 @@ func runDocker(n, settleSec int) *Result {
 			_ = exec.Command("docker", "rm", "-f", id).Run()
 		}
 	}
+
+	memAvailBefore := memAvailableKB()
 
 	t0 := time.Now()
 	for i := 0; i < n; i++ {
@@ -217,7 +260,13 @@ func runDocker(n, settleSec int) *Result {
 			}
 		}
 	}
-	return summarize(n, spawnMs, healthyMs, rsss)
+	res := summarize(n, spawnMs, healthyMs, rsss)
+	if memAvailBefore > 0 {
+		if after := memAvailableKB(); after > 0 {
+			res.MemAvailableDeltaKB = memAvailBefore - after
+		}
+	}
+	return res
 }
 
 func summarize(n int, spawnMs, healthyMs float64, rsss []int) *Result {
@@ -248,7 +297,17 @@ func printResult(label string, r *Result) {
 	fmt.Printf("  per-app RSS : p50 %s   p95 %s   min %s   max %s\n",
 		fmtKB(r.PerAppP50), fmtKB(r.PerAppP95),
 		fmtKB(r.PerAppMin), fmtKB(r.PerAppMax))
-	fmt.Printf("  total RSS   : %s\n\n", fmtKB(r.TotalRSS))
+	fmt.Printf("  total RSS   : %s\n", fmtKB(r.TotalRSS))
+	if r.PerAppPssP50 > 0 {
+		fmt.Printf("  per-app PSS : p50 %s   p95 %s\n",
+			fmtKB(r.PerAppPssP50), fmtKB(r.PerAppPssP95))
+		fmt.Printf("  total PSS   : %s\n", fmtKB(r.TotalPSS))
+	}
+	if r.MemAvailableDeltaKB > 0 {
+		fmt.Printf("  MemAvailable: -%s (kernel MemAvailable delta, includes page cache)\n",
+			fmtKB(r.MemAvailableDeltaKB))
+	}
+	fmt.Println()
 }
 
 func waitHealthz(url string, timeout time.Duration) {
@@ -276,6 +335,77 @@ func pidRSS(pid int) int {
 		return 0
 	}
 	return v
+}
+
+// pidPSS reads /proc/<pid>/smaps_rollup and returns the process's
+// PSS in KB. Linux-only — returns 0 on macOS (no such file). PSS
+// amortises pages shared with other processes, so summing PSS across
+// 50 bare-bun processes is closer to "marginal RAM cost per app"
+// than summing RSS, which double-counts shared libraries.
+func pidPSS(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/smaps_rollup", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Pss:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		return v
+	}
+	return 0
+}
+
+func summarizePSS(psss []int) (p50, p95, total int) {
+	if len(psss) == 0 {
+		return 0, 0, 0
+	}
+	sort.Ints(psss)
+	for _, v := range psss {
+		total += v
+	}
+	p50 = psss[len(psss)*50/100]
+	idx := len(psss) * 95 / 100
+	if idx >= len(psss) {
+		idx = len(psss) - 1
+	}
+	p95 = psss[idx]
+	return
+}
+
+// memAvailableKB reads MemAvailable from /proc/meminfo. The bench
+// measures it before spawn and after settle; the delta is the "how
+// much RAM did this experiment actually cost the box" number — coarse
+// (includes page cache fluctuations) but honest, and platform-agnostic
+// in spirit (just available on Linux only).
+func memAvailableKB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemAvailable:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		return v
+	}
+	return 0
 }
 
 // parseHumanBytes understands the units docker stats emits ("MiB",

@@ -8,7 +8,7 @@ Five runnable recipes that each prove one slice of what creekd is for. Every exa
 | [`sandboxed-eval/`](sandboxed-eval/) | Per-spawn Linux sandbox (chroot + PID/mount/UTS namespaces + hard memory cap + kernel OOM) for cooperative-but-buggy workloads | **docker run** — measured 2.6× faster cold spawn for matched isolation ([COMPARISON.md](sandboxed-eval/COMPARISON.md)) | yes |
 | [`review-apps/`](review-apps/) | Side-by-side preview environments + zero-downtime blue-green redeploy on one host | Heroku Review Apps / Vercel Preview Deployments shape, without their build pipeline | no (degrades on macOS) |
 | [`bun-app/`](bun-app/) | `--runtime bun --entry server.ts` end-to-end: Bun.serve, bun:sqlite, SSE streaming through the dispatch reverse proxy | n/a — this is the runtime-coverage demo | no (needs Bun installed) |
-| [`nextjs-density/`](nextjs-density/) | Idle RAM density: how many Next.js apps fit on one host with `@solcreek/adapter-creekd` | **`docker run`** — measured +13 MB / app docker tax at N=10, 71× faster spawn at N=50 ([COMPARISON.md](nextjs-density/COMPARISON.md)) | no (uses docker for the comparison side; bare side runs anywhere) |
+| [`nextjs-density/`](nextjs-density/) | Idle RAM density: how many Next.js apps fit on one host with `@solcreek/adapter-creekd` | **`docker run`** — measured 1.45× per-app PSS overhead, 1.63× total kernel RAM, 45× faster spawn on Linux ([COMPARISON.md](nextjs-density/COMPARISON.md)) | no (uses docker for the comparison side; bare side runs anywhere) |
 
 ## How to run any one of them
 
