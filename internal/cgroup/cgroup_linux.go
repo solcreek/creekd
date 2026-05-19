@@ -165,6 +165,18 @@ func (c *Cgroup) applyLimits(lim Limits) error {
 	if err := writeMaxOrValue(filepath.Join(c.path, "memory.max"), lim.MemoryMax); err != nil {
 		return err
 	}
+	// When a memory cap is set, also disable swap for this cgroup. Without
+	// this the kernel happily pages out RSS to satisfy memory.max, turning
+	// a hard cap into a soft (and slow) one — and OOM kills never fire on
+	// swap-enabled hosts. memory.swap.max may be absent on kernels built
+	// without CONFIG_MEMCG_SWAP; ENOENT is treated as "swap accounting
+	// off, nothing to disable" rather than an error.
+	if lim.MemoryMax > 0 {
+		swapPath := filepath.Join(c.path, "memory.swap.max")
+		if err := writeFile(swapPath, "0"); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
 	if err := writeMaxOrValue(filepath.Join(c.path, "pids.max"), lim.PidsMax); err != nil {
 		return err
 	}
