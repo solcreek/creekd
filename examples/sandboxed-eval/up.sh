@@ -63,9 +63,10 @@ CTL=./bin/creekctl
 #
 # --no-new-privs is omitted here: the v0.1.0 wrap calls /usr/bin/setpriv
 # which the kernel looks for INSIDE the chroot (because chroot is
-# applied before exec). To use both, copy setpriv + its shared libs
-# into the rootfs. The supervisor will move to an inline prctl path
-# in a later release; see sandbox_linux.go: WrapNoNewPrivs.
+# applied before exec). To use both today, copy setpriv + its shared
+# libs into the rootfs. Phase 2 inlines prctl(PR_SET_NO_NEW_PRIVS) in
+# the same CGO child-setup function that adds seccomp + cap-drop,
+# removing this incompatibility. See README.md "Known limitation".
 echo "==> spawning sandboxed eval app"
 $CTL up eval \
     --command "/bin/toy" \

@@ -61,9 +61,14 @@ func platformApply(cmd *exec.Cmd, spec Spec) error {
 // chroots before exec, so the kernel looks for setpriv inside the
 // jail. Callers that combine NoNewPrivs with Chroot must either
 // copy setpriv (and its shared libs) into the rootfs, or accept
-// that the supervised process won't have NoNewPrivs set. A future
-// version will do prctl(PR_SET_NO_NEW_PRIVS) inline (no helper
-// binary), removing this constraint.
+// that the supervised process won't have NoNewPrivs set.
+//
+// The fix is to call prctl(PR_SET_NO_NEW_PRIVS) inline in the child
+// instead of going through setpriv. Go stdlib doesn't expose a
+// child-setup hook for this — the cleanest path is a CGO child
+// function, which the Phase 2 seccomp + capability-drop work needs
+// anyway. NoNewPrivs lands as one extra line in that same C
+// function. See docs/DESIGN.md "Known weak points".
 func WrapNoNewPrivs(cmd *exec.Cmd) *exec.Cmd {
 	origPath := cmd.Path
 	origArgs := cmd.Args

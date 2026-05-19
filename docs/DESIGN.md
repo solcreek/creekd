@@ -126,6 +126,7 @@ Benchmarks (`make bench`) are CI smoke-only — runner CPU is too noisy for regr
 ## Known weak points (Phase 1)
 
 - **No seccomp, no capability drop.** Apps still have whatever caps the parent has. Namespace + cgroup + NoNewPrivs is meaningful but not full sandbox.
+- **`--no-new-privs` + `--chroot` don't compose** on rootfs without `setpriv`. v0.1.0 implements NoNewPrivs via a `setpriv` wrap (Go stdlib doesn't expose `PR_SET_NO_NEW_PRIVS` on `SysProcAttr`, and there's no child-setup hook to inject one). Phase 2's CGO work for seccomp + cap drop will inline the prctl in the same C function, removing this constraint.
 - **No supervisor-survive-restart re-attach.** Documented above. Phase 2.
 - **Single binary, single host.** Multi-host = run more creekd hosts and put an LB in front. There is no clustering in creekd itself, and won't be.
 - **Log retention is size-only.** No time-based retention, no remote shipping. The structured JSON output makes shipping easy from any sidecar, but creekd doesn't do it itself.

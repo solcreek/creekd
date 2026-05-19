@@ -56,11 +56,11 @@ Full methodology + pros/cons: [COMPARISON.md](COMPARISON.md). Reproduce: `./benc
 
 ## Known limitation: `--no-new-privs` + `--chroot`
 
-v0.1.0 implements NoNewPrivs by wrapping the command with `setpriv`. The kernel applies chroot before exec, so it looks for `setpriv` *inside* the chroot — failing if the rootfs doesn't have it. To use both, either:
+v0.1.0 implements NoNewPrivs by wrapping the command with `setpriv`. The kernel applies chroot before exec, so it looks for `setpriv` *inside* the chroot — failing if the rootfs doesn't have it. To use both today, either:
 - Copy `setpriv` (and its shared libraries) into the rootfs, or
-- Skip `--no-new-privs` for this app and rely on the other isolation knobs.
+- Skip `--no-new-privs` for this app and rely on chroot + namespaces + cgroup.
 
-A future release will replace the `setpriv` wrap with an inline `prctl(PR_SET_NO_NEW_PRIVS)` call, removing this constraint. See `internal/sandbox/sandbox_linux.go: WrapNoNewPrivs` for the design note.
+This lands cleanly in Phase 2 alongside seccomp and capability-drop: Go stdlib doesn't expose a child-setup hook for inline `prctl()`, so the proper fix needs a CGO child function — which the Phase 2 seccomp / cap-drop work needs anyway. NoNewPrivs becomes one extra line in that same C setup, and the chroot incompatibility disappears.
 
 ## What this is not for
 
