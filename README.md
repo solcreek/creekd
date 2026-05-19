@@ -12,7 +12,7 @@ It is the runtime substrate of the [Creek](https://github.com/solcreek/creek) pl
 
 ## Status
 
-**Phase 1, pre-release.** API and CLI surfaces are still in flux. Not production-ready. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's planned.
+**Phase 1, pre-release.** API and CLI surfaces are still in flux. Not production-ready. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's planned and [`CHANGELOG.md`](CHANGELOG.md) for what's shipped.
 
 ## Why it exists
 

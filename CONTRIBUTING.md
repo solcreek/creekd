@@ -67,6 +67,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`.
 - One logical change per PR
 - Include tests where applicable
 - Update the relevant `docs/` file if behavior changes
+- Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for any user-visible change
 - Reference the milestone (e.g., "M5.2") in the PR description when relevant
 
 ### Issues
