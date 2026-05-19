@@ -18,6 +18,10 @@
 //	                     empty disables cgroup enforcement
 //	CREEKD_DEBUG_PPROF   "1" mounts /debug/pprof/* on the admin
 //	                     listener, gated by the same bearer token
+//	CREEKD_STATE_DIR     directory holding state.json (persisted app
+//	                     set); empty disables persistence. When set,
+//	                     creekd re-spawns every recorded app at
+//	                     startup before the listeners open
 package main
 
 import (
@@ -29,11 +33,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/solcreek/creekd/internal/adminapi"
 	"github.com/solcreek/creekd/internal/dispatch"
+	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -75,6 +81,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	router := dispatch.NewRouter()
 
+	// Load persisted state (if enabled) and replay each declared
+	// app through Spawn so the platform survives creekd's own
+	// restart. Failures per-app are logged and skipped — one
+	// broken entry must not block the rest from coming back.
+	var store *state.Store
+	if dir := os.Getenv("CREEKD_STATE_DIR"); dir != "" {
+		var err error
+		store, err = state.NewStore(filepath.Join(dir, "state.json"))
+		if err != nil {
+			return fmt.Errorf("state: %w", err)
+		}
+		restored := restoreFromState(logger, sup, router, store)
+		logger.Info("state restore complete",
+			"declared", len(store.Apps()),
+			"restored", restored,
+		)
+	}
+
 	// Public dispatch listener (data plane).
 	var dispatchSrv *http.Server
 	if addr := envOr("CREEKD_DISPATCH_ADDR", "127.0.0.1:9000"); addr != "" {
@@ -102,6 +126,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("admin: refusing to listen on %s without CREEKD_ADMIN_TOKEN", adminAddr)
 	}
 	adminServer := adminapi.New(sup, router, adminToken)
+	if store != nil {
+		adminServer.SetStore(store)
+	}
 	if os.Getenv("CREEKD_DEBUG_PPROF") == "1" {
 		adminServer.EnablePprof()
 		logger.Info("pprof endpoints mounted",
@@ -158,6 +185,40 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// restoreFromState re-spawns every app recorded in store and
+// re-registers each on the dispatch router. Per-app failures are
+// logged and skipped so one corrupted entry can't block the rest.
+// Returns the count of apps that came back up.
+func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
+	router *dispatch.Router, store *state.Store) int {
+	restored := 0
+	for _, cfg := range store.Apps() {
+		app, err := sup.Spawn(cfg)
+		if err != nil {
+			logger.Error("restore: spawn failed",
+				"id", cfg.ID, "err", err,
+			)
+			continue
+		}
+		host := ""
+		if app.NetIP != nil {
+			host = app.NetIP.String()
+		}
+		if err := router.SetAddr(cfg.ID, host, cfg.Port); err != nil {
+			logger.Error("restore: dispatch set failed",
+				"id", cfg.ID, "err", err,
+			)
+			// Best-effort: tear down the app we just spawned so the
+			// platform doesn't accumulate orphan registrations.
+			_ = sup.Stop(cfg.ID)
+			continue
+		}
+		restored++
+		logger.Info("restored", "id", cfg.ID, "pid", app.PID(), "port", cfg.Port)
+	}
+	return restored
 }
 
 // isLoopback returns true if addr's host portion resolves to a

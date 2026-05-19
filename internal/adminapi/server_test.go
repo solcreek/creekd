@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/solcreek/creekd/internal/dispatch"
+	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -407,6 +409,72 @@ func TestRestartAcceptsEmptyBody(t *testing.T) {
 	ts.srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d body = %s, want 200 with no body", w.Code, w.Body.String())
+	}
+}
+
+// --- persistence -------------------------------------------------------
+
+func TestSpawnPersistsToStore(t *testing.T) {
+	ts := newTestServer(t, "")
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.NewStore(statePath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	req := SpawnRequest{
+		ID: "persist", Command: "sleep", Args: []string{"30"}, Port: port,
+	}
+	if status, body := ts.do(t, "POST", "/v1/apps", req, ""); status != 201 {
+		t.Fatalf("spawn: status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("persist") })
+
+	// State file now contains the app.
+	apps := store.Apps()
+	if len(apps) != 1 || apps[0].ID != "persist" || apps[0].Port != port {
+		t.Errorf("store.Apps() = %+v", apps)
+	}
+}
+
+func TestStopRemovesFromStore(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, _ := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		SpawnRequest{ID: "rm", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+
+	if status, _ := ts.do(t, "DELETE", "/v1/apps/rm", nil, ""); status != 204 {
+		t.Fatalf("delete: status=%d", status)
+	}
+	if got := store.Apps(); len(got) != 0 {
+		t.Errorf("store retained app after rm: %+v", got)
+	}
+}
+
+func TestPersistenceSurvivesNewStore(t *testing.T) {
+	// First server writes one app.
+	ts := newTestServer(t, "")
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store1, _ := state.NewStore(statePath)
+	ts.srv.SetStore(store1)
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		SpawnRequest{ID: "alive", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("alive") })
+
+	// Independent NewStore at the same path observes the entry.
+	store2, err := state.NewStore(statePath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	apps := store2.Apps()
+	if len(apps) != 1 || apps[0].ID != "alive" {
+		t.Errorf("reload apps = %+v", apps)
 	}
 }
 

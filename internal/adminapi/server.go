@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/solcreek/creekd/internal/dispatch"
+	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -19,9 +20,17 @@ type Server struct {
 	sup    *supervisor.Supervisor
 	router *dispatch.Router
 	token  string
+	store  *state.Store // optional; set via SetStore to enable persistence
 
 	mux *http.ServeMux
 }
+
+// SetStore wires a persistence Store into the server. Every
+// successful Spawn / Deploy / Stop call writes through the store so
+// the daemon's restart logic can restore the same app set. nil
+// disables persistence (the default; only safe for ephemeral test
+// runs).
+func (s *Server) SetStore(st *state.Store) { s.store = st }
 
 // New returns a Server backed by sup. dispatchRouter, when non-nil,
 // is updated on spawn/stop so that registered apps are reachable
@@ -167,6 +176,21 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.store != nil {
+		if serr := s.store.AddApp(cfg); serr != nil {
+			// Persistence failure → roll back the in-memory state so
+			// the operator sees a clean failure rather than a state
+			// where the daemon restart would forget this app.
+			_ = s.sup.Stop(req.ID)
+			if s.router != nil {
+				s.router.Remove(req.ID)
+			}
+			writeError(w, http.StatusInternalServerError, CodeInternal,
+				"state.AddApp: "+serr.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, viewOf(app))
 }
 
@@ -216,6 +240,17 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.router != nil {
 		s.router.Remove(id)
+	}
+	if s.store != nil {
+		// Best-effort: a flush failure here means the next daemon
+		// restart will re-spawn an app the operator just stopped.
+		// Surfacing 500 to the operator gives them a chance to
+		// retry. The process is already gone either way.
+		if err := s.store.RemoveApp(id); err != nil {
+			writeError(w, http.StatusInternalServerError, CodeInternal,
+				"state.RemoveApp: "+err.Error())
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -268,6 +303,18 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 		}
 		return
+	}
+	if s.store != nil {
+		// Deploy replaces the previous config (different port, env,
+		// runtime, etc). AddApp idempotently overwrites.
+		if serr := s.store.AddApp(dcfg.Config); serr != nil {
+			// Deploy has already swapped in-memory state to v2; we
+			// cannot meaningfully roll back without re-deploying v1.
+			// Log loudly via the response.
+			writeError(w, http.StatusInternalServerError, CodeInternal,
+				"state.AddApp (deploy): "+serr.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, viewOf(app))
 }
