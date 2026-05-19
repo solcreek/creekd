@@ -244,6 +244,99 @@ func TestPSJSONOutput(t *testing.T) {
 	}
 }
 
+// --- Stats subcommand --------------------------------------------
+
+func TestStatsHumanOutputForNonCgroupApp(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"s", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("s") })
+
+	out, err := runSub(t, "stats", []string{"s", "--server", url})
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if !strings.Contains(out, "cgroup_enabled") || !strings.Contains(out, "false") {
+		t.Errorf("output missing cgroup_enabled=false:\n%s", out)
+	}
+	if !strings.Contains(out, "note") {
+		t.Errorf("output missing the no-cgroup hint:\n%s", out)
+	}
+}
+
+func TestStatsJSONOutput(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"j", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("j") })
+
+	out, err := runSub(t, "stats", []string{"j", "--server", url, "--json"})
+	if err != nil {
+		t.Fatalf("stats --json: %v", err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	if v["id"] != "j" {
+		t.Errorf("id = %v, want j", v["id"])
+	}
+	if v["cgroup_enabled"] != false {
+		t.Errorf("cgroup_enabled = %v, want false", v["cgroup_enabled"])
+	}
+}
+
+// --- human formatters ---------------------------------------------
+
+func TestHumanBytes(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 B"},
+		{1023, "1023 B"},
+		{1024, "1.0 KiB"},
+		{1024 * 1024, "1.0 MiB"},
+		{8 * 1024 * 1024, "8.0 MiB"},
+		{16*1024*1024 + 512*1024, "16.5 MiB"},
+	}
+	for _, c := range cases {
+		if got := humanBytes(c.in); got != c.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestHumanMicros(t *testing.T) {
+	cases := []struct {
+		in   int64
+		want string
+	}{
+		{0, "0 µs"},
+		{999, "999 µs"},
+		{1000, "1.0 ms"},
+		{1500, "1.5 ms"},
+		{999_999, "1000.0 ms"},
+		{1_000_000, "1.00 s"},
+		{2_500_000, "2.50 s"},
+	}
+	for _, c := range cases {
+		if got := humanMicros(c.in); got != c.want {
+			t.Errorf("humanMicros(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestFlagOrderingPositionalAfterFlags(t *testing.T) {
 	url, sup := newTestBackend(t)
 	port := freeTCPPort(t)

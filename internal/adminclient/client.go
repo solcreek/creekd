@@ -147,6 +147,19 @@ func (c *Client) Reset(ctx context.Context, id string) (*adminapi.AppView, error
 	return &v, nil
 }
 
+// Stats fetches the per-app resource snapshot — cgroup-tracked
+// memory/CPU/pids counters plus the OOM kill counter when cgroup
+// enforcement is on. Apps spawned without CgroupLimits get
+// CgroupEnabled=false with zeroed counters.
+func (c *Client) Stats(ctx context.Context, id string) (*adminapi.StatsView, error) {
+	var v adminapi.StatsView
+	if err := c.do(ctx, http.MethodGet,
+		"/v1/apps/"+url.PathEscape(id)+"/stats", nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // LogsTail fetches the last n lines of an app's log as plain text.
 // Returns the raw response body, one JSON record per line.
 func (c *Client) LogsTail(ctx context.Context, id string, n int) (string, error) {

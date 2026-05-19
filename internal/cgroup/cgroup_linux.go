@@ -233,6 +233,75 @@ func (c *Cgroup) Stats() (Stats, error) {
 	return s, nil
 }
 
+// MemoryCurrent reads memory.current — the cgroup's instantaneous
+// RSS-equivalent in bytes (resident + page cache attributable to the
+// cgroup, per the kernel's accounting).
+func (c *Cgroup) MemoryCurrent() (int64, error) {
+	return readInt64(filepath.Join(c.path, "memory.current"))
+}
+
+// MemoryMax reads memory.max. Returns (0, nil) when the file holds
+// the literal "max" sentinel (no limit), matching the semantics of
+// Limits.MemoryMax.
+func (c *Cgroup) MemoryMax() (int64, error) {
+	data, err := os.ReadFile(filepath.Join(c.path, "memory.max"))
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: read memory.max: %w", err)
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "max" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: parse memory.max %q: %w", v, err)
+	}
+	return n, nil
+}
+
+// PidsCurrent reads pids.current — the number of tasks (threads +
+// processes) currently inside the cgroup.
+func (c *Cgroup) PidsCurrent() (int64, error) {
+	return readInt64(filepath.Join(c.path, "pids.current"))
+}
+
+// CPUUsageMicros parses cpu.stat and returns the accumulated CPU time
+// in microseconds (usage_usec field). Used as a counter — diff two
+// snapshots over time to derive a CPU% gauge.
+func (c *Cgroup) CPUUsageMicros() (int64, error) {
+	data, err := os.ReadFile(filepath.Join(c.path, "cpu.stat"))
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: read cpu.stat: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "usage_usec" {
+			continue
+		}
+		n, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cgroup: parse usage_usec %q: %w", fields[1], err)
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("cgroup: usage_usec not found in cpu.stat")
+}
+
+// readInt64 reads a single decimal integer from path. Used for
+// single-value cgroup files (memory.current, pids.current).
+func readInt64(path string) (int64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: read %s: %w", path, err)
+	}
+	v := strings.TrimSpace(string(data))
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("cgroup: parse %s value %q: %w", path, v, err)
+	}
+	return n, nil
+}
+
 // Remove deletes the cgroup directory. The kernel requires the cgroup
 // to be empty (cgroup.procs empty). Returns the error from rmdir;
 // callers typically run this after the supervised process has exited.

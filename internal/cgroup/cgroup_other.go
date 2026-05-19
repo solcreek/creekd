@@ -62,5 +62,13 @@ func (c *Cgroup) AddProcess(_ int) error { return ErrUnsupported }
 // Stats returns an empty snapshot on non-Linux.
 func (c *Cgroup) Stats() (Stats, error) { return Stats{}, ErrUnsupported }
 
+// MemoryCurrent / MemoryMax / PidsCurrent / CPUUsageMicros all return
+// ErrUnsupported on non-Linux. Supervisor's stats handler treats the
+// error as "cgroup_enabled=false" and surfaces only OS-level fields.
+func (c *Cgroup) MemoryCurrent() (int64, error)  { return 0, ErrUnsupported }
+func (c *Cgroup) MemoryMax() (int64, error)      { return 0, ErrUnsupported }
+func (c *Cgroup) PidsCurrent() (int64, error)    { return 0, ErrUnsupported }
+func (c *Cgroup) CPUUsageMicros() (int64, error) { return 0, ErrUnsupported }
+
 // Remove always returns nil on non-Linux (there is nothing to remove).
 func (c *Cgroup) Remove() error { return nil }

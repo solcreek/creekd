@@ -120,6 +120,25 @@ type ListResponse struct {
 	Apps []AppView `json:"apps"`
 }
 
+// StatsView is the JSON shape of GET /v1/apps/{id}/stats. Counters
+// reflect kernel-tracked accounting via cgroup v2 when
+// CgroupEnabled is true; otherwise the supervisor only has
+// OS-level state (uptime, restart count, health failures) which is
+// already in AppView.
+type StatsView struct {
+	ID                 string `json:"id"`
+	CgroupEnabled      bool   `json:"cgroup_enabled"`
+	MemoryCurrentBytes int64  `json:"memory_current_bytes,omitempty"`
+	MemoryMaxBytes     int64  `json:"memory_max_bytes,omitempty"`
+	PidsCurrent        int64  `json:"pids_current,omitempty"`
+	CPUUsageUsec       int64  `json:"cpu_usage_usec,omitempty"`
+	OOMKills           int64  `json:"oom_kills,omitempty"`
+	// ReadErr surfaces a stale-read failure (file briefly missing
+	// during restart, permission churn). Non-fatal: the rest of the
+	// snapshot is still trustworthy.
+	ReadErr string `json:"read_err,omitempty"`
+}
+
 // ErrorResponse is the body of every non-2xx response.
 type ErrorResponse struct {
 	Code    string `json:"code"`

@@ -55,6 +55,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/apps/{id}/reset", s.guard(s.handleReset))
 	s.mux.HandleFunc("POST /v1/apps/{id}/restart", s.guard(s.handleRestart))
 	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
+	s.mux.HandleFunc("GET /v1/apps/{id}/stats", s.guard(s.handleStats))
 }
 
 // guard wraps h with the bearer-token check. When s.token is empty
@@ -290,6 +291,62 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleStats handles GET /v1/apps/{id}/stats. Returns a StatsView
+// with cgroup-tracked counters when the app was spawned with
+// CgroupLimits; otherwise CgroupEnabled is false and the response
+// carries only the ID + flag (caller can still read uptime /
+// restart_count from the AppView returned by Get).
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	app := s.sup.Get(id)
+	if app == nil {
+		writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+		return
+	}
+	v := StatsView{ID: id}
+	cg := app.Cgroup()
+	if cg == nil {
+		writeJSON(w, http.StatusOK, v)
+		return
+	}
+	v.CgroupEnabled = true
+
+	// Each read can fail independently (file missing during a
+	// brief restart window, transient permission). Collect the
+	// first error but keep going so the response surfaces whatever
+	// was readable.
+	var firstErr error
+	if cur, err := cg.MemoryCurrent(); err == nil {
+		v.MemoryCurrentBytes = cur
+	} else if firstErr == nil {
+		firstErr = err
+	}
+	if max, err := cg.MemoryMax(); err == nil {
+		v.MemoryMaxBytes = max
+	} else if firstErr == nil {
+		firstErr = err
+	}
+	if pc, err := cg.PidsCurrent(); err == nil {
+		v.PidsCurrent = pc
+	} else if firstErr == nil {
+		firstErr = err
+	}
+	if usec, err := cg.CPUUsageMicros(); err == nil {
+		v.CPUUsageUsec = usec
+	} else if firstErr == nil {
+		firstErr = err
+	}
+	if st, err := cg.Stats(); err == nil {
+		v.OOMKills = st.OOMKill
+	} else if firstErr == nil {
+		firstErr = err
+	}
+	if firstErr != nil {
+		v.ReadErr = firstErr.Error()
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 // decodeJSON reads and JSON-decodes the request body into dst.

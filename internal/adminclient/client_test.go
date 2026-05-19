@@ -215,6 +215,36 @@ func TestResetOnHealthyReturns409(t *testing.T) {
 	}
 }
 
+func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
+	c, sup, _ := newTestStack(t, "")
+	port := freeTCPPort(t)
+	if _, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
+		ID: "s", Command: "sleep", Args: []string{"30"}, Port: port,
+	}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("s") })
+
+	v, err := c.Stats(context.Background(), "s")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if v.ID != "s" {
+		t.Errorf("ID = %q, want s", v.ID)
+	}
+	if v.CgroupEnabled {
+		t.Errorf("CgroupEnabled true on non-cgroup app")
+	}
+}
+
+func TestStatsUnknownIsNotFound(t *testing.T) {
+	c, _, _ := newTestStack(t, "")
+	_, err := c.Stats(context.Background(), "ghost")
+	if !IsNotFound(err) {
+		t.Errorf("err = %v, want IsNotFound", err)
+	}
+}
+
 func TestStopUnknownIsNotFound(t *testing.T) {
 	c, _, _ := newTestStack(t, "")
 	err := c.Stop(context.Background(), "ghost")

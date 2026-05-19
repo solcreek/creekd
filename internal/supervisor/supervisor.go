@@ -191,6 +191,16 @@ func (a *App) HealthFailures() int64 {
 	return atomic.LoadInt64(&a.healthFailures)
 }
 
+// Cgroup returns the per-app cgroup handle, or nil when the app was
+// spawned without CgroupLimits (no enforcement, no kernel-side
+// accounting). Callers should treat nil as "cgroup_enabled=false"
+// and fall back to OS-level state — uptime, restart count, etc.
+func (a *App) Cgroup() *cgroup.Cgroup {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cg
+}
+
 // renameUnderLock updates App.ID. Used by Deploy to re-key v2 from its
 // temporary registry key to the canonical app ID under the supervisor's
 // registry lock. Outside of Deploy, App.ID is immutable; callers that

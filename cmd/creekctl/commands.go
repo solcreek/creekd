@@ -38,6 +38,7 @@ var subcommands = map[string]*subcommand{
 	"reset":   {Name: "reset", Description: "clear crash-loop", Run: runReset},
 	"deploy":  {Name: "deploy", Description: "blue-green deploy", Run: runDeploy},
 	"logs":    {Name: "logs", Description: "tail per-app log", Run: runLogs},
+	"stats":   {Name: "stats", Description: "show resource counters", Run: runStats},
 }
 
 // commonFlags holds the global knobs every subcommand accepts. They
@@ -323,6 +324,29 @@ func runLogs(ctx context.Context, w io.Writer, argv []string) error {
 	return err
 }
 
+// --- stats --------------------------------------------------------
+
+func runStats(ctx context.Context, w io.Writer, argv []string) error {
+	id, rest, err := requireSplitID(argv)
+	if err != nil {
+		return err
+	}
+	fs := newFlagSet("stats")
+	var cf commonFlags
+	cf.register(fs)
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	s, err := cf.client().Stats(ctx, id)
+	if err != nil {
+		return err
+	}
+	if cf.json {
+		return writeJSON(w, s)
+	}
+	return writeStatsDetail(w, s)
+}
+
 // --- output helpers -----------------------------------------------
 
 // writeJSON encodes v as indented JSON to w.
@@ -346,6 +370,60 @@ func writeAppTable(w io.Writer, apps []adminapi.AppView) error {
 			a.UptimeMS, a.RestartCount, a.HealthFailures)
 	}
 	return tw.Flush()
+}
+
+// writeStatsDetail renders a StatsView as aligned key/value pairs.
+// Bytes are shown in MiB and CPU usage in milliseconds for human
+// readability; the JSON form still carries raw integers for tools.
+func writeStatsDetail(w io.Writer, s *adminapi.StatsView) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(tw, "id\t%s\n", s.ID)
+	fmt.Fprintf(tw, "cgroup_enabled\t%t\n", s.CgroupEnabled)
+	if !s.CgroupEnabled {
+		fmt.Fprintln(tw, "note\t(spawn the app with cgroup limits to see resource counters)")
+		return tw.Flush()
+	}
+	if s.MemoryMaxBytes > 0 {
+		fmt.Fprintf(tw, "memory_used\t%s / %s\n",
+			humanBytes(s.MemoryCurrentBytes), humanBytes(s.MemoryMaxBytes))
+	} else {
+		fmt.Fprintf(tw, "memory_used\t%s (unlimited)\n",
+			humanBytes(s.MemoryCurrentBytes))
+	}
+	fmt.Fprintf(tw, "pids_current\t%d\n", s.PidsCurrent)
+	fmt.Fprintf(tw, "cpu_total\t%s\n", humanMicros(s.CPUUsageUsec))
+	fmt.Fprintf(tw, "oom_kills\t%d\n", s.OOMKills)
+	if s.ReadErr != "" {
+		fmt.Fprintf(tw, "read_err\t%s\n", s.ReadErr)
+	}
+	return tw.Flush()
+}
+
+// humanBytes renders b in MiB with one decimal place. Bytes <= 1 KiB
+// are shown literal so the operator sees the actual count rather
+// than rounded "0.0 MiB".
+func humanBytes(b int64) string {
+	switch {
+	case b < 1024:
+		return fmt.Sprintf("%d B", b)
+	case b < 1024*1024:
+		return fmt.Sprintf("%.1f KiB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%.1f MiB", float64(b)/(1024*1024))
+	}
+}
+
+// humanMicros renders µs counters as ms / s for readability. CPU
+// usage rolls into seconds within minutes for active apps.
+func humanMicros(us int64) string {
+	switch {
+	case us < 1000:
+		return fmt.Sprintf("%d µs", us)
+	case us < 1_000_000:
+		return fmt.Sprintf("%.1f ms", float64(us)/1000)
+	default:
+		return fmt.Sprintf("%.2f s", float64(us)/1_000_000)
+	}
 }
 
 // writeAppDetail renders a single app as aligned key/value pairs.

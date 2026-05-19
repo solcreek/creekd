@@ -347,3 +347,90 @@ func TestStatsBeforeAnyEvent(t *testing.T) {
 		t.Errorf("expected zero counters, got %+v", st)
 	}
 }
+
+func TestMemoryCurrentEmptyCgroup(t *testing.T) {
+	m := testManager(t)
+	c, err := m.Create("memcur", Limits{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Remove() })
+
+	cur, err := c.MemoryCurrent()
+	if err != nil {
+		t.Fatalf("MemoryCurrent: %v", err)
+	}
+	// Empty cgroup may still report a small kernel-tracked baseline
+	// (page tables); just sanity-check non-negative + sub-megabyte.
+	if cur < 0 || cur > 1024*1024 {
+		t.Errorf("memory.current = %d, want 0..1MiB for empty cgroup", cur)
+	}
+}
+
+func TestMemoryMaxReturnsLimit(t *testing.T) {
+	m := testManager(t)
+	c, err := m.Create("memmax", Limits{MemoryMax: 8 * 1024 * 1024})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Remove() })
+
+	max, err := c.MemoryMax()
+	if err != nil {
+		t.Fatalf("MemoryMax: %v", err)
+	}
+	if max != 8*1024*1024 {
+		t.Errorf("memory.max = %d, want %d", max, 8*1024*1024)
+	}
+}
+
+func TestMemoryMaxUnlimitedReturnsZero(t *testing.T) {
+	m := testManager(t)
+	c, err := m.Create("memunlim", Limits{}) // no MemoryMax → file holds "max"
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Remove() })
+
+	max, err := c.MemoryMax()
+	if err != nil {
+		t.Fatalf("MemoryMax: %v", err)
+	}
+	if max != 0 {
+		t.Errorf("memory.max = %d, want 0 (sentinel for unlimited)", max)
+	}
+}
+
+func TestPidsCurrentEmptyCgroup(t *testing.T) {
+	m := testManager(t)
+	c, err := m.Create("pidcur", Limits{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Remove() })
+
+	pc, err := c.PidsCurrent()
+	if err != nil {
+		t.Fatalf("PidsCurrent: %v", err)
+	}
+	if pc != 0 {
+		t.Errorf("pids.current = %d, want 0 for empty cgroup", pc)
+	}
+}
+
+func TestCPUUsageMicrosEmptyCgroup(t *testing.T) {
+	m := testManager(t)
+	c, err := m.Create("cpuusg", Limits{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Remove() })
+
+	us, err := c.CPUUsageMicros()
+	if err != nil {
+		t.Fatalf("CPUUsageMicros: %v", err)
+	}
+	if us != 0 {
+		t.Errorf("usage_usec = %d, want 0 for empty cgroup", us)
+	}
+}

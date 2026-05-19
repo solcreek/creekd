@@ -410,6 +410,40 @@ func TestRestartAcceptsEmptyBody(t *testing.T) {
 	}
 }
 
+// --- Stats endpoint ---------------------------------------------------
+
+func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
+	ts := newTestServer(t, "")
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		SpawnRequest{ID: "nocg", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("nocg") })
+
+	status, body := ts.do(t, "GET", "/v1/apps/nocg/stats", nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body = %s", status, body)
+	}
+	var v StatsView
+	mustJSON(t, body, &v)
+	if v.ID != "nocg" {
+		t.Errorf("id = %q", v.ID)
+	}
+	if v.CgroupEnabled {
+		t.Errorf("CgroupEnabled = true, want false (spawned without limits)")
+	}
+	if v.MemoryCurrentBytes != 0 || v.PidsCurrent != 0 {
+		t.Errorf("counters should be zero, got %+v", v)
+	}
+}
+
+func TestStatsUnknownAppReturns404(t *testing.T) {
+	ts := newTestServer(t, "")
+	status, _ := ts.do(t, "GET", "/v1/apps/ghost/stats", nil, "")
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", status)
+	}
+}
+
 // TestUnknownPathReturns404: the mux's default response for an
 // unmatched path is 404 — confirming we didn't accidentally catch-all.
 func TestUnknownPathReturns404(t *testing.T) {

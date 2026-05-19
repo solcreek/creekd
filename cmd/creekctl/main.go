@@ -71,6 +71,7 @@ Commands:
   reset <id>         clear crash-loop and resume
   deploy <id>        blue-green deploy a new version (flags: --port, ...)
   logs <id>          tail the per-app log (--tail N)
+  stats <id>         show cgroup-tracked resource counters
   help               this message
 
 Global flags (also accepted as env vars):
