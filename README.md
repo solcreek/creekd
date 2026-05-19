@@ -1,104 +1,146 @@
 # creekd
 
 [![ci](https://github.com/solcreek/creekd/actions/workflows/ci.yml/badge.svg)](https://github.com/solcreek/creekd/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/solcreek/creekd.svg)](https://pkg.go.dev/github.com/solcreek/creekd)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-> Process supervisor and HTTP dispatcher for the Creek runtime.
+> Multi-tenant process supervisor and HTTP dispatcher. Cgroup v2 + Linux namespace isolation. Single Go binary.
 
-`creekd` is the host-side daemon that supervises Creek applications. Each app runs as an isolated child process; `creekd` handles spawning, restart policy, health probes, cgroup enforcement, log capture, and zero-downtime blue-green deploys.
+`creekd` is the host-side daemon that runs a fleet of independent application processes on one machine and routes HTTP traffic to them. Each app is its own child process, confined by cgroup v2 limits and (optionally) Linux namespaces. The supervisor handles spawn, restart, health, log capture, and zero-downtime blue-green deploys.
 
-This repo holds **only** the daemon. The runtime libraries, CLI, and bindings live in the main Creek monorepo.
+It is the runtime substrate of the [Creek](https://github.com/solcreek/creek) platform, but it has no Creek-specific dependencies — `creekd` will host any process that listens on a TCP port.
 
 ## Status
 
-**Phase 1 work in progress.** Not production-ready. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's planned.
+**Phase 1, pre-release.** API and CLI surfaces are still in flux. Not production-ready. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's planned.
 
-## Why a separate repo
+## Why it exists
 
-- Different language (Go) from the runtime libraries (TypeScript)
-- Different release cadence (supervisor should be stable; runtime iterates)
-- Different audience (sysadmins, not application developers)
-- Single-binary distribution friendly (`curl install.creek.dev/creekd | sh`)
+Most "run my process and route traffic to it" systems force a choice: heavyweight (Kubernetes, Nomad, full container runtimes) or single-tenant (systemd, supervisord, pm2). `creekd` is the middle: multi-tenant on one host, no container daemon, no scheduler, no overlay network — just a Go binary that owns child processes and the listening socket.
 
-The boundary is enforced by the gRPC protocol — see [`api/proto/`](api/proto/) for the wire schema.
+Trade: you give up multi-host orchestration. You get a 10 MB binary that runs hundreds of isolated apps on a $30 VPS.
+
+## Quickstart
+
+Requires Go 1.22+. Linux for full feature set; macOS for dev (cgroup / namespace features self-skip).
+
+```bash
+# Build both binaries.
+go build -o bin/creekd  ./cmd/creekd
+go build -o bin/creekctl ./cmd/creekctl
+
+# Run the daemon (loopback only, no auth — dev mode).
+./bin/creekd &
+
+# In another shell: spawn an app.
+./bin/creekctl up hello \
+    --command /bin/sh \
+    --args "-c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: 5\\r\\n\\r\\nhello\" | nc -l -p 18000 -q 1; done'" \
+    --port 18000
+
+# Route to it via the dispatch listener.
+curl -H 'X-Creek-App: hello' http://127.0.0.1:9000/
+# => hello
+
+# Inspect, then stop.
+./bin/creekctl ps
+./bin/creekctl rm hello
+```
+
+For real apps see [`docs/CONFIG.md`](docs/CONFIG.md) and the runtime profiles in [`internal/runtime/`](internal/runtime).
 
 ## Architecture
 
 ```
-                    creekd (supervisor)
-                   ┌──────────────────────────┐
-       gRPC ──────→│ admin API                │
-       (CLI)       │ ├─ deploy / undeploy     │
-                   │ ├─ ps / logs / restart   │
-                   │ └─ status                │
-                   ├──────────────────────────┤
-       HTTP ──────→│ dispatch (Caddy-backed)  │
-       (traffic)   │ routes by X-Creek-App    │
-                   ├──────────────────────────┤
-                   │ supervisor goroutines    │
-                   │   ┌─────┐  ┌─────┐  ...  │
-                   │   │ app │  │ app │       │
-                   │   │  A  │  │  B  │       │
-                   │   │ Bun │  │Node │       │
-                   │   └─────┘  └─────┘       │
-                   │   (child processes)      │
-                   │   each cgroup-bounded    │
-                   └──────────────────────────┘
+                       creekd
+   ┌──────────────────────────────────────────┐
+   │                                          │
+   │  admin api    ◀──── HTTP/JSON ────  creekctl
+   │  127.0.0.1:9080     (bearer auth)
+   │  ├─ spawn / stop / restart / deploy
+   │  ├─ ps / get / logs / stats
+   │  └─ /debug/pprof  (opt-in)
+   │                                          │
+   │  dispatch    ◀──── HTTP ──────────  end-users
+   │  :9000              (host/header → app)
+   │                                          │
+   │  supervisor                              │
+   │   ┌─────┐  ┌─────┐  ┌─────┐              │
+   │   │ app │  │ app │  │ app │   ← child processes
+   │   │  A  │  │  B  │  │  C  │     each w/ own cgroup,
+   │   │ Bun │  │Node │  │Deno │     optional netns/PID ns,
+   │   └─────┘  └─────┘  └─────┘     setpriv NoNewPrivs
+   │                                          │
+   └──────────────────────────────────────────┘
+
+       state ──────► state.json   (declared apps, atomic write)
+       logs  ──────► <log-dir>/<id>/*.log  (size-rotated)
 ```
 
-## Building
+Control plane and data plane are **separate listeners** so admin tooling can sit behind one auth boundary while end-user traffic goes through another. The dispatch listener is also independently disable-able for admin-only deployments.
 
-Requires Go 1.22+.
+See [`docs/DESIGN.md`](docs/DESIGN.md) for design rationale.
+
+## Configuration
+
+Everything is environment-variable driven. Full reference: [`docs/CONFIG.md`](docs/CONFIG.md).
+
+The essentials:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CREEKD_ADMIN_ADDR` | `127.0.0.1:9080` | Admin / control plane listener |
+| `CREEKD_ADMIN_TOKEN` | _empty_ | Bearer token; **required** for non-loopback admin |
+| `CREEKD_DISPATCH_ADDR` | `127.0.0.1:9000` | Public dispatch / data plane (empty disables) |
+| `CREEKD_LOG_DIR` | _empty_ | Per-app log capture root |
+| `CREEKD_CGROUP_PARENT` | _empty_ | Cgroup v2 slice for per-app sub-cgroups |
+| `CREEKD_STATE_DIR` | _empty_ | Directory holding `state.json` (declared-app persistence) |
+| `CREEKD_DEBUG_PPROF` | _unset_ | Set to `1` to mount `/debug/pprof` |
+
+## Building & testing
 
 ```bash
-# build
-go build -o bin/creekd ./cmd/creekd
+go build ./...                                  # build everything
+go test  -race ./...                            # full unit suite
 
-# run
-./bin/creekd
+make test-linux                                 # privileged Linux suite
+                                                # (cgroup v2, netns, namespaces)
+                                                # runs inside Docker; works
+                                                # on macOS hosts
 
-# test
-go test ./...
-
-# lint (after installing golangci-lint)
-golangci-lint run
+make bench                                      # benchmark smoke
+make bench-cpu                                  # + cpu/mem profiles
 ```
 
-## Running
-
-```bash
-# Single-app default port
-./bin/creekd
-
-# Custom port + apps directory
-CREEK_PORT=8080 CREEK_APPS_DIR=/var/lib/creekd ./bin/creekd
-```
-
-Configuration is environment-variable driven (12-factor); see [`docs/CONFIG.md`](docs/CONFIG.md) for the full list (TBD).
+CI runs all three (`test`, `test-linux-privileged`, `bench`) on every push and PR.
 
 ## Project layout
 
 ```
 creekd/
 ├── cmd/
-│   └── creekd/            # main binary entry point
+│   ├── creekd/           # daemon entry point
+│   └── creekctl/         # admin CLI (talks to the admin API)
 ├── internal/
-│   ├── supervisor/        # child-process lifecycle (M5.1-M5.3)
-│   ├── runtime/           # Bun/Node/Deno dispatch (M5.4)
-│   ├── cgroup/            # cgroup v2 enforcement (M5.5)
-│   ├── logs/              # log capture, rotation, JSON (M5.6)
-│   ├── deploy/            # blue-green deploy (M5.7)
-│   └── dispatch/          # HTTP routing layer
-├── api/
-│   └── proto/             # gRPC schema shared with creek CLI
-├── docs/                  # detailed docs (roadmap, config, ops)
-└── pkg/                   # public Go SDK (when needed)
+│   ├── supervisor/       # child-process lifecycle, restart policy
+│   ├── runtime/          # Bun / Node / Deno auto-detection
+│   ├── cgroup/           # cgroup v2 (memory / pids / cpu)
+│   ├── sandbox/          # Linux namespaces, chroot, NoNewPrivs
+│   ├── network/          # per-app netns + veth + iptables
+│   ├── dispatch/         # HTTP router, host → app
+│   ├── deploy/           # blue-green zero-downtime swap
+│   ├── logs/             # capture + size-based rotation
+│   ├── state/            # state.json persistence (atomic rename)
+│   ├── adminapi/         # HTTP/JSON control plane
+│   └── adminclient/      # typed Go client for the admin API
+├── docs/                 # roadmap, design, config
+└── .github/workflows/    # CI
 ```
+
+## Related
+
+- [`solcreek/creek`](https://github.com/solcreek/creek) — runtime libraries, CLI for end developers, examples (TypeScript)
 
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
-
-## Related
-
-- [solcreek/creek](https://github.com/solcreek/creek) — runtime, host-runtime, CLI, examples (TypeScript monorepo)
-- Project strategy and roadmap: see private `product-planning/` archive
