@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -72,6 +73,86 @@ func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	fs.SetOutput(os.Stderr)
 	return fs
+}
+
+// limitsFlags registers the cgroup-limit flags shared by `up` and
+// `deploy`. Values are stored as strings so the empty case can be
+// distinguished from "0" and parsing failures surface at command
+// time, not flag-parse time (Go's flag package can't easily
+// report parse errors with custom logic).
+type limitsFlags struct {
+	memoryMax string
+	pidsMax   int64
+	cpuQuota  int64
+	cpuPeriod int64
+}
+
+func (lf *limitsFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&lf.memoryMax, "memory-max", "",
+		"hard memory cap (e.g. 256M, 1G). Includes swap. 0/empty = unlimited")
+	fs.Int64Var(&lf.pidsMax, "pids-max", 0,
+		"max number of tasks in the cgroup. 0 = unlimited")
+	fs.Int64Var(&lf.cpuQuota, "cpu-quota-us", 0,
+		"CPU quota in microseconds per --cpu-period-us. 0 = unlimited")
+	fs.Int64Var(&lf.cpuPeriod, "cpu-period-us", 0,
+		"CPU accounting period in microseconds. 0 = cgroup default (100ms)")
+}
+
+// toAPI returns the wire-format Limits, or nil when every field is
+// zero/unset (which the API treats as "no cgroup at all").
+func (lf *limitsFlags) toAPI() (*adminapi.Limits, error) {
+	mem, err := parseSize(lf.memoryMax)
+	if err != nil {
+		return nil, fmt.Errorf("--memory-max: %w", err)
+	}
+	if mem == 0 && lf.pidsMax == 0 && lf.cpuQuota == 0 {
+		return nil, nil
+	}
+	return &adminapi.Limits{
+		MemoryMaxBytes: mem,
+		PidsMax:        lf.pidsMax,
+		CPUQuotaUS:     lf.cpuQuota,
+		CPUPeriodUS:    lf.cpuPeriod,
+	}, nil
+}
+
+// parseSize parses a human-friendly byte count: a bare integer
+// (bytes) or an integer followed by K/M/G/T (binary, *1024). The
+// optional "i"/"iB"/"B" suffix is accepted and ignored — "256M",
+// "256Mi", "256MiB", "256MB" all mean 256*1024*1024.
+//
+// Empty string returns 0. Lowercase is fine.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.ToUpper(s)
+	s = strings.TrimSuffix(s, "B")
+	s = strings.TrimSuffix(s, "I")
+	unit := int64(1)
+	switch {
+	case strings.HasSuffix(s, "K"):
+		unit = 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "M"):
+		unit = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "G"):
+		unit = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "T"):
+		unit = 1024 * 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("size must be non-negative, got %d", n)
+	}
+	return n * unit, nil
 }
 
 // splitID returns the first argv element when it is a positional
@@ -156,6 +237,8 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("up")
 	var cf commonFlags
 	cf.register(fs)
+	var lf limitsFlags
+	lf.register(fs)
 	var (
 		command    = fs.String("command", "", "executable to run (explicit mode)")
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
@@ -170,6 +253,10 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	limits, err := lf.toAPI()
+	if err != nil {
+		return err
+	}
 	req := adminapi.SpawnRequest{
 		ID:           id,
 		Command:      *command,
@@ -178,6 +265,7 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		Args:         args,
 		Env:          env,
 		Port:         *port,
+		Limits:       limits,
 		NetIsolation: *netIso,
 	}
 	app, err := cf.client().Spawn(ctx, req)
@@ -267,6 +355,8 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("deploy")
 	var cf commonFlags
 	cf.register(fs)
+	var lf limitsFlags
+	lf.register(fs)
 	var (
 		command    = fs.String("command", "", "executable to run (explicit mode)")
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
@@ -282,6 +372,10 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	limits, err := lf.toAPI()
+	if err != nil {
+		return err
+	}
 	req := adminapi.DeployRequest{
 		Command:        *command,
 		Entry:          *entry,
@@ -289,6 +383,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		Args:           args,
 		Env:            env,
 		Port:           *port,
+		Limits:         limits,
 		ReadyTimeoutMS: *readyMS,
 		NetIsolation:   *netIso,
 	}

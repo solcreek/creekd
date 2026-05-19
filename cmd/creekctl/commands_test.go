@@ -94,6 +94,76 @@ func TestRequireSplitID(t *testing.T) {
 	}
 }
 
+func TestParseSize(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    int64
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"1024", 1024, false},
+		{"256M", 256 * 1024 * 1024, false},
+		{"256m", 256 * 1024 * 1024, false},   // lowercase
+		{"256Mi", 256 * 1024 * 1024, false},  // k8s-ish suffix
+		{"256MiB", 256 * 1024 * 1024, false}, // docker-ish suffix
+		{"256MB", 256 * 1024 * 1024, false},  // we choose binary for "MB" too
+		{"1G", 1024 * 1024 * 1024, false},
+		{"2T", 2 * 1024 * 1024 * 1024 * 1024, false},
+		{"  512K  ", 512 * 1024, false}, // trims
+		// errors
+		{"abc", 0, true},
+		{"256X", 0, true},
+		{"-1", 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			got, err := parseSize(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Errorf("want error, got %d", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("parseSize(%q) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestLimitsFlagsToAPI(t *testing.T) {
+	t.Run("all zero returns nil", func(t *testing.T) {
+		var lf limitsFlags
+		got, err := lf.toAPI()
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+	t.Run("memory set returns limits", func(t *testing.T) {
+		lf := limitsFlags{memoryMax: "256M"}
+		got, err := lf.toAPI()
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if got == nil || got.MemoryMaxBytes != 256*1024*1024 {
+			t.Errorf("got %+v, want MemoryMaxBytes=256MiB", got)
+		}
+	})
+	t.Run("invalid size surfaces error", func(t *testing.T) {
+		lf := limitsFlags{memoryMax: "256X"}
+		if _, err := lf.toAPI(); err == nil {
+			t.Error("expected error for invalid size")
+		}
+	})
+}
+
 func TestStringSliceFlagAccumulates(t *testing.T) {
 	var s stringSliceFlag
 	_ = s.Set("a")
