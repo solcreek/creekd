@@ -56,6 +56,26 @@ Directory holding `state.json`, the persisted set of declared apps.
 - **When set**: creekd loads `<dir>/state.json` at startup and replays every recorded app through `Spawn` before opening listeners. Spawn / deploy / stop operations write through to the file atomically.
 - **Semantics**: declarations persist, processes do not. After a creekd restart the supervisor re-spawns fresh processes from the saved configs.
 
+## Network isolation
+
+Per-app network namespace requires **both** of the following. Either-one-set is rejected at spawn time. Both empty disables `--net-isolation` entirely (apps share the host network, dispatch routes directly to `127.0.0.1:<port>`).
+
+### `CREEKD_NET_SUBNET`
+
+IPv4 CIDR carved up among per-app namespaces.
+
+- **Default**: empty (net isolation disabled)
+- **Example**: `10.42.0.0/24` — gives ~250 simultaneously-isolated apps
+- **Requires**: Linux + privileged daemon (creating bridges + veth pairs + iptables rules).
+
+### `CREEKD_NET_BRIDGE_NAME`
+
+Name of the host-side bridge interface that veth pairs attach to. Created on first net-iso spawn; reused thereafter.
+
+- **Default**: empty
+- **Example**: `creekbr0`
+- **Constraint**: max 15 chars (Linux `IFNAMSIZ`). Avoid names that collide with existing interfaces.
+
 ## Operations
 
 ### `CREEKD_DEBUG_PPROF`
@@ -77,6 +97,11 @@ export CREEKD_DISPATCH_ADDR=0.0.0.0:80
 export CREEKD_LOG_DIR=/var/lib/creekd/logs
 export CREEKD_CGROUP_PARENT=creekd.slice
 export CREEKD_STATE_DIR=/var/lib/creekd
+
+# Optional: enable per-app network namespaces. Drop these for
+# shared-network mode.
+export CREEKD_NET_SUBNET=10.42.0.0/24
+export CREEKD_NET_BRIDGE_NAME=creekbr0
 creekd
 ```
 

@@ -22,6 +22,13 @@
 //	                     set); empty disables persistence. When set,
 //	                     creekd re-spawns every recorded app at
 //	                     startup before the listeners open
+//	CREEKD_NET_SUBNET    IPv4 CIDR for per-app network namespaces
+//	                     (e.g. 10.42.0.0/24). Required when any app
+//	                     uses --net-isolation; ignored otherwise.
+//	CREEKD_NET_BRIDGE_NAME
+//	                     bridge interface to attach per-app veth pairs
+//	                     to (e.g. creekbr0). Pairs with CREEKD_NET_SUBNET;
+//	                     both must be set together
 package main
 
 import (
@@ -74,12 +81,7 @@ func main() {
 
 func run(ctx context.Context, logger *slog.Logger) error {
 	sup := supervisor.New(logger)
-	if v := os.Getenv("CREEKD_LOG_DIR"); v != "" {
-		sup.LogDir = v
-	}
-	if v := os.Getenv("CREEKD_CGROUP_PARENT"); v != "" {
-		sup.CgroupParent = v
-	}
+	configureSupervisorFromEnv(sup)
 
 	router := dispatch.NewRouter()
 
@@ -179,6 +181,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	time.Sleep(200 * time.Millisecond)
 
 	return nil
+}
+
+// configureSupervisorFromEnv copies CREEKD_* environment values
+// onto sup. Extracted so the env → field plumbing is unit-testable
+// without booting real listeners; keeping it out of run() keeps
+// that function focused on listener wiring.
+func configureSupervisorFromEnv(sup *supervisor.Supervisor) {
+	if v := os.Getenv("CREEKD_LOG_DIR"); v != "" {
+		sup.LogDir = v
+	}
+	if v := os.Getenv("CREEKD_CGROUP_PARENT"); v != "" {
+		sup.CgroupParent = v
+	}
+	// Per-app network namespace requires both knobs. Either-one-set
+	// is rejected at Spawn time; we don't pre-check here because the
+	// daemon may run with no net-iso apps and that's fine.
+	if v := os.Getenv("CREEKD_NET_SUBNET"); v != "" {
+		sup.NetSubnet = v
+	}
+	if v := os.Getenv("CREEKD_NET_BRIDGE_NAME"); v != "" {
+		sup.NetBridgeName = v
+	}
 }
 
 // envOr returns os.Getenv(key) or fallback when empty.

@@ -124,6 +124,7 @@ The essentials:
 | `CREEKD_LOG_DIR` | _empty_ | Per-app log capture root |
 | `CREEKD_CGROUP_PARENT` | _empty_ | Cgroup v2 slice for per-app sub-cgroups |
 | `CREEKD_STATE_DIR` | _empty_ | Directory holding `state.json` (declared-app persistence) |
+| `CREEKD_NET_SUBNET` / `CREEKD_NET_BRIDGE_NAME` | _empty_ | Per-app netns subnet (e.g. `10.42.0.0/24`) + bridge name. Both required for `--net-isolation` |
 | `CREEKD_DEBUG_PPROF` | _unset_ | Set to `1` to mount `/debug/pprof` |
 
 ## Building & testing
