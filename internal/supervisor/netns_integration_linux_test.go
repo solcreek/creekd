@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/solcreek/creekd/internal/dispatch"
 )
 
 // requireNetPrivilegeSup is the supervisor-side gate for netns tests:
@@ -199,4 +201,133 @@ func TestNetIsolationDispatchRoutesToContainerIP(t *testing.T) {
 		time.Sleep(150 * time.Millisecond)
 	}
 	t.Fatalf("never reached child at %s: %v", url, lastErr)
+}
+
+// TestNetIsolationHealthProbeReachesContainer: the supervisor's
+// HTTPHealthChecker must hit the app's NetIP, not the host
+// loopback. Pre-fix, every health probe for a net-isolated app went
+// to http://127.0.0.1:<port> — nothing listening there since the
+// child is in its own netns — so the supervisor would mark every
+// net-isolated app unhealthy and restart-loop it.
+func TestNetIsolationHealthProbeReachesContainer(t *testing.T) {
+	requireNetPrivilegeSup(t)
+
+	sup := newNetSupervisor(t)
+	// Probe path: the test HTTP child serves /health → 200 always
+	// (HEALTH_MODE="" → always-pass). Enable the background probe
+	// loop with a short interval so a failing probe shows up fast.
+	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthCheckInterval = 50 * time.Millisecond
+	sup.HealthCheckTimeout = 1 * time.Second
+	sup.HealthCheckFailureThreshold = 3
+
+	app, err := sup.Spawn(Config{
+		ID:      "net-health",
+		Command: os.Args[0],
+		Args:    []string{"-test.run=^$"},
+		Port:    19603,
+		Env: []string{
+			"CREEK_TEST_HTTPAPP=1",
+			"SIGNATURE=net-health",
+		},
+		NetIsolation: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(app.ID) })
+
+	if app.NetIP == nil {
+		t.Fatal("no NetIP")
+	}
+
+	// Give the probe loop ~600ms (multiple intervals). If the probe
+	// were still hitting 127.0.0.1, we'd see HealthFailures climb
+	// past the threshold and the app would restart.
+	originalPID := app.PID()
+	time.Sleep(600 * time.Millisecond)
+
+	if got := app.HealthFailures(); got > 0 {
+		t.Errorf("HealthFailures = %d after 600ms, want 0 — probe is missing the netns",
+			got)
+	}
+	if app.PID() != originalPID {
+		t.Errorf("app restarted (PID %d → %d) — probe failures tripped restart",
+			originalPID, app.PID())
+	}
+}
+
+// TestNetIsolationDeployRoutesViaNetIP: deploying a net-isolated
+// app must use router.SetAddr with v2's NetIP. Pre-fix, deploy used
+// router.Set which defaulted host to 127.0.0.1, breaking traffic to
+// any newly-deployed net-isolated app.
+func TestNetIsolationDeployRoutesViaNetIP(t *testing.T) {
+	requireNetPrivilegeSup(t)
+
+	sup := newNetSupervisor(t)
+	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthCheckTimeout = 1 * time.Second
+	sup.HealthCheckInterval = 0
+
+	v1, err := sup.Spawn(Config{
+		ID:      "net-deploy",
+		Command: os.Args[0],
+		Args:    []string{"-test.run=^$"},
+		Port:    19604,
+		Env: []string{
+			"CREEK_TEST_HTTPAPP=1",
+			"SIGNATURE=v1",
+		},
+		NetIsolation: true,
+	})
+	if err != nil {
+		t.Fatalf("Spawn v1: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop(v1.ID) })
+	if v1.NetIP == nil {
+		t.Fatal("v1 NetIP nil")
+	}
+
+	// Set up a router and seed the v1 route via SetAddr, mirroring
+	// what the admin spawn handler does for net-iso apps.
+	router := dispatch.NewRouter()
+	if err := router.SetAddr(v1.ID, v1.NetIP.String(), v1.Port); err != nil {
+		t.Fatalf("router.SetAddr v1: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	v2, err := sup.Deploy(ctx, router, DeployConfig{
+		Config: Config{
+			ID:      "net-deploy",
+			Command: os.Args[0],
+			Args:    []string{"-test.run=^$"},
+			Port:    19605,
+			Env: []string{
+				"CREEK_TEST_HTTPAPP=1",
+				"SIGNATURE=v2",
+			},
+			NetIsolation: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if v2.NetIP == nil {
+		t.Fatal("v2 NetIP nil")
+	}
+
+	// After deploy, the router's backend for ID should resolve to
+	// v2's NetIP, NOT 127.0.0.1. This is the SetAddr-vs-Set fix.
+	b := router.Get("net-deploy")
+	if b == nil {
+		t.Fatal("router has no route after deploy")
+	}
+	if b.Host != v2.NetIP.String() {
+		t.Errorf("router host = %q, want v2 NetIP %q (deploy ignored NetIP)",
+			b.Host, v2.NetIP.String())
+	}
+	if b.Port != v2.Port {
+		t.Errorf("router port = %d, want %d", b.Port, v2.Port)
+	}
 }

@@ -556,7 +556,16 @@ func (h *HTTPHealthChecker) Check(ctx context.Context, app *App) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", app.Port, path)
+	// For net-isolated apps the listener is in a private netns at
+	// app.NetIP, not at the host's 127.0.0.1. Hitting 127.0.0.1 here
+	// would always 404/timeout — the same gap the dispatch router
+	// crosses via the bridge. For shared-network apps app.NetIP is
+	// nil and we fall back to the host loopback.
+	host := "127.0.0.1"
+	if app.NetIP != nil {
+		host = app.NetIP.String()
+	}
+	url := fmt.Sprintf("http://%s:%d%s", host, app.Port, path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -1420,8 +1429,18 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 	// Flip the route. We do this AFTER the registry swap so that any
 	// admin-API list or get call observes the new app at the canonical
 	// ID before traffic shifts.
+	//
+	// SetAddr (not Set) so the v2 NetIP propagates for net-isolated
+	// apps. Set defaults the host to 127.0.0.1 — fine for shared-
+	// network apps but wrong for net-iso, where the listener lives in
+	// a private netns at v2.NetIP. Pre-fix, deploys of net-iso apps
+	// silently routed traffic to the host loopback (no listener).
 	if router != nil {
-		if err := router.Set(cfg.ID, v2.Port); err != nil {
+		host := ""
+		if v2.NetIP != nil {
+			host = v2.NetIP.String()
+		}
+		if err := router.SetAddr(cfg.ID, host, v2.Port); err != nil {
 			// Router refused (e.g., bad port). Roll back: put v1 back,
 			// drop v2. This is best-effort — failures here mean a
 			// half-deployed state, so we log loudly.
@@ -1432,7 +1451,7 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 			s.apps[cfg.ID] = v1
 			s.mu.Unlock()
 			_ = s.stopApp(v2, cfg.GracefulV1Timeout)
-			return nil, fmt.Errorf("deploy: router.Set: %w", err)
+			return nil, fmt.Errorf("deploy: router.SetAddr: %w", err)
 		}
 	}
 
