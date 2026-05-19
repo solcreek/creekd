@@ -63,6 +63,43 @@ We previously ran the same bench from `colima` (macOS host, Linux Docker VM) and
 
 The Linux PSS reading is the canonical density number. The macOS run still works as a sanity check that the bench harness behaves the same on both platforms; it just shouldn't be cited as the density story.
 
+## Pushing density: zswap and the real ceiling
+
+What happens when you push more apps onto the same host than naive PSS math says fits?
+
+Same Hetzner cx33 host, with `zswap` enabled (`lz4` compressor, `zsmalloc` zpool, 50% max pool, 4 GB swapfile) and Transparent Huge Pages off. Bare bun only — docker daemon's cgroup accounting doesn't expose the same knob.
+
+| N | per-app PSS | total PSS | MemAvail delta | zswap pool peak | disk writeback ¹ | verdict |
+|---:|---:|---:|---:|---:|---:|---|
+| 50 | 47 MB | 2.32 GB | -2.30 GB | 0 | 0 | comfortable |
+| 100 | 48 MB | 4.68 GB | -4.69 GB | ~0 | ~0 | comfortable |
+| **150** | **48 MB** | **6.88 GB** | **-6.89 GB** | 58 MB | **6 MB** (negligible) | **sweet spot, no tail risk** |
+| 200 | 30 MB ² | 6.03 GB | -7.01 GB | **2.84 GB peak** | **333 MB** ❌ | fit, but tail latency |
+
+¹ `written_back_pages` × 4 KB. Zswap writes pages to disk swap only when its in-RAM compressed pool fills up (capped at 50% of RAM here). Any non-zero number means some app's idle memory now lives on disk; the first request to that app pays a 10-100 ms swap-in.
+
+² The N=200 per-app PSS dropping to 30 MB isn't Bun getting lighter — it's the kernel reclaiming idle pages out of the working set under pressure. The *physical cost* didn't drop; it just moved into zswap and disk swap. The honest number is the MemAvailable delta column, which kept climbing linearly.
+
+### What this means in practice
+
+- **N=150 is the real ceiling on an 8 GB host** for production traffic patterns. Per-app PSS stays at 48 MB; zswap engages lightly without falling through to disk; tail latency is unaffected.
+- **N=200 is achievable but trades tail latency for density.** 333 MB of pages got pushed to disk swap. Those apps' first request after a quiet window costs an extra 10-100 ms. For review-app-style "wake on request" workloads that's fine; for prod traffic, it's not.
+- **zswap is worth ~30% more apps before the tail-risk band**, not the 2-3× I'd guessed before measuring. Linux's reclaim is already aggressive at amortising idle pages — zswap mostly helps the few-percent of dirty/heap pages that survive reclaim.
+- The same proportional ceiling on a 4 GB cx23: comfortable at ~75 idle apps, stretched at ~100. (8 GB box hit comfortable at 150; halve it for 4 GB, then subtract a bit more for OS baseline.)
+
+Enabling zswap:
+
+```bash
+echo Y        > /sys/module/zswap/parameters/enabled
+echo lz4      > /sys/module/zswap/parameters/compressor
+echo zsmalloc > /sys/module/zswap/parameters/zpool
+echo 50       > /sys/module/zswap/parameters/max_pool_percent
+# plus a swap file for zswap to fall through to:
+fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+```
+
+Persist via `/etc/sysctl.d/` or systemd unit if you want it across reboot.
+
 ## What the bench doesn't show
 
 - **Disk and image overhead.** Each container also pulls a base image (`oven/bun:alpine` ≈ 90 MB). Many apps share layers, but cold pulls cost. Bare bun ships only `.next/standalone/`.
