@@ -20,6 +20,25 @@ Most "run my process and route traffic to it" systems force a choice: heavyweigh
 
 Trade: you give up multi-host orchestration. You get a 10 MB binary that runs hundreds of isolated apps on a $30 VPS.
 
+## When creekd makes sense
+
+You already build and ship binaries (Bun / Node / Deno or any process that listens on a port), and:
+
+- you want multiple of them on one box with real isolation between them
+- you want pm2-level operational simplicity but with cgroup v2 + namespace teeth
+- you'd rather own the supervisor than rent it
+- you're fine running one machine — multi-host is solved one layer up (a load balancer in front of N creekd hosts)
+
+See [`examples/`](examples/) for three runnable recipes: pm2 replacement, sandboxed code runner, branch review apps.
+
+## When it doesn't (yet)
+
+- **You need `git push` deploys.** No build pipeline in `creekd`; that lives in the wider Creek stack.
+- **You need TLS in the daemon.** Put Caddy / Cloudflare / nginx in front.
+- **You need a web dashboard.** Only CLI (`creekctl`) and JSON API right now.
+- **You need multi-host scheduling.** One host per `creekd`; no clustering.
+- **You're running hostile multi-tenant workloads.** Phase 1 sandbox (cgroup + namespaces + chroot + NoNewPrivs) is meaningful but not full — seccomp and capability drop land in Phase 2.
+
 ## Quickstart
 
 Requires Go 1.22+. Linux for full feature set; macOS for dev (cgroup / namespace features self-skip).
