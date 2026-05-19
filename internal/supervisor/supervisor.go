@@ -136,6 +136,13 @@ type App struct {
 	Args    []string
 	Port    int
 
+	// env holds the extra environment variables from Config.Env.
+	// Used by every restart path (watch goroutine + Reset) so the
+	// child sees the same KEY=VAL pairs across its lifetime. A
+	// defensive copy is taken at Spawn time so mutating the caller's
+	// slice after the fact doesn't silently change restart behaviour.
+	env []string
+
 	mu        sync.RWMutex
 	cmd       *exec.Cmd
 	status    Status
@@ -637,6 +644,7 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		Command: cmd,
 		Args:    args,
 		Port:    cfg.Port,
+		env:     append([]string(nil), cfg.Env...),
 		done:    make(chan struct{}),
 	}
 	if cfg.Sandbox != nil {
@@ -688,7 +696,7 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		}
 	}
 
-	if err := s.startLocked(app, cfg.Env); err != nil {
+	if err := s.startLocked(app, app.env); err != nil {
 		s.teardownAppNetwork(app)
 		if app.rotator != nil {
 			_ = app.rotator.Close()
@@ -700,7 +708,7 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 	}
 
 	s.apps[cfg.ID] = app
-	go s.watch(app, cfg.Env)
+	go s.watch(app, app.env)
 	if s.healthEnabled() {
 		go s.probe(app, app.waitDone())
 	}
@@ -986,13 +994,13 @@ func (s *Supervisor) Reset(id string) error {
 	app.clearRestarts()
 	app.resetDone()
 
-	if err := s.startLocked(app, nil); err != nil {
+	if err := s.startLocked(app, app.env); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("supervisor: reset start failed: %w", err)
 	}
 	s.mu.Unlock()
 
-	go s.watch(app, nil)
+	go s.watch(app, app.env)
 	if s.healthEnabled() {
 		go s.probe(app, app.waitDone())
 	}

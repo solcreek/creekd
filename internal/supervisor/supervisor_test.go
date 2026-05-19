@@ -634,6 +634,79 @@ func TestResetClearsCrashLoop(t *testing.T) {
 	}
 }
 
+// TestResetPreservesEnv: when Reset re-spawns a crashed app, the
+// new process must see the same APP_NAME=... env vars the user
+// originally passed at Spawn. Pre-fix, Reset called startLocked
+// with nil extraEnv — silent data loss that could leave the
+// restarted app missing DATABASE_URL, AUTH_TOKEN, etc.
+func TestResetPreservesEnv(t *testing.T) {
+	sup := newTestSupervisor()
+	sup.InitialBackoff = 5 * time.Millisecond
+	sup.MaxBackoff = 10 * time.Millisecond
+	sup.RestartWindow = 60 * time.Second
+	sup.CrashLoopThreshold = 2
+
+	envOut, err := os.CreateTemp("", "creekd-reset-env-*")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	envOut.Close()
+	t.Cleanup(func() {
+		os.Remove(envOut.Name())
+		os.Remove(envOut.Name() + ".counter")
+	})
+
+	// First 3 invocations crash to trip crash-loop. Subsequent
+	// invocations write $MARKER to a file and sleep — Reset succeeds
+	// only when the env propagates correctly.
+	script := fmt.Sprintf(`
+		COUNTER_FILE=%s.counter
+		COUNT=$(cat $COUNTER_FILE 2>/dev/null || echo 0)
+		COUNT=$((COUNT + 1))
+		echo $COUNT > $COUNTER_FILE
+		if [ $COUNT -le 3 ]; then exit 1; fi
+		echo "$MARKER" > %s
+		sleep 30
+	`, envOut.Name(), envOut.Name())
+
+	app, err := sup.Spawn(Config{
+		ID:      "env-preserved",
+		Command: "sh",
+		Args:    []string{"-c", script},
+		Port:    9503,
+		Env:     []string{"MARKER=preserved-through-reset"},
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("env-preserved") })
+
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusCrashLooping
+	}) {
+		t.Fatalf("expected StatusCrashLooping, got %s", app.Status())
+	}
+
+	if err := sup.Reset("env-preserved"); err != nil {
+		t.Fatalf("Reset: %v", err)
+	}
+
+	if !eventuallyTrue(2*time.Second, func() bool {
+		return app.Status() == StatusRunning
+	}) {
+		t.Errorf("after Reset expected StatusRunning, got %s", app.Status())
+	}
+
+	if !eventuallyTrue(2*time.Second, func() bool {
+		data, _ := os.ReadFile(envOut.Name())
+		return strings.TrimSpace(string(data)) == "preserved-through-reset"
+	}) {
+		data, _ := os.ReadFile(envOut.Name())
+		t.Errorf("env not propagated through Reset: marker file = %q (want \"preserved-through-reset\")",
+			strings.TrimSpace(string(data)))
+	}
+}
+
 func TestResetUnknownAppReturnsError(t *testing.T) {
 	sup := newTestSupervisor()
 	err := sup.Reset("does-not-exist")
