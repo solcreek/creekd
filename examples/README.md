@@ -1,0 +1,39 @@
+# Examples
+
+Four runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All four self-contained — no shared state between them.
+
+| Example | What it proves | Compares to | Linux required? |
+|---|---|---|---|
+| [`pm2-replacement/`](pm2-replacement/) | Multi-app supervision + HTTP routing + crash-recovery + memory caps on one host | **pm2** — measured 8.4× faster spawn, 4.9× leaner RSS, 300× faster memory-cap reaction ([COMPARISON.md](pm2-replacement/COMPARISON.md)) | no (degrades on macOS) |
+| [`sandboxed-eval/`](sandboxed-eval/) | Per-spawn Linux sandbox (chroot + PID/mount/UTS namespaces + hard memory cap + kernel OOM) for cooperative-but-buggy workloads | **docker run** — measured 2.6× faster cold spawn for matched isolation ([COMPARISON.md](sandboxed-eval/COMPARISON.md)) | yes |
+| [`review-apps/`](review-apps/) | Side-by-side preview environments + zero-downtime blue-green redeploy on one host | Heroku Review Apps / Vercel Preview Deployments shape, without their build pipeline | no (degrades on macOS) |
+| [`bun-app/`](bun-app/) | `--runtime bun --entry server.ts` end-to-end: Bun.serve, bun:sqlite, SSE streaming through the dispatch reverse proxy | n/a — this is the runtime-coverage demo | no (needs Bun installed) |
+
+## How to run any one of them
+
+```bash
+cd examples/<name>
+./up.sh            # builds creekd + creekctl + the example app, boots, spawns
+# ...poke around...
+./down.sh          # tears it all down
+```
+
+Each example's `up.sh` is self-contained — separate `creekd` instance, separate `bin/`, separate `state/`. You can have all four running simultaneously without collisions (the dispatch listener is always on `127.0.0.1:9000`, so only one example can claim it at a time; teardown is fast).
+
+## Which one to read first
+
+- **Coming from pm2 / supervisord / runit**: [pm2-replacement](pm2-replacement/) has the head-to-head numbers and the migration pitch.
+- **Running AI tool calls / user-submitted code / CTF judges**: [sandboxed-eval](sandboxed-eval/) shows the per-spawn isolation pattern, with the honest "where docker still wins" section.
+- **CI / preview environments**: [review-apps](review-apps/) walks the deploy workflow and points at the Caddy-front-door wiring needed to lift it to production.
+- **Already on Bun and curious if creekd hosts it**: [bun-app](bun-app/) shows the `--runtime bun` path with native Bun features.
+
+## Benchmarks
+
+Two of the examples (`pm2-replacement` and `sandboxed-eval`) carry runnable bench tools that produce head-to-head numbers on the same machine. They are *not* run in CI — runner CPU is too noisy to gate on — but the methodology is documented in each example's `COMPARISON.md` and reproducing on your own hardware is one command:
+
+```bash
+cd examples/pm2-replacement && ./up.sh && go run ./bench -n 20
+cd examples/sandboxed-eval  && ./bench/run.sh
+```
+
+The numbers in the comparison docs were measured on a darwin/amd64 host with Docker Desktop. Your absolute numbers will differ; the ratios should be in the same ballpark.
