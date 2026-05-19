@@ -1,5 +1,7 @@
 # creekd
 
+[![ci](https://github.com/solcreek/creekd/actions/workflows/ci.yml/badge.svg)](https://github.com/solcreek/creekd/actions/workflows/ci.yml)
+
 > Process supervisor and HTTP dispatcher for the Creek runtime.
 
 `creekd` is the host-side daemon that supervises Creek applications. Each app runs as an isolated child process; `creekd` handles spawning, restart policy, health probes, cgroup enforcement, log capture, and zero-downtime blue-green deploys.
