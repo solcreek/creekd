@@ -16,6 +16,8 @@
 //	                     child stdout/stderr to creekd's own writers
 //	CREEKD_CGROUP_PARENT cgroup v2 slice owning per-app sub-cgroups;
 //	                     empty disables cgroup enforcement
+//	CREEKD_DEBUG_PPROF   "1" mounts /debug/pprof/* on the admin
+//	                     listener, gated by the same bearer token
 package main
 
 import (
@@ -100,6 +102,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("admin: refusing to listen on %s without CREEKD_ADMIN_TOKEN", adminAddr)
 	}
 	adminServer := adminapi.New(sup, router, adminToken)
+	if os.Getenv("CREEKD_DEBUG_PPROF") == "1" {
+		adminServer.EnablePprof()
+		logger.Info("pprof endpoints mounted",
+			"prefix", "/debug/pprof/",
+			"auth", adminToken != "",
+		)
+	}
 	adminSrv := &http.Server{
 		Addr:              adminAddr,
 		Handler:           adminServer.Handler(),

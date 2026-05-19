@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 
 	"github.com/solcreek/creekd/internal/dispatch"
@@ -41,6 +42,29 @@ func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token stri
 // content-type are applied in middleware.
 func (s *Server) Handler() http.Handler {
 	return s.mux
+}
+
+// EnablePprof mounts net/http/pprof's standard handlers under
+// /debug/pprof/, gated by the server's bearer-token guard. Opt-in
+// because pprof endpoints leak detailed memory contents and CPU
+// profiling traces — exposing them unconditionally on a public
+// listener would be a footgun. The main binary wires this in
+// response to CREEKD_DEBUG_PPROF=1.
+//
+// Available routes (all GET):
+//
+//	/debug/pprof/         index — lists every profile
+//	/debug/pprof/<name>   heap / goroutine / block / mutex / allocs
+//	/debug/pprof/cmdline  process argv
+//	/debug/pprof/profile  cpu profile (?seconds=N)
+//	/debug/pprof/symbol   symbol resolution
+//	/debug/pprof/trace    runtime trace (?seconds=N)
+func (s *Server) EnablePprof() {
+	s.mux.HandleFunc("GET /debug/pprof/", s.guard(pprof.Index))
+	s.mux.HandleFunc("GET /debug/pprof/cmdline", s.guard(pprof.Cmdline))
+	s.mux.HandleFunc("GET /debug/pprof/profile", s.guard(pprof.Profile))
+	s.mux.HandleFunc("GET /debug/pprof/symbol", s.guard(pprof.Symbol))
+	s.mux.HandleFunc("GET /debug/pprof/trace", s.guard(pprof.Trace))
 }
 
 // routes wires URL patterns to handlers.

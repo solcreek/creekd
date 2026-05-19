@@ -410,6 +410,80 @@ func TestRestartAcceptsEmptyBody(t *testing.T) {
 	}
 }
 
+// --- pprof debug endpoint --------------------------------------------
+
+func TestPprofDisabledByDefault(t *testing.T) {
+	ts := newTestServer(t, "")
+	// EnablePprof not called.
+	req := httptest.NewRequest("GET", "/debug/pprof/heap", nil)
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (pprof disabled)", w.Code)
+	}
+}
+
+func TestPprofEnabledServesIndex(t *testing.T) {
+	ts := newTestServer(t, "")
+	ts.srv.EnablePprof()
+
+	req := httptest.NewRequest("GET", "/debug/pprof/", nil)
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	// pprof.Index renders an HTML listing that includes profile names.
+	if !strings.Contains(body, "heap") || !strings.Contains(body, "goroutine") {
+		t.Errorf("body missing expected profile names:\n%s", body[:min(500, len(body))])
+	}
+}
+
+func TestPprofEnabledServesHeapProfile(t *testing.T) {
+	ts := newTestServer(t, "")
+	ts.srv.EnablePprof()
+
+	req := httptest.NewRequest("GET", "/debug/pprof/heap", nil)
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Error("heap profile body is empty")
+	}
+}
+
+func TestPprofRequiresBearerToken(t *testing.T) {
+	ts := newTestServer(t, "secret")
+	ts.srv.EnablePprof()
+
+	// Without token → 401.
+	req := httptest.NewRequest("GET", "/debug/pprof/heap", nil)
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 without token", w.Code)
+	}
+
+	// With token → 200.
+	req = httptest.NewRequest("GET", "/debug/pprof/heap", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	w = httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 with token", w.Code)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // --- Stats endpoint ---------------------------------------------------
 
 func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
