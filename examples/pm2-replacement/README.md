@@ -64,8 +64,14 @@ The supervisor watched the child exit non-zero, applied the backoff policy, and 
 - Multi-host. Run one `creekd` per host with a load balancer in front (or use Cloudflare DNS round-robin for tiny scale).
 - Web dashboard. CLI + JSON API only — `creekctl ps --json | jq` covers most operational needs.
 
-## What pm2 would need to match this
+## How it compares to pm2 (measured)
 
-- pm2 has restart-on-crash. It does **not** have a hard memory cap that triggers OOM kill — pm2's `max_memory_restart` is a soft poll. creekd's cap is the kernel doing the killing.
-- pm2 has no built-in HTTP router. You'd add nginx or Caddy in front, hand-write upstream config, and reload it on app changes. Here the routing is part of the daemon.
-- pm2 has no namespace isolation. Apps share the host kernel view of everything. creekd is opt-in here (the sandboxed-eval example shows what that opens up).
+| | creekd | pm2 |
+|---|---:|---:|
+| Spawn → /healthz 200 (p50) | **22 ms** | 187 ms |
+| Supervisor RSS (idle) | **12 MB** | 60 MB |
+| Memory cap reaction | Kernel OOM, < 100 ms | Up to 30 s (poll-based) |
+| Built-in HTTP router | Yes | No (use nginx) |
+| Namespace / chroot isolation | Opt-in | None |
+
+Full methodology + pro / con table: [COMPARISON.md](COMPARISON.md). Reproduce: `./up.sh && go run ./bench`.
