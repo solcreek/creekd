@@ -17,10 +17,13 @@ package supervisor
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +36,7 @@ import (
 	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/logs"
+	"github.com/solcreek/creekd/internal/network"
 	"github.com/solcreek/creekd/internal/runtime"
 	"github.com/solcreek/creekd/internal/sandbox"
 )
@@ -103,6 +107,20 @@ type Config struct {
 	// CLONE_NEW* flags, and Chroot are applied to the same child.
 	// Nil disables namespace isolation entirely.
 	Sandbox *sandbox.Spec
+
+	// NetIsolation opts into per-app network namespace + veth wiring.
+	// When true AND Supervisor.NetSubnet + NetBridgeName are
+	// configured AND the host is Linux, the supervisor:
+	//   1. allocates an IP from the configured subnet pool
+	//   2. creates a persistent netns at /var/run/netns/<appID>
+	//   3. creates a veth pair, attaches host side to the bridge,
+	//      moves container side into the netns, configures the IP +
+	//      default route
+	//   4. spawns the child via `ip netns exec` so it inherits the
+	//      configured netns
+	// Cleanup undoes all of the above when the app is stopped. The
+	// container IP is exposed via App.NetIP for dispatch routing.
+	NetIsolation bool
 }
 
 // App is one supervised application instance.
@@ -156,6 +174,15 @@ type App struct {
 	// sandbox stores the namespace/chroot spec to apply on every
 	// (re)start. Nil disables isolation.
 	sandbox *sandbox.Spec
+
+	// Net* hold the per-app network namespace + veth pair + allocated
+	// container IP when Config.NetIsolation was set at Spawn. NetIP
+	// is exported so callers (notably the admin API) can route
+	// dispatch traffic to the container-side address.
+	NetIP      net.IP
+	NetGateway net.IP
+	netNS      *network.Namespace
+	veth       *network.VethPair
 }
 
 // HealthFailures returns the cumulative count of failed health probes
@@ -335,9 +362,25 @@ type Supervisor struct {
 	// platforms the cgroup package is a no-op shim.
 	CgroupParent string
 
+	// NetSubnet + NetBridgeName configure per-app network namespace
+	// support (M5.10). Both must be set for Config.NetIsolation to
+	// have any effect. NetSubnet is an IPv4 CIDR like "10.42.0.0/24";
+	// the first usable address becomes the bridge gateway, the rest
+	// are allocated to apps. NetBridgeName names the kernel bridge
+	// interface (e.g. "creekd0") shared by all apps' veth peers.
+	NetSubnet     string
+	NetBridgeName string
+
 	// cgMgr is lazily constructed from CgroupParent on first use.
 	cgMgrOnce sync.Once
 	cgMgr     *cgroup.Manager
+
+	// netOnce + friends lazily set up the bridge, pool, and NAT rule
+	// on the first NetIsolation spawn.
+	netOnce   sync.Once
+	netPool   *network.IPPool
+	netBridge *network.Bridge
+	netErr    error
 }
 
 // cgroupManager returns the lazily-constructed cgroup manager, or nil
@@ -350,6 +393,126 @@ func (s *Supervisor) cgroupManager() *cgroup.Manager {
 		s.cgMgr = cgroup.NewManager(s.CgroupParent)
 	})
 	return s.cgMgr
+}
+
+// setupAppNetwork allocates an IP, creates the netns, and wires the
+// veth pair for an app whose Config.NetIsolation was set. On any
+// step's failure, partial state is rolled back before returning the
+// error. Mutates app.netNS / app.veth / app.NetIP / app.NetGateway
+// in place; caller is responsible for reverse-engineering on later
+// failures via teardownAppNetwork.
+func (s *Supervisor) setupAppNetwork(app *App) error {
+	ready, err := s.netReady()
+	if err != nil {
+		return fmt.Errorf("supervisor: net subsystem: %w", err)
+	}
+	if !ready {
+		return errors.New("supervisor: NetIsolation requires both NetSubnet and NetBridgeName")
+	}
+
+	ip, err := s.netPool.Allocate()
+	if err != nil {
+		return fmt.Errorf("supervisor: allocate ip: %w", err)
+	}
+
+	ns := &network.Namespace{Name: app.ID}
+	if err := ns.Create(); err != nil {
+		s.netPool.Release(ip)
+		return fmt.Errorf("supervisor: create netns: %w", err)
+	}
+
+	suffix := shortHash(app.ID)
+	veth := &network.VethPair{
+		HostName:      "cvh" + suffix,
+		ContainerName: "cvc" + suffix,
+		Bridge:        s.netBridge,
+		Namespace:     ns,
+		ContainerIP:   ip,
+		Gateway:       s.netPool.Gateway(),
+		PrefixLen:     s.netPool.Mask(),
+	}
+	if err := veth.Setup(); err != nil {
+		_ = ns.Delete()
+		s.netPool.Release(ip)
+		return fmt.Errorf("supervisor: veth setup: %w", err)
+	}
+
+	app.NetIP = ip
+	app.NetGateway = s.netPool.Gateway()
+	app.netNS = ns
+	app.veth = veth
+	return nil
+}
+
+// teardownAppNetwork undoes setupAppNetwork in reverse: removes the
+// veth pair (kernel reaps the container side automatically), deletes
+// the netns, releases the IP back to the pool. Idempotent and
+// failure-tolerant.
+func (s *Supervisor) teardownAppNetwork(app *App) {
+	if app.veth != nil {
+		if err := app.veth.Teardown(); err != nil {
+			s.logger.Warn("veth teardown failed", "id", app.ID, "err", err)
+		}
+		app.veth = nil
+	}
+	if app.netNS != nil {
+		if err := app.netNS.Delete(); err != nil {
+			s.logger.Warn("netns delete failed", "id", app.ID, "err", err)
+		}
+		app.netNS = nil
+	}
+	if app.NetIP != nil && s.netPool != nil {
+		s.netPool.Release(app.NetIP)
+		app.NetIP = nil
+		app.NetGateway = nil
+	}
+}
+
+// shortHash returns 8 hex chars of an FNV-32 hash of s. Used for
+// generating veth interface names that fit IFNAMSIZ (15 chars).
+// Deterministic per app ID, so a restart with the same ID picks the
+// same names — useful when leftover state from a crash needs
+// best-effort cleanup.
+func shortHash(s string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return hex.EncodeToString(h.Sum(nil))[:8]
+}
+
+// netReady reports whether per-app network isolation is configured
+// and brings up the shared bridge + MASQUERADE rule on first use.
+// Returns (false, nil) when NetSubnet/NetBridgeName are empty,
+// (false, err) on setup failure (subsequent calls return the same
+// cached error), and (true, nil) once the bridge is ready.
+func (s *Supervisor) netReady() (bool, error) {
+	if s.NetSubnet == "" || s.NetBridgeName == "" {
+		return false, nil
+	}
+	s.netOnce.Do(func() {
+		pool, err := network.NewIPPool(s.NetSubnet)
+		if err != nil {
+			s.netErr = fmt.Errorf("net pool: %w", err)
+			return
+		}
+		s.netPool = pool
+		s.netBridge = &network.Bridge{Name: s.NetBridgeName, Pool: pool}
+		if err := s.netBridge.Ensure(); err != nil {
+			s.netErr = fmt.Errorf("net bridge: %w", err)
+			return
+		}
+		if err := network.EnsureMasquerade(pool.CIDR(), s.NetBridgeName); err != nil {
+			s.netErr = fmt.Errorf("net masquerade: %w", err)
+			return
+		}
+		s.logger.Info("net subsystem ready",
+			"subnet", s.NetSubnet, "bridge", s.NetBridgeName,
+			"gateway", pool.Gateway().String(),
+		)
+	})
+	if s.netErr != nil {
+		return false, s.netErr
+	}
+	return true, nil
 }
 
 // HealthChecker probes a running supervised app and returns nil if it
@@ -497,7 +660,20 @@ func (s *Supervisor) Spawn(cfg Config) (*App, error) {
 		app.cgLimits = &lim
 	}
 
+	if cfg.NetIsolation {
+		if err := s.setupAppNetwork(app); err != nil {
+			if app.rotator != nil {
+				_ = app.rotator.Close()
+			}
+			if app.cg != nil {
+				_ = app.cg.Remove()
+			}
+			return nil, err
+		}
+	}
+
 	if err := s.startLocked(app, cfg.Env); err != nil {
+		s.teardownAppNetwork(app)
 		if app.rotator != nil {
 			_ = app.rotator.Close()
 		}
@@ -564,6 +740,20 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	app.setStatus(StatusStarting)
 
 	cmd := exec.Command(app.Command, app.Args...)
+
+	// When the app has a pre-configured netns, wrap the command in
+	// `ip netns exec <ns> <orig command> <orig args...>`. iproute2's
+	// `ip netns exec` setns()'s into the target namespace and then
+	// exec()s the inner command, replacing itself — the PID we
+	// observe is the real child, not the `ip` wrapper.
+	if app.netNS != nil {
+		origPath := cmd.Path
+		origArgs := cmd.Args // includes argv[0] convention
+		cmd = exec.Command("ip", append([]string{
+			"netns", "exec", app.netNS.Name, origPath,
+		}, origArgs[1:]...)...)
+	}
+
 	env := append(os.Environ(), fmt.Sprintf("PORT=%d", app.Port))
 	if len(extraEnv) > 0 {
 		env = append(env, extraEnv...)
@@ -962,8 +1152,9 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 func (s *Supervisor) stopApp(app *App, timeout time.Duration) error {
 	// Close the log rotator after the watch goroutine has finished
 	// draining the child's pipes (signalled by done close), then
-	// remove the per-app cgroup directory. Both are best-effort —
-	// failures are logged but don't fail the stop.
+	// remove the per-app cgroup directory and tear down the network
+	// namespace + veth pair. All best-effort — failures are logged
+	// but don't fail the stop.
 	defer func() {
 		if app.rotator != nil {
 			if err := app.rotator.Close(); err != nil {
@@ -975,6 +1166,7 @@ func (s *Supervisor) stopApp(app *App, timeout time.Duration) error {
 				s.logger.Warn("cgroup remove failed", "id", app.ID, "err", err)
 			}
 		}
+		s.teardownAppNetwork(app)
 	}()
 
 	cmd := app.snapshotCmd()

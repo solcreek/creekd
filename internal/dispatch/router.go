@@ -19,31 +19,41 @@ const HeaderAppID = "X-Creek-App"
 // QueryAppID is the query-string alias for HeaderAppID.
 const QueryAppID = "app"
 
+// DefaultHost is used by Set when the caller doesn't supply a host
+// explicitly. Matches the historical behaviour of the router (apps
+// listening on the host's loopback interface).
+const DefaultHost = "127.0.0.1"
+
 // Backend is one routable destination: the target URL of an app's
-// process on localhost, plus a memoised reverse proxy. Backends are
-// immutable once created; route updates produce a new Backend.
+// process at <Host>:<Port>, plus a memoised reverse proxy. Backends
+// are immutable once created; route updates produce a new Backend.
 type Backend struct {
 	AppID string
+	Host  string
 	Port  int
 	URL   *url.URL
 	proxy *httputil.ReverseProxy
 }
 
-// newBackend constructs a Backend for appID listening on port. Port
-// must be > 0.
-func newBackend(appID string, port int) (*Backend, error) {
+// newBackend constructs a Backend for appID listening on host:port.
+// host == "" defaults to DefaultHost.
+func newBackend(appID, host string, port int) (*Backend, error) {
 	if appID == "" {
 		return nil, errors.New("dispatch: empty appID")
 	}
 	if port <= 0 || port > 65535 {
 		return nil, fmt.Errorf("dispatch: invalid port %d", port)
 	}
-	u, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	if host == "" {
+		host = DefaultHost
+	}
+	u, err := url.Parse(fmt.Sprintf("http://%s:%d", host, port))
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: parse backend url: %w", err)
 	}
 	return &Backend{
 		AppID: appID,
+		Host:  host,
 		Port:  port,
 		URL:   u,
 		proxy: httputil.NewSingleHostReverseProxy(u),
@@ -63,14 +73,23 @@ func NewRouter() *Router {
 	return &Router{routes: make(map[string]*Backend)}
 }
 
-// Set installs (or atomically replaces) the route for appID. Existing
-// in-flight requests against the previous backend continue normally;
-// new requests after Set returns go to port.
+// Set installs (or atomically replaces) the route for appID using
+// DefaultHost (127.0.0.1) as the backend host. Shorthand for
+// SetAddr(appID, "", port).
 //
 // Set is the blue-green flip primitive: once the v2 process is
 // healthy, the caller invokes Set(appID, v2Port) and the swap is live.
 func (r *Router) Set(appID string, port int) error {
-	b, err := newBackend(appID, port)
+	return r.SetAddr(appID, "", port)
+}
+
+// SetAddr installs (or atomically replaces) the route for appID
+// pointing at host:port. Used by callers (notably the supervisor)
+// that need to route to a non-loopback address — e.g. an app's
+// container IP inside a network namespace. host == "" falls back to
+// DefaultHost.
+func (r *Router) SetAddr(appID, host string, port int) error {
+	b, err := newBackend(appID, host, port)
 	if err != nil {
 		return err
 	}

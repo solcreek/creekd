@@ -115,6 +115,7 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		Port:         req.Port,
 		Env:          req.Env,
 		CgroupLimits: req.Limits.toCgroupLimits(),
+		NetIsolation: req.NetIsolation,
 	}
 
 	app, err := s.sup.Spawn(cfg)
@@ -124,12 +125,19 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.router != nil {
-		if rerr := s.router.Set(req.ID, req.Port); rerr != nil {
+		// Route via the container IP when net isolation is on so
+		// dispatch traffic crosses the bridge; otherwise fall back to
+		// the default loopback host.
+		host := ""
+		if app.NetIP != nil {
+			host = app.NetIP.String()
+		}
+		if rerr := s.router.SetAddr(req.ID, host, req.Port); rerr != nil {
 			// Roll back the spawn — half-registered apps are worse
 			// than a clean failure.
 			_ = s.sup.Stop(req.ID)
 			writeError(w, http.StatusBadRequest, CodeBadRequest,
-				"dispatch.Set: "+rerr.Error())
+				"dispatch.SetAddr: "+rerr.Error())
 			return
 		}
 	}
@@ -215,6 +223,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			Port:         req.Port,
 			Env:          req.Env,
 			CgroupLimits: req.Limits.toCgroupLimits(),
+			NetIsolation: req.NetIsolation,
 		},
 		ReadyTimeout:      msOr(req.ReadyTimeoutMS, 0),
 		PollInterval:      msOr(req.PollIntervalMS, 0),

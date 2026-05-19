@@ -12,14 +12,15 @@ import (
 // Exactly one of (Command + Args) or (Runtime + Entry) must be set;
 // see supervisor.Config for the resolution rules.
 type SpawnRequest struct {
-	ID      string   `json:"id"`
-	Runtime string   `json:"runtime,omitempty"`
-	Entry   string   `json:"entry,omitempty"`
-	Command string   `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Port    int      `json:"port"`
-	Env     []string `json:"env,omitempty"`
-	Limits  *Limits  `json:"limits,omitempty"`
+	ID           string   `json:"id"`
+	Runtime      string   `json:"runtime,omitempty"`
+	Entry        string   `json:"entry,omitempty"`
+	Command      string   `json:"command,omitempty"`
+	Args         []string `json:"args,omitempty"`
+	Port         int      `json:"port"`
+	Env          []string `json:"env,omitempty"`
+	Limits       *Limits  `json:"limits,omitempty"`
+	NetIsolation bool     `json:"net_isolation,omitempty"`
 }
 
 // RestartRequest is the body of POST /v1/apps/{id}/restart. An empty
@@ -33,16 +34,17 @@ type RestartRequest struct {
 // identifies the v1 app; the body describes v2. Port must differ
 // from v1's current port.
 type DeployRequest struct {
-	Runtime         string   `json:"runtime,omitempty"`
-	Entry           string   `json:"entry,omitempty"`
-	Command         string   `json:"command,omitempty"`
-	Args            []string `json:"args,omitempty"`
-	Port            int      `json:"port"`
-	Env             []string `json:"env,omitempty"`
-	Limits          *Limits  `json:"limits,omitempty"`
-	ReadyTimeoutMS  int64    `json:"ready_timeout_ms,omitempty"`
-	PollIntervalMS  int64    `json:"poll_interval_ms,omitempty"`
-	GracefulV1MS    int64    `json:"graceful_v1_ms,omitempty"`
+	Runtime           string   `json:"runtime,omitempty"`
+	Entry             string   `json:"entry,omitempty"`
+	Command           string   `json:"command,omitempty"`
+	Args              []string `json:"args,omitempty"`
+	Port              int      `json:"port"`
+	Env               []string `json:"env,omitempty"`
+	Limits            *Limits  `json:"limits,omitempty"`
+	NetIsolation      bool     `json:"net_isolation,omitempty"`
+	ReadyTimeoutMS    int64    `json:"ready_timeout_ms,omitempty"`
+	PollIntervalMS    int64    `json:"poll_interval_ms,omitempty"`
+	GracefulV1MS      int64    `json:"graceful_v1_ms,omitempty"`
 }
 
 // Limits mirrors cgroup.Limits in the JSON wire format. Zero fields
@@ -74,16 +76,19 @@ func (l *Limits) toCgroupLimits() *cgroup.Limits {
 // AppView is the JSON representation of a supervised app — returned
 // by GET endpoints and by successful spawn/deploy responses.
 type AppView struct {
-	ID             string `json:"id"`
-	Runtime        string `json:"runtime,omitempty"`
-	Command        string `json:"command"`
+	ID             string   `json:"id"`
+	Runtime        string   `json:"runtime,omitempty"`
+	Command        string   `json:"command"`
 	Args           []string `json:"args,omitempty"`
-	Port           int    `json:"port"`
-	Status         string `json:"status"`
-	PID            int    `json:"pid"`
-	UptimeMS       int64  `json:"uptime_ms"`
-	RestartCount   int    `json:"restart_count"`
-	HealthFailures int64  `json:"health_failures"`
+	Port           int      `json:"port"`
+	Status         string   `json:"status"`
+	PID            int      `json:"pid"`
+	UptimeMS       int64    `json:"uptime_ms"`
+	RestartCount   int      `json:"restart_count"`
+	HealthFailures int64    `json:"health_failures"`
+	// NetIP is the container-side IP when the app was spawned with
+	// NetIsolation. Empty for host-network apps.
+	NetIP string `json:"net_ip,omitempty"`
 }
 
 // viewOf snapshots an *supervisor.App into an AppView. Returns the
@@ -92,7 +97,7 @@ func viewOf(app *supervisor.App) AppView {
 	if app == nil {
 		return AppView{}
 	}
-	return AppView{
+	v := AppView{
 		ID:             app.ID,
 		Runtime:        string(app.Runtime),
 		Command:        app.Command,
@@ -104,6 +109,10 @@ func viewOf(app *supervisor.App) AppView {
 		RestartCount:   app.RestartCount(),
 		HealthFailures: app.HealthFailures(),
 	}
+	if app.NetIP != nil {
+		v.NetIP = app.NetIP.String()
+	}
+	return v
 }
 
 // ListResponse is the body of GET /v1/apps.

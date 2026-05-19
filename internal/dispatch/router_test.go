@@ -93,6 +93,32 @@ func TestRouterSetAndGet(t *testing.T) {
 	}
 }
 
+func TestRouterSetAddrUsesHost(t *testing.T) {
+	r := NewRouter()
+	if err := r.SetAddr("a", "10.42.0.5", 8080); err != nil {
+		t.Fatalf("SetAddr: %v", err)
+	}
+	b := r.Get("a")
+	if b == nil {
+		t.Fatal("Get returned nil")
+	}
+	if b.Host != "10.42.0.5" {
+		t.Errorf("Host = %q, want 10.42.0.5", b.Host)
+	}
+	if b.URL.Host != "10.42.0.5:8080" {
+		t.Errorf("URL.Host = %q, want 10.42.0.5:8080", b.URL.Host)
+	}
+}
+
+func TestRouterSetDefaultsToLoopback(t *testing.T) {
+	r := NewRouter()
+	_ = r.Set("a", 9000)
+	b := r.Get("a")
+	if b.Host != DefaultHost {
+		t.Errorf("Host = %q, want %q", b.Host, DefaultHost)
+	}
+}
+
 func TestRouterSetReplaces(t *testing.T) {
 	r := NewRouter()
 	_ = r.Set("a", 9000)
