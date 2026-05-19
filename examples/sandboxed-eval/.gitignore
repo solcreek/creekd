@@ -1,0 +1,5 @@
+bin/
+rootfs/
+state/
+creekd.log
+creekd.pid
