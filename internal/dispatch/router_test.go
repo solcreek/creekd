@@ -336,6 +336,41 @@ func TestBackendDownReturns502(t *testing.T) {
 	}
 }
 
+// TestBackendDownConcurrentServeIsRaceFree hammers the same down
+// backend from many goroutines. Pre-fix, ServeHTTP mutated the
+// shared Backend.proxy.ErrorHandler on every request — race
+// detector should flag concurrent writes to that field. After the
+// fix, ErrorHandler is set once in newBackend and never touched
+// again at serve time.
+func TestBackendDownConcurrentServeIsRaceFree(t *testing.T) {
+	r := NewRouter()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	if err := r.Set("dead", port); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			status, body := proxyGet(t, r, "dead", "/")
+			if status != http.StatusBadGateway {
+				t.Errorf("status = %d, want 502", status)
+			}
+			if !strings.Contains(body, "dead") {
+				t.Errorf("body should mention app id, got %q", body)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestRouterConcurrentSetGetRace(t *testing.T) {
 	r := NewRouter()
 	var wg sync.WaitGroup

@@ -51,13 +51,23 @@ func newBackend(appID, host string, port int) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: parse backend url: %w", err)
 	}
-	return &Backend{
+	b := &Backend{
 		AppID: appID,
 		Host:  host,
 		Port:  port,
 		URL:   u,
 		proxy: httputil.NewSingleHostReverseProxy(u),
-	}, nil
+	}
+	// Set the ErrorHandler exactly once at construction. Mutating it
+	// per request (the prior approach) is a data race when multiple
+	// goroutines proxy through the same backend — even if the closure
+	// content is identical, the Go memory model treats concurrent
+	// writes to a shared field as a race.
+	id := appID
+	b.proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(w, "dispatch: upstream unavailable for app "+id, http.StatusBadGateway)
+	}
+	return b, nil
 }
 
 // Router holds the appID → Backend table. Set/Remove are atomic; Get
@@ -168,12 +178,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "dispatch: no route for app "+id, http.StatusServiceUnavailable)
 		return
 	}
-	// Install a per-request ErrorHandler so transient backend failures
-	// surface as a clean 502 rather than the default behaviour
-	// (httputil writes a 502 with empty body and logs to stderr).
-	b.proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-		http.Error(w, "dispatch: upstream unavailable for app "+id, http.StatusBadGateway)
-	}
+	// ErrorHandler is set once in newBackend; safe to read here.
 	b.proxy.ServeHTTP(w, req)
 }
 
