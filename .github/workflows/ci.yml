@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test -race
+        # Linux-only tests that need CAP_SYS_ADMIN (cgroup v2, netns,
+        # PID namespace, chroot) self-skip via requirePrivilegedCgroupSup
+        # when the runner doesn't have the caps. The privileged job
+        # below picks them up.
+        run: go test -race -count=1 -timeout 180s ./...
+
+  test-linux-privileged:
+    name: test-linux (privileged docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test-linux
+        # Builds Dockerfile.test (busybox-static, iproute2, iptables,
+        # util-linux's setpriv) and runs the full suite inside a
+        # --privileged container with cgroupfs rw — the only way the
+        # M5.5 cgroup / netns / sandbox integration tests actually run.
+        run: make test-linux
+
+  bench:
+    name: bench (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make bench
+        # Smoke-only: ensures every Benchmark* still compiles and
+        # produces output. No numeric assertion — runner CPU is noisy.
+        run: make bench
