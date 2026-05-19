@@ -54,7 +54,16 @@ func platformApply(cmd *exec.Cmd, spec Spec) error {
 //
 // setpriv must be in PATH on the host. Every mainstream Linux
 // distribution ships it as part of util-linux; the Dockerfile.test
-// pulls it explicitly via the iproute2 / iptables install layer.
+// installs it explicitly via the util-linux apt package.
+//
+// Known incompatibility: this wrap does not compose with a chroot
+// on a rootfs that doesn't itself contain setpriv. The clone3 path
+// chroots before exec, so the kernel looks for setpriv inside the
+// jail. Callers that combine NoNewPrivs with Chroot must either
+// copy setpriv (and its shared libs) into the rootfs, or accept
+// that the supervised process won't have NoNewPrivs set. A future
+// version will do prctl(PR_SET_NO_NEW_PRIVS) inline (no helper
+// binary), removing this constraint.
 func WrapNoNewPrivs(cmd *exec.Cmd) *exec.Cmd {
 	origPath := cmd.Path
 	origArgs := cmd.Args
