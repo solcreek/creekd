@@ -27,6 +27,10 @@ import (
 	"syscall"
 )
 
+// version is stamped at build time via -ldflags '-X main.version=...'.
+// Falls back to "0.0.0-dev" for plain `go build`.
+var version = "0.0.0-dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usageAndExit(2)
@@ -43,6 +47,9 @@ func main() {
 		switch sub {
 		case "-h", "--help", "help":
 			usageAndExit(0)
+		case "version", "-v", "--version":
+			fmt.Println(version)
+			return
 		default:
 			fmt.Fprintf(os.Stderr, "creekctl: unknown command %q\n\n", sub)
 			usageAndExit(2)
@@ -72,6 +79,7 @@ Commands:
   deploy <id>        blue-green deploy a new version (flags: --port, ...)
   logs <id>          tail the per-app log (--tail N)
   stats <id>         show cgroup-tracked resource counters
+  version            print version
   help               this message
 
 Global flags (also accepted as env vars):

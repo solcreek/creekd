@@ -43,7 +43,9 @@ import (
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
-const version = "0.0.0-dev"
+// version is stamped at build time via -ldflags '-X main.version=...'.
+// Falls back to "0.0.0-dev" for plain `go build`.
+var version = "0.0.0-dev"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{

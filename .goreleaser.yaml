@@ -1,0 +1,100 @@
+# goreleaser config for creekd.
+#
+# Triggered by the release workflow when a v* tag is pushed. Produces:
+#   - linux/amd64, linux/arm64 binaries (creekd + creekctl)
+#   - darwin/amd64, darwin/arm64 binaries (creekctl + creekd; creekd's
+#     Linux-only paths are guarded at runtime, so the binary is useful
+#     for development)
+#   - per-arch tarballs and a SHA256SUMS file
+#   - a GitHub Release with auto-generated changelog
+#
+# CGO is off everywhere — Phase 1 has no native dependencies. When the
+# seccomp / capability work lands (Phase 2) this will need per-arch
+# C cross-compilers; document then.
+version: 2
+
+project_name: creekd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: creekd
+    main: ./cmd/creekd
+    binary: creekd
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: creekctl
+    main: ./cmd/creekctl
+    binary: creekctl
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: default
+    name_template: >-
+      {{- .ProjectName }}_{{ .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    format_overrides:
+      - goos: linux
+        formats: [tar.gz]
+      - goos: darwin
+        formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - docs/CONFIG.md
+      - docs/DESIGN.md
+      - SECURITY.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot+{{.ShortCommit}}"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+
+release:
+  github:
+    owner: solcreek
+    name: creekd
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  header: |
+    `creekd` {{ .Tag }} — multi-tenant process supervisor + HTTP dispatcher.
+
+    Install via `curl -fsSL https://raw.githubusercontent.com/solcreek/creekd/{{.Tag}}/install.sh | sh`,
+    or download a tarball below.
+  footer: |
+    ---
+    Full diff: https://github.com/solcreek/creekd/compare/{{ .PreviousTag }}...{{ .Tag }}
