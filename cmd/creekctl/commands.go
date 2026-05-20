@@ -293,6 +293,7 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		runtimeArg = fs.String("runtime", "", "bun|node|deno (with --entry)")
 		port       = fs.Int("port", 0, "dispatch port the app listens on")
 		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
+		healthPath = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		netIso     = fs.Bool("net-isolation", false, "spawn inside a per-app netns")
@@ -307,16 +308,17 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	req := adminapi.SpawnRequest{
-		ID:           id,
-		Command:      *command,
-		Entry:        *entry,
-		Runtime:      *runtimeArg,
-		Args:         args,
-		Env:          env,
-		Port:         *port,
-		Limits:       limits,
-		NetIsolation: *netIso,
-		Sandbox:      sf.toAPI(),
+		ID:              id,
+		Command:         *command,
+		Entry:           *entry,
+		Runtime:         *runtimeArg,
+		Args:            args,
+		Env:             env,
+		Port:            *port,
+		Limits:          limits,
+		NetIsolation:    *netIso,
+		Sandbox:         sf.toAPI(),
+		HealthCheckPath: *healthPath,
 	}
 	if *fromPath != "" {
 		manifest, projectDir, err := loadManifest(*fromPath)
@@ -422,6 +424,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		runtimeArg = fs.String("runtime", "", "bun|node|deno")
 		port       = fs.Int("port", 0, "v2 port (must differ from v1's)")
 		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
+		healthPath = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		readyMS    = fs.Int64("ready-timeout-ms", 0, "max wait for v2 to be healthy")
@@ -437,16 +440,17 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	req := adminapi.DeployRequest{
-		Command:        *command,
-		Entry:          *entry,
-		Runtime:        *runtimeArg,
-		Args:           args,
-		Env:            env,
-		Port:           *port,
-		Limits:         limits,
-		ReadyTimeoutMS: *readyMS,
-		NetIsolation:   *netIso,
-		Sandbox:        sf.toAPI(),
+		Command:         *command,
+		Entry:           *entry,
+		Runtime:         *runtimeArg,
+		Args:            args,
+		Env:             env,
+		Port:            *port,
+		Limits:          limits,
+		ReadyTimeoutMS:  *readyMS,
+		NetIsolation:    *netIso,
+		Sandbox:         sf.toAPI(),
+		HealthCheckPath: *healthPath,
 	}
 	if *fromPath != "" {
 		manifest, projectDir, err := loadManifest(*fromPath)

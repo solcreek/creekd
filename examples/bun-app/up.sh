@@ -45,6 +45,7 @@ echo "==> spawning bun app"
     --entry "$HERE/app/server.ts" \
     --env "APP_VERSION=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo dev)" \
     --port 18401 \
+    --health-path /healthz \
     $LIMIT_ARGS >/dev/null
 
 echo

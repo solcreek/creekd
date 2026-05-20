@@ -141,16 +141,17 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := supervisor.Config{
-		ID:           req.ID,
-		Runtime:      rt,
-		Entry:        req.Entry,
-		Command:      req.Command,
-		Args:         req.Args,
-		Port:         req.Port,
-		Env:          req.Env,
-		CgroupLimits: req.Limits.toCgroupLimits(),
-		NetIsolation: req.NetIsolation,
-		Sandbox:      req.Sandbox.toSandboxSpec(),
+		ID:              req.ID,
+		Runtime:         rt,
+		Entry:           req.Entry,
+		Command:         req.Command,
+		Args:            req.Args,
+		Port:            req.Port,
+		Env:             req.Env,
+		CgroupLimits:    req.Limits.toCgroupLimits(),
+		NetIsolation:    req.NetIsolation,
+		Sandbox:         req.Sandbox.toSandboxSpec(),
+		HealthCheckPath: req.HealthCheckPath,
 	}
 
 	app, err := s.sup.Spawn(cfg)
@@ -276,16 +277,17 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 
 	dcfg := supervisor.DeployConfig{
 		Config: supervisor.Config{
-			ID:           id,
-			Runtime:      rt,
-			Entry:        req.Entry,
-			Command:      req.Command,
-			Args:         req.Args,
-			Port:         req.Port,
-			Env:          req.Env,
-			CgroupLimits: req.Limits.toCgroupLimits(),
-			NetIsolation: req.NetIsolation,
-			Sandbox:      req.Sandbox.toSandboxSpec(),
+			ID:              id,
+			Runtime:         rt,
+			Entry:           req.Entry,
+			Command:         req.Command,
+			Args:            req.Args,
+			Port:            req.Port,
+			Env:             req.Env,
+			CgroupLimits:    req.Limits.toCgroupLimits(),
+			NetIsolation:    req.NetIsolation,
+			Sandbox:         req.Sandbox.toSandboxSpec(),
+			HealthCheckPath: req.HealthCheckPath,
 		},
 		ReadyTimeout:      msOr(req.ReadyTimeoutMS, 0),
 		PollInterval:      msOr(req.PollIntervalMS, 0),

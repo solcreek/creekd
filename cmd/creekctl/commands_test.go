@@ -275,6 +275,31 @@ func TestPSEmpty(t *testing.T) {
 	}
 }
 
+// TestUpHealthPathFlag: --health-path flows through the JSON wire
+// and lands on App.HealthCheckPath. Probes for that override path
+// at runtime are covered in internal/supervisor/healthchecker_test.go;
+// this guards the CLI-to-supervisor plumbing.
+func TestUpHealthPathFlag(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"hp", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+		"--health-path", "/healthz",
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("hp") })
+
+	app := sup.Get("hp")
+	if app == nil {
+		t.Fatal("supervisor: app hp not registered")
+	}
+	if app.HealthCheckPath != "/healthz" {
+		t.Errorf("HealthCheckPath = %q, want /healthz", app.HealthCheckPath)
+	}
+}
+
 func TestUpAndPS(t *testing.T) {
 	url, sup := newTestBackend(t)
 	port := freeTCPPort(t)
