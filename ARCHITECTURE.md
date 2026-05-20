@@ -2,7 +2,7 @@
 
 This document records the rules creekd uses to evaluate what gets *added*. [`docs/DESIGN.md`](docs/DESIGN.md) covers the shape of the system that already exists — process model, isolation primitives, dispatch wiring. This one is about future change: when contributors (or maintainers) propose new code, new dependencies, or new features, these are the tests they're judged against.
 
-Two principles. Both have load-bearing real examples in the codebase.
+Three principles. The first two have load-bearing real examples in the codebase; the third is the design commitment that protects principles 1-2 from being walked back later under commercial pressure.
 
 ---
 
@@ -72,6 +72,54 @@ When evaluating a feature proposal, ask:
 - **Not "creekd has no defaults."** Defaults are essential — they're the policy floor for someone who hasn't thought about it yet. `CREEKD_DEFAULT_MEMORY_HIGH=256M` is a default; making it un-changeable would be policy.
 - **Not "creekd never enforces anything."** Process isolation (cgroups, namespaces), health-check kills, crash-loop detection — all enforcement. The line is at "decisions about what a *tenant* is and what they're allowed."
 - **Not "creekd has no opinions."** It absolutely does (see [`docs/DESIGN.md`](docs/DESIGN.md) for the design opinions). Opinions on the engineering side; neutrality on the business side.
+
+---
+
+## 3. The hosted product should be survivable to die
+
+**creekd has zero runtime dependency on any service operated by SolCreek (the company). If the hosted product or its vendor account ever vanishes, every existing creekd instance keeps working unmodified.**
+
+### Why
+
+PaaS outages don't distinguish "the vendor's fault" from "your fault" in the customer's experience. Railway's 8-hour [GCP account suspension on 2026-05-19](https://blog.railway.com/p/incident-report-may-19-2026-gcp-account-outage) is the canonical recent example: GCP suspended Railway's corporate account, and even Railway's workloads running on AWS and bare metal went offline because their control plane was single-cloud. The customer didn't care whose fault it was; their app was down for 8 hours.
+
+The defense against this class of failure is not "engineer better redundancy on the vendor side" — that's their job, not ours. The defense is **architectural**: the substrate the user actually runs (creekd) cannot be coupled to anything that can fail.
+
+That coupling is easy to introduce by accident:
+
+- A license check that phones home — fails when home is unreachable.
+- Telemetry that requires the cloud-hosted endpoint — degrades silently or fails.
+- An auto-update path that pulls config from a SolCreek-operated registry — stops updating.
+- An "activation" step that needs a SolCreek API to be reachable on first boot.
+
+None of these exist in creekd today. This principle's job is to keep it that way.
+
+### How to apply
+
+When evaluating a feature proposal, ask:
+
+1. **Does creekd, once installed, ever need to reach a SolCreek-operated service to keep functioning?** If yes, the feature is wrong — even if the SolCreek service is "high-availability" and "five-9s." The answer must be no.
+2. **Does the customer's data live in a place SolCreek can withdraw access to?** Code is in their git. Database is in their Postgres / CF D1 / wherever they declared. Storage is in their R2 / S3 / wherever. If we ever propose putting customer data in a SolCreek-owned store, we're back to Railway's exposure.
+3. **Is the eject path treated as a real engineering deliverable?** Not a docs page, not a JSON dump that maybe works — a tested, supported way to leave that's part of the release pipeline. Today it's `git clone + creekctl up`; v2's `creek eject` makes it one command. The bar is "tested and supported," not "theoretically possible."
+
+### What this is NOT
+
+- **Not "Creek Cloud is unimportant."** It is the primary product, the revenue layer, the place most users will start. This principle is about what happens when the primary product fails, not about deprioritising it.
+- **Not "creekd is a downgrade."** Self-host is a different shape, not a worse shape. It's the same daemon that runs underneath any future Creek Cloud deployment.
+- **Not "we're advertising the eject path as a feature."** Marketing the OSS escape hatch only works if the path is actually smooth. As of `v0.4.0`, it works but takes an afternoon (clone, build, configure DNS, set up TLS). `creek eject` (v2 design intent, design doc lives in the private planning repo) is the deliverable that closes that gap. Until that ships, the principle is a design commitment, not a marketing claim.
+
+### Current state vs forward intent
+
+| Aspect | Today (`creekd v0.4.x`) | Forward (v2 `creek eject`) |
+|---|---|---|
+| Code portability | ✅ Git repo, user owns it | ✅ Unchanged |
+| Data residency | ✅ User's own CF / Postgres account | ✅ Unchanged |
+| Substrate independence | ✅ creekd is self-contained | ✅ Unchanged |
+| Setup smoothness | ⚠️ Manual (clone, build, configure) | ✅ One command (design intent) |
+| TLS termination | ❌ Not bundled (use Caddy in front) | ✅ Bundled or scripted |
+| Migration tooling | ❌ Manual | ✅ `creek eject` exports docker-compose + db dump + INFRASTRUCTURE.md |
+
+The principle is **load-bearing today** (you can already leave) but **incomplete today** (the path is not smooth). Both things are true. We don't claim the smooth path until it ships.
 
 ---
 
