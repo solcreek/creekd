@@ -29,7 +29,7 @@ You already build and ship binaries (Bun / Node / Deno or any process that liste
 - you'd rather own the supervisor than rent it
 - you're fine running one machine — multi-host is solved one layer up (a load balancer in front of N creekd hosts)
 
-See [`examples/`](examples/README.md) for four runnable recipes: pm2 replacement, sandboxed code runner, branch review apps, Bun framework demo. Two of them carry head-to-head benches (vs pm2, vs docker).
+See [`examples/`](examples/README.md) for six runnable recipes covering supervisor replacement, sandboxed code runner, branch review apps, Bun framework demo, Next.js density vs `docker run`, and idle-PSS per stack (Bun / Hono / SvelteKit / Astro / Next.js). Most carry head-to-head benches with reproducible numbers.
 
 ## When it doesn't (yet)
 

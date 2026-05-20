@@ -9,12 +9,11 @@
 //
 // The dispatch table is updated by deploy events:
 //
-//   - new app:    Set inserts an entry
-//   - undeploy:   Remove drops an entry
-//   - blue-green: Set on an existing app id atomically swaps the
-//                 backend; in-flight requests on the old backend
-//                 drain naturally because each Backend keeps its
-//                 own *ReverseProxy.
+//   - new app:    Set inserts an entry.
+//   - undeploy:   Remove drops an entry.
+//   - blue-green: Set on an existing app id atomically swaps the backend.
+//     In-flight requests on the old backend drain naturally because
+//     each Backend keeps its own *ReverseProxy.
 //
 // Per-app health is tracked by the supervisor, not dispatch — a
 // failing /healthz signals the supervisor to restart the child,
