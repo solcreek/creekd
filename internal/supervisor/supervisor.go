@@ -444,6 +444,19 @@ type Supervisor struct {
 	// justification).
 	DefaultMemoryHigh int64
 
+	// DefaultMemoryMax is the daemon-wide floor for memory.max — the
+	// hard cap that triggers a cgroup-scoped OOM kill when crossed.
+	// Same opt-out semantics as DefaultMemoryHigh: applied whenever
+	// the caller didn't pass an explicit MemoryMax and CgroupParent
+	// is configured.
+	//
+	// In practice memory.high catches every realistic allocation
+	// pattern (see examples/cgroup-memory-tuning Phase 4-5); this
+	// hard cap is the safety net for the rare case where reclaim
+	// genuinely can't keep up. Recommended production value: 1 GiB
+	// (≈3.6× the empirical worst-case peak under memory.high=256M).
+	DefaultMemoryMax int64
+
 	// NetSubnet + NetBridgeName configure per-app network namespace
 	// support (M5.10). Both must be set for Config.NetIsolation to
 	// have any effect. NetSubnet is an IPv4 CIDR like "10.42.0.0/24";
@@ -477,23 +490,40 @@ func (s *Supervisor) cgroupManager() *cgroup.Manager {
 	return s.cgMgr
 }
 
-// applyCgroupDefaults injects DefaultMemoryHigh into cfg.CgroupLimits
-// when the supervisor has a default configured and the caller hasn't
-// set an explicit MemoryHigh. Returns the (possibly mutated) cfg.
+// applyCgroupDefaults injects DefaultMemoryHigh and DefaultMemoryMax
+// into cfg.CgroupLimits when the supervisor has defaults configured
+// and the caller hasn't set those fields explicitly. Returns the
+// (possibly mutated) cfg.
 //
-// Skipped when CgroupParent is empty (no slice to hold the limits) or
-// DefaultMemoryHigh is zero. Explicit per-app values always win.
+// Skipped entirely when CgroupParent is empty (no slice to hold the
+// limits). Each default is applied independently: a caller can set
+// MemoryHigh explicitly and still get the daemon-wide MemoryMax
+// default, or vice-versa. Explicit per-app values always win.
 func (s *Supervisor) applyCgroupDefaults(cfg Config) Config {
-	if s.CgroupParent == "" || s.DefaultMemoryHigh <= 0 {
+	if s.CgroupParent == "" {
+		return cfg
+	}
+	if s.DefaultMemoryHigh <= 0 && s.DefaultMemoryMax <= 0 {
 		return cfg
 	}
 	if cfg.CgroupLimits == nil {
-		cfg.CgroupLimits = &cgroup.Limits{MemoryHigh: s.DefaultMemoryHigh}
+		cfg.CgroupLimits = &cgroup.Limits{
+			MemoryHigh: s.DefaultMemoryHigh,
+			MemoryMax:  s.DefaultMemoryMax,
+		}
 		return cfg
 	}
-	if cfg.CgroupLimits.MemoryHigh == 0 {
-		lim := *cfg.CgroupLimits
+	lim := *cfg.CgroupLimits
+	mutated := false
+	if lim.MemoryHigh == 0 && s.DefaultMemoryHigh > 0 {
 		lim.MemoryHigh = s.DefaultMemoryHigh
+		mutated = true
+	}
+	if lim.MemoryMax == 0 && s.DefaultMemoryMax > 0 {
+		lim.MemoryMax = s.DefaultMemoryMax
+		mutated = true
+	}
+	if mutated {
 		cfg.CgroupLimits = &lim
 	}
 	return cfg

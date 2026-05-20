@@ -40,6 +40,7 @@ func TestConfigureSupervisorFromEnv(t *testing.T) {
 	t.Setenv("CREEKD_LOG_DIR", "/var/log/creek")
 	t.Setenv("CREEKD_CGROUP_PARENT", "creek.slice")
 	t.Setenv("CREEKD_DEFAULT_MEMORY_HIGH", "256M")
+	t.Setenv("CREEKD_DEFAULT_MEMORY_MAX", "1G")
 	t.Setenv("CREEKD_NET_SUBNET", "10.42.0.0/24")
 	t.Setenv("CREEKD_NET_BRIDGE_NAME", "creekbr0")
 
@@ -56,6 +57,9 @@ func TestConfigureSupervisorFromEnv(t *testing.T) {
 	}
 	if want := int64(256 * 1024 * 1024); sup.DefaultMemoryHigh != want {
 		t.Errorf("DefaultMemoryHigh = %d, want %d", sup.DefaultMemoryHigh, want)
+	}
+	if want := int64(1024 * 1024 * 1024); sup.DefaultMemoryMax != want {
+		t.Errorf("DefaultMemoryMax = %d, want %d", sup.DefaultMemoryMax, want)
 	}
 	if sup.NetSubnet != "10.42.0.0/24" {
 		t.Errorf("NetSubnet = %q, want 10.42.0.0/24", sup.NetSubnet)
@@ -80,6 +84,19 @@ func TestConfigureSupervisorFromEnvRejectsBadMemoryHigh(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "CREEKD_DEFAULT_MEMORY_HIGH") {
 		t.Errorf("err = %v, want mention of CREEKD_DEFAULT_MEMORY_HIGH", err)
+	}
+}
+
+func TestConfigureSupervisorFromEnvRejectsBadMemoryMax(t *testing.T) {
+	t.Setenv("CREEKD_DEFAULT_MEMORY_MAX", "not-a-size")
+
+	sup := supervisor.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := configureSupervisorFromEnv(sup)
+	if err == nil {
+		t.Fatal("configureSupervisorFromEnv: want error for malformed value, got nil")
+	}
+	if !strings.Contains(err.Error(), "CREEKD_DEFAULT_MEMORY_MAX") {
+		t.Errorf("err = %v, want mention of CREEKD_DEFAULT_MEMORY_MAX", err)
 	}
 }
 

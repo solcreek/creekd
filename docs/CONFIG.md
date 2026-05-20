@@ -59,6 +59,17 @@ Daemon-wide floor for cgroup `memory.high` — the **soft** memory cap that thro
 - **Per-app override**: `creekctl up --memory-high <size>` always wins. The env var sets the floor, not the ceiling.
 - **Malformed values** (e.g. typos) fail daemon startup rather than silently disabling protection.
 
+### `CREEKD_DEFAULT_MEMORY_MAX`
+
+Daemon-wide floor for cgroup `memory.max` — the **hard** memory cap that triggers a cgroup-scoped OOM-kill when crossed. Pairs with `CREEKD_DEFAULT_MEMORY_HIGH` as the safety net for the rare case where the soft cap can't keep up.
+
+- **Default**: empty (no daemon-wide default)
+- **Recommended**: `1G` — see [`examples/cgroup-memory-tuning/RESULTS.md`](../examples/cgroup-memory-tuning/RESULTS.md) Phases 4-6. Empirically, memory.high alone contains every realistic JS-runtime leaker pattern at ~278 MB; memory.max never fires below ~1G even under adversarial allocation. The hard cap is insurance against pathological cases the experiment couldn't construct.
+- **Format**: same as `CREEKD_DEFAULT_MEMORY_HIGH`.
+- **Requires**: `CREEKD_CGROUP_PARENT` set.
+- **Per-app override**: `creekctl up --memory-max <size>` always wins.
+- **Malformed values** fail daemon startup.
+
 ### `CREEKD_STATE_DIR`
 
 Directory holding `state.json`, the persisted set of declared apps.
@@ -108,6 +119,7 @@ export CREEKD_DISPATCH_ADDR=0.0.0.0:80
 export CREEKD_LOG_DIR=/var/lib/creekd/logs
 export CREEKD_CGROUP_PARENT=creekd.slice
 export CREEKD_DEFAULT_MEMORY_HIGH=256M
+export CREEKD_DEFAULT_MEMORY_MAX=1G
 export CREEKD_STATE_DIR=/var/lib/creekd
 
 # Optional: enable per-app network namespaces. Drop these for

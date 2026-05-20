@@ -23,6 +23,11 @@
 //	                     explicit --memory-high. Requires
 //	                     CREEKD_CGROUP_PARENT. Accepts K/M/G/T
 //	                     suffixes (e.g. "256M"); 0 / unset disables.
+//	CREEKD_DEFAULT_MEMORY_MAX
+//	                     daemon-wide floor for cgroup memory.max
+//	                     (hard cap; cgroup-scoped OOM-kill). Pairs
+//	                     with CREEKD_DEFAULT_MEMORY_HIGH as the
+//	                     safety net. Same opt-out semantics.
 //	CREEKD_DEBUG_PPROF   "1" mounts /debug/pprof/* on the admin
 //	                     listener, gated by the same bearer token
 //	CREEKD_STATE_DIR     directory holding state.json (persisted app
@@ -238,6 +243,13 @@ func configureSupervisorFromEnv(sup *supervisor.Supervisor) error {
 			return fmt.Errorf("CREEKD_DEFAULT_MEMORY_HIGH: %w", err)
 		}
 		sup.DefaultMemoryHigh = n
+	}
+	if v := os.Getenv("CREEKD_DEFAULT_MEMORY_MAX"); v != "" {
+		n, err := parseSize(v)
+		if err != nil {
+			return fmt.Errorf("CREEKD_DEFAULT_MEMORY_MAX: %w", err)
+		}
+		sup.DefaultMemoryMax = n
 	}
 	// Per-app network namespace requires both knobs. Either-one-set
 	// is rejected at Spawn time; we don't pre-check here because the
