@@ -32,4 +32,4 @@ Numbers and trade-off discussion: [COMPARISON.md](COMPARISON.md).
 
 ## Adapter version
 
-This example pins `@solcreek/adapter-creekd` from npm. The adapter is the user-facing surface; the manifest it emits (`.creek-creekd/manifest.json`) is what `creekctl up --from` consumes. If you're hacking on the adapter locally, swap the dep for a `file:../../../../adapter-creekd` link.
+This example pins `@solcreek/adapter-creekd` from npm. The adapter is the user-facing surface; the manifest it emits (`.creek-creekd/manifest.json`) is what `creekctl up --from <manifest>` consumes on first deploy and `creekctl deploy --from <manifest>` consumes on every subsequent rebuild — same precedence rule for both (CLI flags override the manifest's runtime / entry / port). If you're hacking on the adapter locally, swap the dep for a `file:../../../../adapter-creekd` link.

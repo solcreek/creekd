@@ -126,7 +126,7 @@ func freePort(t *testing.T) int {
 //   - child crashed:                status != running, restart_count > 0
 //   - child running but not bound:  status == running, pid set, never 200
 //   - test infra slow:              looked like it was almost up; bump
-//                                   the timeout if this keeps happening
+//     the timeout if this keeps happening
 //
 // Without the diagnostic dump, all three look like "test-app never
 // came up" which is unactionable from a CI log.
