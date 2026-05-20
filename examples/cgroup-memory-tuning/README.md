@@ -1,33 +1,51 @@
 # cgroup-memory-tuning
 
-What's the right `memory.high` default for a multi-tenant fleet? This example documents the experiment that informed creekd's chosen default and provides the reproducer script.
+What's the right `memory.high` + `memory.max` default pair for a multi-tenant fleet? This example documents the experiment that informed creekd's chosen defaults and provides the reproducer scripts.
 
-`memory.high` is the cgroup v2 **soft** memory cap: cross it and the kernel throttles allocations + aggressively reclaims pages, but does NOT OOM-kill the cgroup. It's the right tool for "one app spiking shouldn't take down its neighbors" — degrades the offender, leaves siblings untouched. Distinct from `memory.max`, the hard cap that triggers the OOM killer.
+cgroup v2 memory caps come in two flavors:
 
-This example answers three questions:
+- **`memory.high`** — the **soft** cap. Cross it and the kernel throttles allocations + aggressively reclaims pages, but does NOT OOM-kill. Right tool for "one app spiking shouldn't take down its neighbors" — degrades the offender, leaves siblings untouched.
+- **`memory.max`** — the **hard** cap. Cross it and the kernel OOM-kills inside the cgroup. The safety net for the rare case where memory.high can't keep up.
 
-1. **False-positive rate at the candidate default**: do normal apps under normal traffic ever cross 256 MB and get throttled? (If yes, default is too aggressive.)
-2. **Containment**: when a runaway app crosses the limit, how fast does the kernel react and how much overshoot is there before pressure stabilises it?
-3. **Sibling impact**: does a contained runaway affect the latency of its neighbors?
+This example answers six questions across two paired experiments:
+
+**memory.high experiment** (`run.sh`):
+1. **False-positive rate** at the candidate default — do normal apps under normal traffic ever cross 256 MB and get throttled?
+2. **Containment** — when a runaway crosses the soft cap, how fast does the kernel react and how much overshoot is there?
+3. **Sibling impact** — does a contained runaway affect neighbor latency?
+
+**memory.max experiment** (`run_max.sh`):
+
+4. **Paired containment** — with memory.high already enforced, does memory.max ever fire under a steady leaker?
+5. **Defeat memory.high alone** — can any allocation pattern cross the soft cap faster than throttle can react?
+6. **Multi-leaker storm** — 4 simultaneous contained leakers, does the host stay healthy?
 
 ## Findings
 
 See [`RESULTS.md`](RESULTS.md) for the measured tables. Short version:
 
-- **256 MB is a safe default for every stack** we measured. Per-app peak under sustained 30 rps × 60 s: bun-hello 8 MB, hono 12 MB, sveltekit 38 MB, astro 35 MB. Even the heaviest mainstream framework (Next.js 16, 107 MB burst from [`../traffic-density/`](../traffic-density/COMPARISON.md)) uses ~42% of the cap — comfortable safety margin.
-- **Kernel reaction is fast**: first throttle event arrives 3-6 s after a leaker crosses the threshold.
-- **Overshoot is small**: 109-113% of the limit before pressure stabilises (10 MB / 100 ms leaker case).
-- **Sibling impact is negligible**: p50 latency +2 ms (10%), p99 unchanged. Throughput identical.
+**memory.high default = 256M**:
+- Safe for every stack measured. Per-app peak under sustained 30 rps × 60 s: bun-hello 8 MB, hono 12 MB, sveltekit 38 MB, astro 35 MB. Even Next.js (heaviest, 107 MB burst from [`../traffic-density/`](../traffic-density/COMPARISON.md)) uses ~42% — comfortable safety margin.
+- Kernel reaction is fast (3-6 s to first throttle), overshoot small (109-113% of limit), sibling impact negligible (+2 ms p50, p99 unchanged).
+
+**memory.max default = 1G**:
+- memory.max **never fires** under steady leaker at any cap value tested (384M / 512M / 768M / 1G).
+- No adversarial allocation pattern we constructed (single 768 MiB shot; 1 GiB/s sustained) defeats memory.high — all converge to the same ~278 MB peak.
+- 4-leaker storm: 0 oom_kills, host MemAvailable −1108 MB / +6216 MB remaining. Containment scales linearly.
+- 1G = 3.6× the empirical worst-case peak, comfortable headroom without false-positives.
+
+**Non-decision finding** (worth flagging for monitoring design): under sustained memory.high throttle, the bun event loop frequently freezes — the process stays alive but stops responding. This is correct *containment* (no OOM, no neighbor impact) but means **operator dashboards need to detect unresponsiveness, not just OOM**. Belongs in supervisor health-check, not the cap value.
 
 ## Run
 
 ```bash
 # On a Linux host (cgroup v2 required) with bun + node + pnpm + npm:
-../stack-density/bootstrap.sh    # one-time fixture build
-sudo ./run.sh                    # needs root for cgroup writes
+../stack-density/bootstrap.sh    # one-time fixture build for run.sh
+sudo ./run.sh                    # Phases 1-3 (memory.high), ~5 min
+sudo ./run_max.sh                # Phases 4-6 (memory.max), ~7 min
 ```
 
-`run.sh` is in three phases — false-positive sweep, containment, sibling impact — output table per phase. Full run ~5 minutes.
+Each script writes a table per phase to stdout + a log under `/tmp/`. Cleanup is automatic on exit.
 
 ## Why memory.high specifically (not just memory.max)
 

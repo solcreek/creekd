@@ -1,6 +1,9 @@
 # cgroup-memory-tuning — results
 
-Measured 2026-05-20 on Hetzner cx33 (Ubuntu 24.04, kernel 6.8, cgroup v2). Three phases.
+Measured 2026-05-20 on Hetzner cx33 (Ubuntu 24.04, kernel 6.8, cgroup v2). Two paired experiments:
+
+- **memory.high** (the soft cap that throttles) — Phases 1-3 below pick a daemon-wide default. Recommended: `256M`.
+- **memory.max** (the hard cap that OOM-kills) — Phases 4-6 below test whether memory.high can be defeated, and pick a memory.max default. Recommended: `1G`.
 
 ## Phase 1 — false-positive sweep at memory.high = 256 MB
 
@@ -67,31 +70,93 @@ Leaker cgroup state at end: `memory.current` = 271 MB, 2 241 throttle events acc
 
 **Conclusion**: a contained leaker adds **2 ms p50** to neighbor latency, **0 ms p99**. Throughput identical. The cap works in practice, not just in theory.
 
-## Translating to default
+## Phase 4 — paired containment under steady leaker
 
-Based on all three phases, the recommended creekd default is:
+Goal: with `memory.high=256M` already enforced, does `memory.max` (the hard cap) ever fire under the same steady leaker? And does the cap value matter?
 
-- **`CREEKD_DEFAULT_MEMORY_HIGH=256M`** for the noisy-neighbor protection lane.
+Setup: pair `memory.high=256M` + `memory.max ∈ {384, 512, 768, 1024} MB`, same 100 MiB/s steady leaker as Phase 2. Each case wall-clock-bounded at 60 s; if the bun process becomes unresponsive (event-loop frozen by reclaim pressure) it gets force-killed and flagged `hung=1`.
 
-Rationale:
+| Case | wall (s) | peak `memory.current` | throttle events | max events | oom_kills | hung? |
+|---|---:|---:|---:|---:|---:|---:|
+| `max=384M` | 60 | 278 MB | 3 737 | **0** | **0** | yes |
+| `max=768M` | 36 | 276 MB | 2 568 | **0** | **0** | no |
+| `max=1024M` | 60 | 277 MB | 3 519 | **0** | **0** | yes |
+| `max=512M` (trial 1) | 34 | 275 MB | 2 550 | **0** | **0** | no |
+| `max=512M` (trial 2) | 60 | 277 MB | 3 707 | **0** | **0** | yes |
+| `max=512M` (trial 3) | 60 | 277 MB | 3 893 | **0** | **0** | yes |
+
+**Conclusion**:
+- `oom_kills = 0` across every cap value. **memory.high alone catches the steady leaker; memory.max never fires.**
+- Peak `memory.current` lands at 275-278 MB regardless of memory.max — peak is set by memory.high (256M + ~9% overshoot, consistent with Phase 2).
+- Throttle events 2 500-3 900 across all caps — same containment behaviour.
+- **The hang phenomenon is non-deterministic** (4/6 trials hung, 2/6 finished cleanly) and shows no correlation with cap size. It's a property of the bun event loop under sustained throttle, not of memory.max.
+
+## Phase 5 — patterns designed to defeat memory.high alone
+
+Goal: can any allocation pattern cross memory.high faster than the kernel throttle can react? If yes, memory.max would actually have to fire and we need to size it accordingly.
+
+Setup: paired `high=256M` + `max=1024M` with two adversarial leaker variants:
+
+- **singleshot**: `new Uint8Array(768 * 1024 * 1024).fill(42)` — one big allocation
+- **fast**: 1 GiB/s sustained — 10× the steady leaker
+
+| Variant | wall (s) | peak `memory.current` | throttle events | max events | oom_kills | hung? |
+|---|---:|---:|---:|---:|---:|---:|
+| singleshot | 60 | 278 MB | 3 380 | **0** | **0** | yes |
+| fast (1 GiB/s) | 60 | 278 MB | 3 499 | **0** | **0** | yes |
+
+**Conclusion**: **neither pattern defeats memory.high.** Both hit the same ~278 MB ceiling as the steady leaker. The kernel's page-fault throttle is fast enough that even 10× allocation rate and single-shot large allocations are paced down to the same peak. memory.max never fires.
+
+This is a strong empirical result: **for the realistic JS-runtime allocation patterns we could construct, memory.high alone is sufficient**. memory.max is insurance against patterns we couldn't construct — kernel-bug scenarios, driver-bug scenarios, or non-JS workloads with different allocation primitives.
+
+## Phase 6 — multi-leaker storm
+
+Goal: 4 simultaneous contained leakers — does the host stay healthy? Does any per-cgroup cap fire when reclaim is competing across cgroups?
+
+Setup: 4 steady leakers spawned simultaneously, each in its own cgroup paired `high=256M` + `max=1G`. Wall-clock-bounded at 45 s. Track host `MemAvailable` minimum during the storm + per-cgroup final state.
+
+| Metric | Value |
+|---|---:|
+| Host `MemAvailable` at start | 7 324 MB |
+| Host `MemAvailable` min during storm | 6 216 MB |
+| Delta | **−1 108 MB** (4 × ~277 MB, matches single-leaker peak) |
+| Per-cgroup `oom_kills` (sum across 4) | **0** |
+| Per-cgroup throttle events | 3 058 - 3 567 each (same range as single-leaker) |
+
+**Conclusion**: containment scales linearly. 4 leakers consume 4× single-leaker RAM, none cross their cap, host stays at >75% of `MemAvailable`. No host-wide pressure, no cgroup-wide OOM. The cap design works under concurrent storm — closes the second-to-last caveat from `density-economics.md`.
+
+## Translating to defaults
+
+Based on all six phases:
+
+- **`CREEKD_DEFAULT_MEMORY_HIGH=256M`** — the noisy-neighbor protection lane (Phases 1-3).
+- **`CREEKD_DEFAULT_MEMORY_MAX=1G`** — the safety net (Phases 4-6).
+
+Rationale for `memory.high = 256M`:
 - Phase 1: ≥10× safety margin from every stack's peak under normal traffic.
 - Phase 2: predictable 11% overshoot; runaway contained without OOM.
 - Phase 3: neighbor impact in the noise (+2 ms p50, no p99 change).
 
-Operators who want to differentiate per-tier (Free / Pro / Team) can override per-app via `creekctl up --memory-high <value>`. The daemon-wide default sets the policy floor; explicit per-app values always win.
+Rationale for `memory.max = 1G`:
+- Phase 4: any cap value ≥ 384M is verified safe — `memory.max` never fires under steady leaker. 1G has comfortable headroom for legitimate burst workloads (heavy framework startup, large file processing) that we haven't bench'd in this experiment.
+- Phase 5: every adversarial leaker pattern we constructed is contained at ~278 MB by memory.high. 1G is 3.6× that peak — fires only on truly pathological allocation patterns the JS runtime can't easily produce.
+- Phase 6: 4× single-leaker storm leaves host >75% `MemAvailable`. Even 10 simultaneous runaways hitting memory.max simultaneously = 10 GB nominal cap, but they'd be paced down to ~2.78 GB total by memory.high first.
+
+Operators who want to differentiate per-tier (Free / Pro / Team) can override per-app via `creekctl up --memory-high <value> --memory-max <value>`. The daemon-wide defaults set the policy floor; explicit per-app values always win.
 
 ## What this experiment doesn't show
 
 - **Multi-day working set drift**. 30 s of pressure isn't a week.
-- **Concurrent leaker storm**. One leaker at a time was tested. N simultaneous leakers behave differently — the host enters page-cache eviction territory, and kernel reclaim becomes the bottleneck for everyone (cf. zswap experiment in [`../nextjs-density/COMPARISON.md`](../nextjs-density/COMPARISON.md#pushing-density-zswap-and-the-real-ceiling)).
-- **memory.max + memory.high paired**. The experiment used memory.high alone. Real production should pair both: memory.high (soft, low) for noisy-neighbor protection, memory.max (hard, generous, ~3× memory.high) as the final safety net.
+- **Non-JS runtimes**. Bun/V8 has its own GC + heap allocator. Native C/C++ malloc patterns or `mmap` MAP_POPULATE could behave differently.
+- **The "hang" failure mode**. Phases 4-6 surfaced a real issue: under sustained memory.high throttle the bun event loop frequently freezes (4/6 baseline trials, both adversarial variants, all 4 storm leakers). The process stays alive but stops responding. This is correct *containment* behaviour (no OOM, no neighbor impact) but means **operator dashboards need to detect unresponsiveness, not just OOM** — a contained leaker looks like a hung app, not a crashed one. Belongs in the supervisor health-check design, not in the cap-value decision.
 
 ## Reproducing
 
 ```bash
 # On a Linux host with cgroup v2 (Hetzner cx33 default, Ubuntu 24.04+):
 ../stack-density/bootstrap.sh
-sudo ./run.sh
+sudo ./run.sh        # Phases 1-3 (memory.high), ~5 min
+sudo ./run_max.sh    # Phases 4-6 (memory.max), ~7 min
 ```
 
-The `run.sh` script writes its tables to stdout AND `/tmp/cgroup-exp.log`. Re-running cleans up the test cgroups under `/sys/fs/cgroup/creek-exp/` on exit.
+Both scripts write to stdout AND a log under `/tmp/`. They clean up their test cgroups under `/sys/fs/cgroup/creek-exp/` on exit.
