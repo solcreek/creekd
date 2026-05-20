@@ -141,6 +141,38 @@ instances:
 | `creekd_dispatch_requests_total{code="5xx"}` | Per-app error rate; alert on rate spikes |
 | `creekd_apps{status="crash-looping"}` | Any non-zero is a problem |
 
+## Grafana dashboard
+
+A starter dashboard ships in [`grafana-dashboard.json`](grafana-dashboard.json). It covers:
+
+- Apps by status (running / crashed / crash-looping / etc.)
+- Lifetime OOM-kill count and creekd version stat
+- Per-app memory current + cap-utilisation ratio (with 70%/90% threshold lines)
+- Request rate + 5xx error rate per app
+- Dispatch bytes/sec per app
+- Per-app restart + health-failure table
+
+To import: **Grafana → Dashboards → New → Import**, paste the JSON, pick your Prometheus datasource at the prompt. The dashboard uses a single `app` template variable so you can filter to one app or view the whole fleet.
+
+Schema version targets Grafana 10+. If your Grafana is older, the panels still render but some `cellOptions` styling falls back to default.
+
+## Alert rules
+
+[`alerts.yml`](alerts.yml) ships a starter rule group. Six alerts, three severities:
+
+| Alert | Expression | Severity |
+|---|---|---|
+| `AppOOMKilled` | `increase(creekd_app_oom_kills_total[5m]) > 0` | critical |
+| `AppCrashLooping` | `creekd_apps{status="crash-looping"} > 0` | critical |
+| `AppFlapping` | `rate(creekd_app_restart_count[10m]) > 0.005` | warning |
+| `AppApproachingMemoryCap` | `memory_current / memory_max > 0.9` | warning |
+| `Elevated5xx` | `5xx rate / total rate > 0.05` | warning |
+| `HealthCheckFailing` | `rate(creekd_app_health_failures_total[5m]) > 0` | info |
+
+To load: drop the file in your `rule_files:` directive (Prometheus) or paste into a Grafana managed rule group. Each rule has `annotations.runbook` with the operator-facing fix.
+
+These are starters, not gospel — tune `for:` durations and thresholds for your traffic pattern.
+
 ## Why Prometheus format (not OTel SDK)
 
 Three reasons, in priority order:

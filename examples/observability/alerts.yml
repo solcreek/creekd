@@ -1,0 +1,100 @@
+# Prometheus alerting rules for creekd.
+#
+# Drop into your Prometheus rule_files: directive, or load into
+# Grafana Cloud / Alertmanager as a recording group. The expressions
+# assume the default metric names (no relabel-rewrites).
+#
+# Severity convention:
+#   critical = page someone, the host or a tenant is degraded
+#   warning  = surface in ops review, not a 3 AM ping
+#   info     = noisy by design; useful in dashboards, not in pager
+
+groups:
+  - name: creekd
+    rules:
+
+      # The hard cap fired. A tenant process was OOM-killed by the
+      # kernel inside its cgroup. memory.high should have caught
+      # this first via throttle; reaching memory.max means either
+      # the allocator outran reclaim (rare) or memory.high wasn't
+      # set on this app.
+      - alert: AppOOMKilled
+        expr: increase(creekd_app_oom_kills_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "App {{ $labels.app_id }} OOM-killed"
+          description: "Cgroup oom_kill event in the last 5 min. Hard cap (memory.max) fired."
+          runbook: "Check the app's memory.high vs memory.max ratio in CREEKD_DEFAULT_* or creekctl up flags. Default ratio is 256M/1G (=4x); ratios <2x leave too little room for throttle to react."
+
+      # Supervisor put an app into crash-looping state — too many
+      # crashes inside the restart-window. Won't auto-recover; needs
+      # operator intervention (creekctl reset or stop + investigate).
+      - alert: AppCrashLooping
+        expr: creekd_apps{status="crash-looping"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} app(s) crash-looping"
+          description: "Supervisor suspended {{ $value }} app(s) after crossing the crash-loop threshold inside the restart window."
+          runbook: "creekctl ls --status crash-looping → inspect logs → fix or reset."
+
+      # Apps flapping — not crash-looping yet but restarting more
+      # than once every ~3 min over a 10-min window. Often a sign of
+      # health-check tightness or a slow-to-start app.
+      - alert: AppFlapping
+        expr: rate(creekd_app_restart_count[10m]) > 0.005
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "App {{ $labels.app_id }} is flapping"
+          description: "Restart rate {{ $value | humanize }} per second over the last 10 min."
+          runbook: "Check creekctl logs <app>; consider raising --health-path or HealthCheckFailureThreshold."
+
+      # Memory usage above 90% of the configured cap. The throttle
+      # is doing its job, but the app is permanently pressured.
+      # Either it's leaking (action: investigate), or its working
+      # set is genuinely close to the cap (action: raise the cap).
+      - alert: AppApproachingMemoryCap
+        expr: creekd_app_memory_current_bytes / creekd_app_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "App {{ $labels.app_id }} memory above 90% of cap"
+          description: "{{ $value | humanizePercentage }} of memory.max for 5+ min. Throttle is engaged."
+          runbook: "creekctl stats <app> for the trend; if growing, suspect leak; if flat, raise --memory-max."
+
+      # Elevated 5xx response rate. The dispatch proxy counts these
+      # whether or not the upstream is healthy; sustained 5xx means
+      # the app is responding but broken.
+      - alert: Elevated5xx
+        expr: |
+          sum by (app_id) (rate(creekd_dispatch_requests_total{code=~"5.."}[5m]))
+            /
+          clamp_min(sum by (app_id) (rate(creekd_dispatch_requests_total[5m])), 1e-9)
+            > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "App {{ $labels.app_id }} returning 5xx at {{ $value | humanizePercentage }}"
+          description: "5xx error rate above 5% sustained for 10 min. Process is up but the app is broken."
+          runbook: "creekctl logs <app> + check upstream dependencies."
+
+      # Health probe failing sustained. Below the SIGKILL threshold
+      # (3 consecutive by default) but worth a dashboard signal.
+      # Once the threshold trips, the supervisor handles it; this
+      # alert is for "trending toward unhealthy" states.
+      - alert: HealthCheckFailing
+        expr: rate(creekd_app_health_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "App {{ $labels.app_id }} health probe failing"
+          description: "Health probe has failed at least once in each of the last 5 min."
+          runbook: "Either the --health-path is wrong (curl it manually) or the app is intermittently slow."
