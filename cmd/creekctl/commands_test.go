@@ -8,11 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -590,5 +592,122 @@ func TestUpFromManifestMissingFileErrors(t *testing.T) {
 	}
 	if got := sup.List(); len(got) != 0 {
 		t.Errorf("supervisor has %d apps after failed --from up; want 0", len(got))
+	}
+}
+
+// newDeployCaptureServer returns an httptest server that captures the
+// JSON body of POST /v1/apps/<id>/deploy under a mutex and answers
+// with a synthetic running AppView. The harness lets the CLI test
+// run the full runDeploy path without needing a real v2 process to
+// become healthy.
+func newDeployCaptureServer(t *testing.T) (string, *adminapi.DeployRequest, *sync.Mutex) {
+	t.Helper()
+	var mu sync.Mutex
+	captured := &adminapi.DeployRequest{}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/deploy") {
+			mu.Lock()
+			defer mu.Unlock()
+			if err := json.NewDecoder(r.Body).Decode(captured); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(adminapi.AppView{
+				ID:     "deploy-from-test",
+				Status: "running",
+				Port:   captured.Port,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv.URL, captured, &mu
+}
+
+// Integration: `deploy --from` loads the manifest, seeds the
+// DeployRequest, and sends the right port to the admin API. Mirrors
+// the up --from integration test using a capture-only mock server
+// (real supervisor.Deploy needs v2 to become healthy, which a sleep
+// command can't do).
+func TestDeployFromManifestSeedsPort(t *testing.T) {
+	url, captured, mu := newDeployCaptureServer(t)
+	manifestPort := freeTCPPort(t)
+	manifestPath := writeBenchManifest(t, "bun", "server.js", manifestPort)
+
+	_, err := runSub(t, "deploy", []string{
+		"app-id", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("deploy --from: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if captured.Port != manifestPort {
+		t.Errorf("DeployRequest.Port = %d, want %d (from manifest)",
+			captured.Port, manifestPort)
+	}
+	if captured.Runtime != "bun" {
+		t.Errorf("DeployRequest.Runtime = %q, want bun (from manifest)", captured.Runtime)
+	}
+	if !strings.HasSuffix(captured.Entry, "server.js") {
+		t.Errorf("DeployRequest.Entry = %q, want suffix server.js", captured.Entry)
+	}
+}
+
+// CLI --port overrides manifest port, same precedence rule as up.
+func TestDeployFromManifestCLIPortOverrides(t *testing.T) {
+	url, captured, mu := newDeployCaptureServer(t)
+	manifestPort := freeTCPPort(t)
+	cliPort := freeTCPPort(t)
+	if manifestPort == cliPort {
+		cliPort = freeTCPPort(t)
+	}
+	manifestPath := writeBenchManifest(t, "bun", "server.js", manifestPort)
+
+	_, err := runSub(t, "deploy", []string{
+		"app-id", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", manifestPath,
+		"--port", strconv.Itoa(cliPort),
+	})
+	if err != nil {
+		t.Fatalf("deploy --from --port: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if captured.Port != cliPort {
+		t.Errorf("DeployRequest.Port = %d, want %d (CLI --port should override manifest)",
+			captured.Port, cliPort)
+	}
+}
+
+// `deploy --from` against a path that doesn't exist surfaces a
+// helpful error and doesn't trip the admin API.
+func TestDeployFromManifestMissingFileErrors(t *testing.T) {
+	url, captured, mu := newDeployCaptureServer(t)
+	_, err := runSub(t, "deploy", []string{
+		"nope", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", "/tmp/does-not-exist/manifest.json",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing manifest, got nil")
+	}
+	if !strings.Contains(err.Error(), "--from") {
+		t.Errorf("error %q should mention --from", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if captured.Port != 0 {
+		t.Errorf("admin API was called despite missing manifest; captured Port=%d", captured.Port)
 	}
 }

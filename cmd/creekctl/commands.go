@@ -413,6 +413,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		entry      = fs.String("entry", "", "entry script (with --runtime)")
 		runtimeArg = fs.String("runtime", "", "bun|node|deno")
 		port       = fs.Int("port", 0, "v2 port (must differ from v1's)")
+		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		readyMS    = fs.Int64("ready-timeout-ms", 0, "max wait for v2 to be healthy")
@@ -438,6 +439,13 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		ReadyTimeoutMS: *readyMS,
 		NetIsolation:   *netIso,
 		Sandbox:        sf.toAPI(),
+	}
+	if *fromPath != "" {
+		manifest, projectDir, err := loadManifest(*fromPath)
+		if err != nil {
+			return err
+		}
+		applyManifestToDeploy(&req, manifest, projectDir)
 	}
 	app, err := cf.client().Deploy(ctx, id, req)
 	if err != nil {

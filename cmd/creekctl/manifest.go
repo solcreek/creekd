@@ -132,3 +132,23 @@ func applyManifestTo(req *adminapi.SpawnRequest, m *CreekdManifest, projectDir s
 		req.Port = m.Port
 	}
 }
+
+// applyManifestToDeploy is the redeploy mirror of applyManifestTo —
+// same precedence (CLI flags win), same three fields seeded
+// (runtime / entry / port). Used when `creekctl deploy --from` is
+// invoked to push a fresh adapter manifest at an already-running
+// app. Kept as a separate function instead of a generic over both
+// request types because the duplication is six lines and avoiding
+// it would require an interface or a wrapper that obscures the
+// CLI flag precedence rule.
+func applyManifestToDeploy(req *adminapi.DeployRequest, m *CreekdManifest, projectDir string) {
+	if req.Runtime == "" {
+		req.Runtime = m.Runtime
+	}
+	if req.Entry == "" {
+		req.Entry = filepath.Join(projectDir, m.Entrypoint)
+	}
+	if req.Port == 0 {
+		req.Port = m.Port
+	}
+}
