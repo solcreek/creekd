@@ -68,38 +68,38 @@ func TestCommand(t *testing.T) {
 		hasErr bool
 	}{
 		{
-			name:  "bun no extras",
-			r:     Bun, entry: "server.ts",
+			name: "bun no extras",
+			r:    Bun, entry: "server.ts",
 			cmd: "bun", args: []string{"server.ts"},
 		},
 		{
-			name:  "bun with extras",
-			r:     Bun, entry: "server.ts", extra: []string{"--hot"},
+			name: "bun with extras",
+			r:    Bun, entry: "server.ts", extra: []string{"--hot"},
 			cmd: "bun", args: []string{"server.ts", "--hot"},
 		},
 		{
-			name:  "node",
-			r:     Node, entry: "server.js",
+			name: "node",
+			r:    Node, entry: "server.js",
 			cmd: "node", args: []string{"server.js"},
 		},
 		{
-			name:  "deno gets allow-all",
-			r:     Deno, entry: "server.ts",
+			name: "deno gets allow-all",
+			r:    Deno, entry: "server.ts",
 			cmd: "deno", args: []string{"run", "-A", "server.ts"},
 		},
 		{
-			name:  "deno with extras",
-			r:     Deno, entry: "server.ts", extra: []string{"--watch"},
+			name: "deno with extras",
+			r:    Deno, entry: "server.ts", extra: []string{"--watch"},
 			cmd: "deno", args: []string{"run", "-A", "server.ts", "--watch"},
 		},
 		{
-			name:   "empty entry rejected",
-			r:      Bun, entry: "",
+			name: "empty entry rejected",
+			r:    Bun, entry: "",
 			hasErr: true,
 		},
 		{
-			name:   "invalid runtime rejected",
-			r:      Runtime("python"), entry: "server.py",
+			name: "invalid runtime rejected",
+			r:    Runtime("python"), entry: "server.py",
 			hasErr: true,
 		},
 	}

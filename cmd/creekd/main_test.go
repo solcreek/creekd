@@ -1,8 +1,8 @@
 package main
 
 import (
-	"log/slog"
 	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/solcreek/creekd/internal/supervisor"
@@ -18,7 +18,7 @@ func TestIsLoopback(t *testing.T) {
 		{"[::1]:9080", true},
 		{"0.0.0.0:9080", false},
 		{"192.168.1.5:9080", false},
-		{":9080", false},     // empty host == any interface
+		{":9080", false}, // empty host == any interface
 		{"example.com:80", false},
 		{"not-an-addr", false}, // malformed
 	}

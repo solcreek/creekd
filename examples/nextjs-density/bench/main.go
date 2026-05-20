@@ -4,11 +4,11 @@
 // Compares two scenarios:
 //
 //   - bare:    direct `bun run server.js` per app (lower bound — this is
-//              what creekd would supervise; creekd itself adds no per-
-//              app overhead, only a one-time supervisor RSS).
+//     what creekd would supervise; creekd itself adds no per-
+//     app overhead, only a one-time supervisor RSS).
 //   - docker:  `docker run -d` of a pre-built image holding the same
-//              standalone. Each container brings its own containerd-shim
-//              and engine accounting.
+//     standalone. Each container brings its own containerd-shim
+//     and engine accounting.
 //
 // Usage:
 //

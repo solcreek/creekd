@@ -1,7 +1,7 @@
 // Package cgroup enforces per-tenant memory and CPU limits via Linux
 // cgroup v2.
 //
-// M5.5 — per-tenant cgroup v2 enforcement
+// # M5.5 — per-tenant cgroup v2 enforcement
 //
 // Linux only. On macOS (dev environment) this package logs a warning
 // and degrades gracefully — limits are not enforced but supervision

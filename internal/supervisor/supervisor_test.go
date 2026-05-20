@@ -1664,4 +1664,3 @@ func TestLogCaptureSurvivesRestart(t *testing.T) {
 		t.Errorf("log missing one of the runs; seen=%v records=%d", seen, len(recs))
 	}
 }
-

@@ -36,18 +36,18 @@ type RestartRequest struct {
 // identifies the v1 app; the body describes v2. Port must differ
 // from v1's current port.
 type DeployRequest struct {
-	Runtime           string   `json:"runtime,omitempty"`
-	Entry             string   `json:"entry,omitempty"`
-	Command           string   `json:"command,omitempty"`
-	Args              []string `json:"args,omitempty"`
-	Port              int      `json:"port"`
-	Env               []string `json:"env,omitempty"`
-	Limits            *Limits  `json:"limits,omitempty"`
-	NetIsolation      bool     `json:"net_isolation,omitempty"`
-	Sandbox           *Sandbox `json:"sandbox,omitempty"`
-	ReadyTimeoutMS    int64    `json:"ready_timeout_ms,omitempty"`
-	PollIntervalMS    int64    `json:"poll_interval_ms,omitempty"`
-	GracefulV1MS      int64    `json:"graceful_v1_ms,omitempty"`
+	Runtime        string   `json:"runtime,omitempty"`
+	Entry          string   `json:"entry,omitempty"`
+	Command        string   `json:"command,omitempty"`
+	Args           []string `json:"args,omitempty"`
+	Port           int      `json:"port"`
+	Env            []string `json:"env,omitempty"`
+	Limits         *Limits  `json:"limits,omitempty"`
+	NetIsolation   bool     `json:"net_isolation,omitempty"`
+	Sandbox        *Sandbox `json:"sandbox,omitempty"`
+	ReadyTimeoutMS int64    `json:"ready_timeout_ms,omitempty"`
+	PollIntervalMS int64    `json:"poll_interval_ms,omitempty"`
+	GracefulV1MS   int64    `json:"graceful_v1_ms,omitempty"`
 }
 
 // Limits mirrors cgroup.Limits in the JSON wire format. Zero fields

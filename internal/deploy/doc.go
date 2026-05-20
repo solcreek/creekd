@@ -1,6 +1,6 @@
 // Package deploy implements zero-downtime blue-green deploys.
 //
-// M5.7 — zero-downtime blue-green deploy
+// # M5.7 — zero-downtime blue-green deploy
 //
 // Sequence:
 //  1. Spawn v2 child on new port (e.g., v1 on 9001 → v2 on 9011)

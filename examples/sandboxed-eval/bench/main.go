@@ -139,7 +139,6 @@ func benchDocker(imgTag string, n int) []float64 {
 	return samples
 }
 
-
 func waitHealthz(url, hostHeader string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

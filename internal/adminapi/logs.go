@@ -25,11 +25,14 @@ var followPollInterval = 500 * time.Millisecond
 // handleLogs implements GET /v1/apps/{id}/logs?tail=N&follow=true.
 //
 // tail=N    return the last N lines as text/plain (default 100, max
-//           10000). Each line is one JSON record from the rotator.
+//
+//	10000). Each line is one JSON record from the rotator.
+//
 // follow=1  stream new lines as Server-Sent Events. The initial
-//           response includes the tail; subsequent events arrive as
-//           the log grows. Rotation is detected by file-size shrink
-//           and triggers a re-read from offset 0.
+//
+//	response includes the tail; subsequent events arrive as
+//	the log grows. Rotation is detected by file-size shrink
+//	and triggers a re-read from offset 0.
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if app := s.sup.Get(id); app == nil {
