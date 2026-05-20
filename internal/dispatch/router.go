@@ -1,8 +1,10 @@
 package dispatch
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -70,17 +72,44 @@ func newBackend(appID, host string, port int) (*Backend, error) {
 	return b, nil
 }
 
+// ResponseObserver is the callback type for observability hooks
+// (Prometheus / OTel). Invoked exactly once per dispatched request
+// after the proxy returns, with the appID, bytes written to the
+// client, and the HTTP status code. Nil means no observation.
+//
+// The hook runs on the request goroutine — keep it cheap (atomic
+// adds, channel sends to a worker, etc.). A blocking observer will
+// add latency to every dispatched request.
+type ResponseObserver func(appID string, bytesOut int64, statusCode int)
+
 // Router holds the appID → Backend table. Set/Remove are atomic; Get
 // is lock-free for the common read path via RWMutex. The same Router
 // can be safely shared by many concurrent goroutines.
 type Router struct {
 	mu     sync.RWMutex
 	routes map[string]*Backend
+
+	// observer, if non-nil, is invoked after every dispatched request
+	// with the bytes-out + status-code total. Set via SetObserver;
+	// reads here are racey-but-safe (single pointer assignment, Go
+	// memory model guarantees torn writes won't happen on aligned
+	// word writes). For ordering, SetObserver should be called before
+	// the router is exposed to traffic.
+	observer ResponseObserver
 }
 
 // NewRouter returns an empty Router.
 func NewRouter() *Router {
 	return &Router{routes: make(map[string]*Backend)}
+}
+
+// SetObserver installs a callback that fires after every dispatched
+// request with bytes-out + status-code. Replaces any prior observer.
+// Pass nil to disable.
+func (r *Router) SetObserver(o ResponseObserver) {
+	r.mu.Lock()
+	r.observer = o
+	r.mu.Unlock()
 }
 
 // Set installs (or atomically replaces) the route for appID using
@@ -178,8 +207,58 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "dispatch: no route for app "+id, http.StatusServiceUnavailable)
 		return
 	}
-	// ErrorHandler is set once in newBackend; safe to read here.
-	b.proxy.ServeHTTP(w, req)
+
+	r.mu.RLock()
+	obs := r.observer
+	r.mu.RUnlock()
+
+	if obs == nil {
+		b.proxy.ServeHTTP(w, req)
+		return
+	}
+
+	cw := newCountingResponseWriter(w)
+	b.proxy.ServeHTTP(cw, req)
+	obs(id, cw.bytes, cw.status)
+}
+
+// countingResponseWriter wraps http.ResponseWriter to track bytes
+// written and the final status code. It transparently implements
+// http.Flusher and http.Hijacker when the underlying writer does,
+// so streaming responses (SSE) and protocol upgrades (WebSocket)
+// proxied by httputil.ReverseProxy work unchanged.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	bytes  int64
+	status int
+}
+
+func newCountingResponseWriter(w http.ResponseWriter) *countingResponseWriter {
+	return &countingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+}
+
+func (c *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	c.bytes += int64(n)
+	return n, err
+}
+
+func (c *countingResponseWriter) WriteHeader(status int) {
+	c.status = status
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *countingResponseWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (c *countingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := c.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // Handler returns r as an http.Handler. Useful when callers want the

@@ -76,6 +76,23 @@ func (s *Server) EnablePprof() {
 	s.mux.HandleFunc("GET /debug/pprof/trace", s.guard(pprof.Trace))
 }
 
+// SetMetricsHandler mounts a Prometheus-format /metrics endpoint
+// gated by the same bearer-token guard as the rest of the admin
+// surface. Pass nil to leave it unmounted (the default). The handler
+// is typically the output of internal/metrics.Metrics.Handler().
+//
+// Why guarded: per-app stats include process IDs, restart counts,
+// memory pressure — operationally sensitive enough that we don't
+// want an unauthenticated reader pulling them from a public address.
+// Scraper-side: Prom config supports bearer tokens via the
+// authorization stanza; OTel collector via the http_config block.
+func (s *Server) SetMetricsHandler(h http.Handler) {
+	if h == nil {
+		return
+	}
+	s.mux.Handle("GET /metrics", s.guard(h.ServeHTTP))
+}
+
 // routes wires URL patterns to handlers.
 func (s *Server) routes() {
 	// Go 1.22's pattern syntax lets us mix methods and path variables
