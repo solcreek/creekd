@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -469,5 +472,123 @@ func TestFlagOrderingPositionalAfterFlags(t *testing.T) {
 	// And the cleanup path doesn't leak state.
 	if got := sup.List(); len(got) != 0 {
 		t.Errorf("supervisor has %d apps after failed up; want 0", len(got))
+	}
+}
+
+// writeBenchManifest builds a minimum-viable .creek-creekd/manifest.json
+// inside a fresh tempdir and returns the manifest path. Tests use this
+// to exercise the --from wiring end-to-end against a real admin server.
+func writeBenchManifest(t *testing.T, runtime, entrypoint string, port int) string {
+	t.Helper()
+	projectDir := t.TempDir()
+	manifestDir := filepath.Join(projectDir, ".creek-creekd")
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := fmt.Sprintf(`{
+  "version": 1,
+  "framework": "nextjs",
+  "target": "creekd",
+  "buildId": "test-build",
+  "nextVersion": "16.2.3",
+  "adapter": {"name": "@solcreek/adapter-creekd", "version": "0.1.1"},
+  "hasMiddleware": false,
+  "hasPrerender": false,
+  "runtime": %q,
+  "entrypoint": %q,
+  "port": %d,
+  "serveDirs": [".next/standalone"]
+}`, runtime, entrypoint, port)
+	manifestPath := filepath.Join(manifestDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	return manifestPath
+}
+
+// Integration: `up --from manifest.json` seeds the SpawnRequest from
+// the manifest and the resulting app actually lands in the supervisor
+// with the manifest's port. CLI passes --command so the spawn doesn't
+// depend on Bun/Node being present at test time.
+func TestUpFromManifestSeedsPort(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	manifestPath := writeBenchManifest(t, "bun", "server.js", port)
+
+	// --command/--arg are explicit (CLI wins). --port is NOT on the
+	// CLI, so the value should come from the manifest.
+	out, err := runSub(t, "up", []string{
+		"manifested", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", manifestPath,
+	})
+	if err != nil {
+		t.Fatalf("up --from: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("manifested") })
+
+	if !strings.Contains(out, "manifested") {
+		t.Errorf("up output missing app id:\n%s", out)
+	}
+	app := sup.Get("manifested")
+	if app == nil {
+		t.Fatal("app not in supervisor registry")
+	}
+	if app.Port != port {
+		t.Errorf("app.Port = %d, want %d (from manifest)", app.Port, port)
+	}
+}
+
+// Integration: when the CLI explicitly passes --port, it overrides the
+// manifest's port. Same rule for --runtime / --entry (CLI wins over
+// manifest), matching the applyManifestTo precedence.
+func TestUpFromManifestCLIPortOverrides(t *testing.T) {
+	url, sup := newTestBackend(t)
+	manifestPort := freeTCPPort(t)
+	cliPort := freeTCPPort(t)
+	if manifestPort == cliPort {
+		// freeTCPPort can collide on a busy host; just pick a different one.
+		cliPort = freeTCPPort(t)
+	}
+	manifestPath := writeBenchManifest(t, "bun", "server.js", manifestPort)
+
+	_, err := runSub(t, "up", []string{
+		"override", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", manifestPath,
+		"--port", strconv.Itoa(cliPort), // CLI must win
+	})
+	if err != nil {
+		t.Fatalf("up --from --port: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("override") })
+
+	app := sup.Get("override")
+	if app == nil {
+		t.Fatal("app not in supervisor registry")
+	}
+	if app.Port != cliPort {
+		t.Errorf("app.Port = %d, want %d (CLI --port should override manifest)",
+			app.Port, cliPort)
+	}
+}
+
+// `up --from` against a path that doesn't exist surfaces a helpful
+// error, doesn't crash, doesn't half-spawn anything.
+func TestUpFromManifestMissingFileErrors(t *testing.T) {
+	url, sup := newTestBackend(t)
+	_, err := runSub(t, "up", []string{
+		"nope", "--server", url,
+		"--command", "sleep", "--arg", "30",
+		"--from", "/tmp/does-not-exist/manifest.json",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing manifest, got nil")
+	}
+	if !strings.Contains(err.Error(), "--from") {
+		t.Errorf("error %q should mention --from", err)
+	}
+	if got := sup.List(); len(got) != 0 {
+		t.Errorf("supervisor has %d apps after failed --from up; want 0", len(got))
 	}
 }
