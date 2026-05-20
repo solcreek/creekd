@@ -39,11 +39,14 @@ func TestIsLoopback(t *testing.T) {
 func TestConfigureSupervisorFromEnv(t *testing.T) {
 	t.Setenv("CREEKD_LOG_DIR", "/var/log/creek")
 	t.Setenv("CREEKD_CGROUP_PARENT", "creek.slice")
+	t.Setenv("CREEKD_DEFAULT_MEMORY_HIGH", "256M")
 	t.Setenv("CREEKD_NET_SUBNET", "10.42.0.0/24")
 	t.Setenv("CREEKD_NET_BRIDGE_NAME", "creekbr0")
 
 	sup := supervisor.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	configureSupervisorFromEnv(sup)
+	if err := configureSupervisorFromEnv(sup); err != nil {
+		t.Fatalf("configureSupervisorFromEnv: %v", err)
+	}
 
 	if sup.LogDir != "/var/log/creek" {
 		t.Errorf("LogDir = %q, want /var/log/creek", sup.LogDir)
@@ -51,11 +54,62 @@ func TestConfigureSupervisorFromEnv(t *testing.T) {
 	if sup.CgroupParent != "creek.slice" {
 		t.Errorf("CgroupParent = %q, want creek.slice", sup.CgroupParent)
 	}
+	if want := int64(256 * 1024 * 1024); sup.DefaultMemoryHigh != want {
+		t.Errorf("DefaultMemoryHigh = %d, want %d", sup.DefaultMemoryHigh, want)
+	}
 	if sup.NetSubnet != "10.42.0.0/24" {
 		t.Errorf("NetSubnet = %q, want 10.42.0.0/24", sup.NetSubnet)
 	}
 	if sup.NetBridgeName != "creekbr0" {
 		t.Errorf("NetBridgeName = %q, want creekbr0", sup.NetBridgeName)
+	}
+}
+
+// TestConfigureSupervisorFromEnvRejectsBadMemoryHigh: a malformed env
+// knob must fail the daemon boot rather than silently disabling the
+// soft-cap default. Operators should see the error and fix the typo;
+// silently dropping it could mean shipping prod without noisy-neighbor
+// protection.
+func TestConfigureSupervisorFromEnvRejectsBadMemoryHigh(t *testing.T) {
+	t.Setenv("CREEKD_DEFAULT_MEMORY_HIGH", "not-a-size")
+
+	sup := supervisor.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := configureSupervisorFromEnv(sup)
+	if err == nil {
+		t.Fatal("configureSupervisorFromEnv: want error for malformed value, got nil")
+	}
+	if !strings.Contains(err.Error(), "CREEKD_DEFAULT_MEMORY_HIGH") {
+		t.Errorf("err = %v, want mention of CREEKD_DEFAULT_MEMORY_HIGH", err)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"", 0},
+		{"512", 512},
+		{"256M", 256 * 1024 * 1024},
+		{"256MiB", 256 * 1024 * 1024},
+		{"1G", 1024 * 1024 * 1024},
+		{"  64K  ", 64 * 1024},
+		{"2T", 2 * 1024 * 1024 * 1024 * 1024},
+	}
+	for _, c := range cases {
+		got, err := parseSize(c.in)
+		if err != nil {
+			t.Errorf("parseSize(%q) error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("parseSize(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+	for _, bad := range []string{"abc", "-5", "5X"} {
+		if _, err := parseSize(bad); err == nil {
+			t.Errorf("parseSize(%q): want error, got nil", bad)
+		}
 	}
 }
 

@@ -48,6 +48,17 @@ Name of the cgroup v2 slice that owns per-app sub-cgroups. Required for any per-
 - **Requires**: Linux, cgroup v2, and creekd running with permission to write under the parent slice (typically root, or `Delegate=yes` in a systemd unit).
 - **Empty** disables cgroup enforcement — apps run with the same limits as creekd itself.
 
+### `CREEKD_DEFAULT_MEMORY_HIGH`
+
+Daemon-wide floor for cgroup `memory.high` — the **soft** memory cap that throttles allocations (no OOM-kill). Applied to every app whose `creekctl up` did not pass an explicit `--memory-high`, so noisy-neighbor protection is opt-out rather than opt-in.
+
+- **Default**: empty (no daemon-wide default; only explicit `--memory-high` enforces a soft cap)
+- **Recommended**: `256M` — see [`examples/cgroup-memory-tuning/RESULTS.md`](../examples/cgroup-memory-tuning/RESULTS.md) for the experiment that justifies this value (false-positive sweep across five stacks, containment behaviour, sibling-impact measurement).
+- **Format**: integer with optional `K`/`M`/`G`/`T` (binary, ×1024). `256M` = `256Mi` = `256MiB` = `268435456`.
+- **Requires**: `CREEKD_CGROUP_PARENT` set. Without a parent slice there's nowhere to install the limit; the daemon refuses to silently ignore the knob.
+- **Per-app override**: `creekctl up --memory-high <size>` always wins. The env var sets the floor, not the ceiling.
+- **Malformed values** (e.g. typos) fail daemon startup rather than silently disabling protection.
+
 ### `CREEKD_STATE_DIR`
 
 Directory holding `state.json`, the persisted set of declared apps.
@@ -96,6 +107,7 @@ export CREEKD_ADMIN_TOKEN="$(openssl rand -hex 32)"
 export CREEKD_DISPATCH_ADDR=0.0.0.0:80
 export CREEKD_LOG_DIR=/var/lib/creekd/logs
 export CREEKD_CGROUP_PARENT=creekd.slice
+export CREEKD_DEFAULT_MEMORY_HIGH=256M
 export CREEKD_STATE_DIR=/var/lib/creekd
 
 # Optional: enable per-app network namespaces. Drop these for

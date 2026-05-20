@@ -16,6 +16,13 @@
 //	                     child stdout/stderr to creekd's own writers
 //	CREEKD_CGROUP_PARENT cgroup v2 slice owning per-app sub-cgroups;
 //	                     empty disables cgroup enforcement
+//	CREEKD_DEFAULT_MEMORY_HIGH
+//	                     daemon-wide floor for cgroup memory.high
+//	                     (soft cap; throttle, not OOM-kill). Applied
+//	                     to every spawned app that didn't pass an
+//	                     explicit --memory-high. Requires
+//	                     CREEKD_CGROUP_PARENT. Accepts K/M/G/T
+//	                     suffixes (e.g. "256M"); 0 / unset disables.
 //	CREEKD_DEBUG_PPROF   "1" mounts /debug/pprof/* on the admin
 //	                     listener, gated by the same bearer token
 //	CREEKD_STATE_DIR     directory holding state.json (persisted app
@@ -42,6 +49,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -104,7 +113,9 @@ func main() {
 
 func run(ctx context.Context, logger *slog.Logger) error {
 	sup := supervisor.New(logger)
-	configureSupervisorFromEnv(sup)
+	if err := configureSupervisorFromEnv(sup); err != nil {
+		return err
+	}
 
 	router := dispatch.NewRouter()
 
@@ -210,12 +221,23 @@ func run(ctx context.Context, logger *slog.Logger) error {
 // onto sup. Extracted so the env → field plumbing is unit-testable
 // without booting real listeners; keeping it out of run() keeps
 // that function focused on listener wiring.
-func configureSupervisorFromEnv(sup *supervisor.Supervisor) {
+//
+// Returns an error when an env knob is set but malformed. The daemon
+// refuses to boot in that case so an operator typo can't silently
+// disable a protection like memory.high.
+func configureSupervisorFromEnv(sup *supervisor.Supervisor) error {
 	if v := os.Getenv("CREEKD_LOG_DIR"); v != "" {
 		sup.LogDir = v
 	}
 	if v := os.Getenv("CREEKD_CGROUP_PARENT"); v != "" {
 		sup.CgroupParent = v
+	}
+	if v := os.Getenv("CREEKD_DEFAULT_MEMORY_HIGH"); v != "" {
+		n, err := parseSize(v)
+		if err != nil {
+			return fmt.Errorf("CREEKD_DEFAULT_MEMORY_HIGH: %w", err)
+		}
+		sup.DefaultMemoryHigh = n
 	}
 	// Per-app network namespace requires both knobs. Either-one-set
 	// is rejected at Spawn time; we don't pre-check here because the
@@ -226,6 +248,49 @@ func configureSupervisorFromEnv(sup *supervisor.Supervisor) {
 	if v := os.Getenv("CREEKD_NET_BRIDGE_NAME"); v != "" {
 		sup.NetBridgeName = v
 	}
+	return nil
+}
+
+// parseSize parses a human-friendly byte count: a bare integer
+// (bytes) or an integer followed by K/M/G/T (binary, *1024). The
+// optional "i" / "iB" / "B" suffix is accepted and ignored — "256M",
+// "256Mi", "256MiB", "256MB" all mean 256*1024*1024.
+//
+// Empty string returns 0. Lowercase is fine.
+//
+// Duplicated (deliberately) from cmd/creekctl to keep cmd/creekd from
+// pulling a sibling cmd package; the function is small and stable.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.ToUpper(s)
+	s = strings.TrimSuffix(s, "B")
+	s = strings.TrimSuffix(s, "I")
+	unit := int64(1)
+	switch {
+	case strings.HasSuffix(s, "K"):
+		unit = 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "M"):
+		unit = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "G"):
+		unit = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(s, "T"):
+		unit = 1024 * 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("size must be non-negative, got %d", n)
+	}
+	return n * unit, nil
 }
 
 // envOr returns os.Getenv(key) or fallback when empty.

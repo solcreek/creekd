@@ -428,6 +428,22 @@ type Supervisor struct {
 	// platforms the cgroup package is a no-op shim.
 	CgroupParent string
 
+	// DefaultMemoryHigh is the daemon-wide floor for memory.high. When
+	// non-zero AND CgroupParent is set, every Spawn that did not
+	// receive an explicit CgroupLimits.MemoryHigh has this value
+	// injected. Explicit per-app values always win — this sets the
+	// policy floor, not the ceiling.
+	//
+	// The whole-fleet effect is opt-out noisy-neighbor protection:
+	// even apps spawned with cfg.CgroupLimits == nil end up inside a
+	// per-app cgroup with the soft cap applied.
+	//
+	// 0 disables; the daemon falls back to "only enforce what the
+	// caller requested". Recommended production value: 256 MiB (see
+	// examples/cgroup-memory-tuning/RESULTS.md for the empirical
+	// justification).
+	DefaultMemoryHigh int64
+
 	// NetSubnet + NetBridgeName configure per-app network namespace
 	// support (M5.10). Both must be set for Config.NetIsolation to
 	// have any effect. NetSubnet is an IPv4 CIDR like "10.42.0.0/24";
@@ -459,6 +475,28 @@ func (s *Supervisor) cgroupManager() *cgroup.Manager {
 		s.cgMgr = cgroup.NewManager(s.CgroupParent)
 	})
 	return s.cgMgr
+}
+
+// applyCgroupDefaults injects DefaultMemoryHigh into cfg.CgroupLimits
+// when the supervisor has a default configured and the caller hasn't
+// set an explicit MemoryHigh. Returns the (possibly mutated) cfg.
+//
+// Skipped when CgroupParent is empty (no slice to hold the limits) or
+// DefaultMemoryHigh is zero. Explicit per-app values always win.
+func (s *Supervisor) applyCgroupDefaults(cfg Config) Config {
+	if s.CgroupParent == "" || s.DefaultMemoryHigh <= 0 {
+		return cfg
+	}
+	if cfg.CgroupLimits == nil {
+		cfg.CgroupLimits = &cgroup.Limits{MemoryHigh: s.DefaultMemoryHigh}
+		return cfg
+	}
+	if cfg.CgroupLimits.MemoryHigh == 0 {
+		lim := *cfg.CgroupLimits
+		lim.MemoryHigh = s.DefaultMemoryHigh
+		cfg.CgroupLimits = &lim
+	}
+	return cfg
 }
 
 // setupAppNetwork allocates an IP, creates the netns, and wires the
@@ -737,6 +775,8 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		}
 		app.rotator = rot
 	}
+
+	cfg = s.applyCgroupDefaults(cfg)
 
 	if cfg.CgroupLimits != nil {
 		mgr := s.cgroupManager()

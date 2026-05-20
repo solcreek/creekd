@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/solcreek/creekd/internal/cgroup"
 	runtimePkg "github.com/solcreek/creekd/internal/runtime"
 )
 
@@ -1714,4 +1715,77 @@ func TestLogCaptureSurvivesRestart(t *testing.T) {
 	if !seen["run-1"] || !seen["run-2"] {
 		t.Errorf("log missing one of the runs; seen=%v records=%d", seen, len(recs))
 	}
+}
+
+// TestApplyCgroupDefaults pins the daemon-wide DefaultMemoryHigh
+// injection: it kicks in when CgroupParent is set and the caller
+// didn't provide an explicit MemoryHigh, and gets out of the way
+// otherwise. The cgroup itself isn't created here — this tests only
+// the field-injection logic, which is the same on every platform.
+func TestApplyCgroupDefaults(t *testing.T) {
+	const def = int64(256 * 1024 * 1024)
+
+	t.Run("injects when limits nil", func(t *testing.T) {
+		sup := newTestSupervisor()
+		sup.CgroupParent = "creek.slice"
+		sup.DefaultMemoryHigh = def
+		out := sup.applyCgroupDefaults(Config{ID: "a"})
+		if out.CgroupLimits == nil {
+			t.Fatal("CgroupLimits == nil; want injected")
+		}
+		if out.CgroupLimits.MemoryHigh != def {
+			t.Errorf("MemoryHigh = %d, want %d", out.CgroupLimits.MemoryHigh, def)
+		}
+	})
+
+	t.Run("injects when limits set but MemoryHigh zero", func(t *testing.T) {
+		sup := newTestSupervisor()
+		sup.CgroupParent = "creek.slice"
+		sup.DefaultMemoryHigh = def
+		in := Config{ID: "a", CgroupLimits: &cgroup.Limits{MemoryMax: 1 << 30}}
+		out := sup.applyCgroupDefaults(in)
+		if out.CgroupLimits.MemoryHigh != def {
+			t.Errorf("MemoryHigh = %d, want %d", out.CgroupLimits.MemoryHigh, def)
+		}
+		if out.CgroupLimits.MemoryMax != 1<<30 {
+			t.Errorf("MemoryMax = %d, want 1<<30 (preserved)", out.CgroupLimits.MemoryMax)
+		}
+		// caller's pointer must not be mutated — the supervisor took a
+		// copy before injecting.
+		if in.CgroupLimits.MemoryHigh != 0 {
+			t.Errorf("caller's CgroupLimits.MemoryHigh = %d, want 0 (untouched)", in.CgroupLimits.MemoryHigh)
+		}
+	})
+
+	t.Run("explicit value wins", func(t *testing.T) {
+		sup := newTestSupervisor()
+		sup.CgroupParent = "creek.slice"
+		sup.DefaultMemoryHigh = def
+		const explicit = int64(128 * 1024 * 1024)
+		out := sup.applyCgroupDefaults(Config{
+			ID:           "a",
+			CgroupLimits: &cgroup.Limits{MemoryHigh: explicit},
+		})
+		if out.CgroupLimits.MemoryHigh != explicit {
+			t.Errorf("MemoryHigh = %d, want %d (explicit not overridden)", out.CgroupLimits.MemoryHigh, explicit)
+		}
+	})
+
+	t.Run("no-op when CgroupParent empty", func(t *testing.T) {
+		sup := newTestSupervisor()
+		sup.DefaultMemoryHigh = def
+		out := sup.applyCgroupDefaults(Config{ID: "a"})
+		if out.CgroupLimits != nil {
+			t.Errorf("CgroupLimits = %+v, want nil (no parent slice)", out.CgroupLimits)
+		}
+	})
+
+	t.Run("no-op when DefaultMemoryHigh zero", func(t *testing.T) {
+		sup := newTestSupervisor()
+		sup.CgroupParent = "creek.slice"
+		out := sup.applyCgroupDefaults(Config{ID: "a"})
+		if out.CgroupLimits != nil {
+			t.Errorf("CgroupLimits = %+v, want nil (no default)", out.CgroupLimits)
+		}
+	})
 }
