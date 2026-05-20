@@ -16,10 +16,13 @@ import (
 // versions they don't recognise.
 const FormatVersion = 1
 
-// State is the on-disk shape of the persisted app set.
+// State is the on-disk shape of the persisted app set + volumes.
+// Volumes are restored BEFORE Apps on daemon start so VolumeMount
+// references resolve.
 type State struct {
-	Version int   `json:"version"`
-	Apps    []App `json:"apps"`
+	Version int      `json:"version"`
+	Volumes []Volume `json:"volumes,omitempty"`
+	Apps    []App    `json:"apps"`
 }
 
 // App is one persisted entry. The supervisor.Config is stored
@@ -29,13 +32,21 @@ type App struct {
 	Config supervisor.Config `json:"config"`
 }
 
+// Volume is one persisted volume registration. The supervisor.Volume
+// is stored verbatim — on restore the same RegisterVolume call
+// reconstructs the in-memory registry + re-applies MS_PRIVATE.
+type Volume struct {
+	Volume supervisor.Volume `json:"volume"`
+}
+
 // Store serialises persisted state under a JSON file. Construct
 // with NewStore; every mutation flushes synchronously to disk.
 type Store struct {
 	path string
 
-	mu   sync.Mutex
-	apps map[string]supervisor.Config // appID → config
+	mu      sync.Mutex
+	apps    map[string]supervisor.Config // appID → config
+	volumes map[string]supervisor.Volume // volumeID → volume
 }
 
 // NewStore opens (or creates) the state file at path. If the file
@@ -45,8 +56,9 @@ type Store struct {
 // failure — an empty file or absent file is normal.
 func NewStore(path string) (*Store, error) {
 	s := &Store{
-		path: path,
-		apps: make(map[string]supervisor.Config),
+		path:    path,
+		apps:    make(map[string]supervisor.Config),
+		volumes: make(map[string]supervisor.Volume),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -145,6 +157,12 @@ func (s *Store) load() error {
 		return fmt.Errorf("state: unsupported version %d (want %d)",
 			st.Version, FormatVersion)
 	}
+	for _, v := range st.Volumes {
+		if v.Volume.ID == "" {
+			continue
+		}
+		s.volumes[v.Volume.ID] = v.Volume
+	}
 	for _, a := range st.Apps {
 		if a.Config.ID == "" {
 			continue
@@ -154,21 +172,102 @@ func (s *Store) load() error {
 	return nil
 }
 
-// flushMap writes the given map snapshot to disk atomically. Used by
-// AddApp / RemoveApp after they build a candidate "next" map but
-// before they swap it into s.apps. Caller must hold s.mu.
-func (s *Store) flushMap(m map[string]supervisor.Config) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("state: mkdir %s: %w", filepath.Dir(s.path), err)
-	}
-	st := State{Version: FormatVersion}
-	ids := make([]string, 0, len(m))
-	for id := range m {
+// Volumes returns a snapshot of every persisted Volume in
+// alphabetical order. Replayed at daemon start before any Apps so
+// Spawn's VolumeMount references resolve.
+func (s *Store) Volumes() []supervisor.Volume {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.volumes))
+	for id := range s.volumes {
 		ids = append(ids, id)
 	}
 	sortStrings(ids)
+	out := make([]supervisor.Volume, 0, len(ids))
 	for _, id := range ids {
-		st.Apps = append(st.Apps, App{Config: m[id]})
+		out = append(out, s.volumes[id])
+	}
+	return out
+}
+
+// AddVolume persists v. Re-adding with the same ID overwrites,
+// matching the supervisor's idempotent re-register semantics.
+func (s *Store) AddVolume(v supervisor.Volume) error {
+	if v.ID == "" {
+		return errors.New("state: empty volume id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	nextVolumes := cloneVolumeMap(s.volumes)
+	nextVolumes[v.ID] = v
+	if err := s.flushBoth(s.apps, nextVolumes); err != nil {
+		return err
+	}
+	s.volumes = nextVolumes
+	return nil
+}
+
+// RemoveVolume drops the entry for id. Unknown id is a no-op.
+func (s *Store) RemoveVolume(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.volumes[id]; !ok {
+		return nil
+	}
+	nextVolumes := cloneVolumeMap(s.volumes)
+	delete(nextVolumes, id)
+	if err := s.flushBoth(s.apps, nextVolumes); err != nil {
+		return err
+	}
+	s.volumes = nextVolumes
+	return nil
+}
+
+// cloneVolumeMap is the map-level counterpart to cloneMap, used for
+// the same copy-on-write swap.
+func cloneVolumeMap(src map[string]supervisor.Volume) map[string]supervisor.Volume {
+	dst := make(map[string]supervisor.Volume, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// flushMap writes the given app map snapshot to disk atomically.
+// Used by AddApp / RemoveApp; preserves the current volumes map.
+// Caller must hold s.mu.
+func (s *Store) flushMap(m map[string]supervisor.Config) error {
+	return s.flushBoth(m, s.volumes)
+}
+
+// flushBoth writes both maps atomically. Used by Volume mutations.
+// Caller must hold s.mu.
+func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]supervisor.Volume) error {
+	// Mode 0o700 / 0o600 — state.json contains every supervised
+	// app's full Config (env vars, commands, volume refs). World-
+	// readable defaults would leak tenant secrets to any local
+	// process. Pentest H6 surfaced the previous 0o755/0o644.
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return fmt.Errorf("state: mkdir %s: %w", filepath.Dir(s.path), err)
+	}
+	st := State{Version: FormatVersion}
+
+	volIDs := make([]string, 0, len(volumes))
+	for id := range volumes {
+		volIDs = append(volIDs, id)
+	}
+	sortStrings(volIDs)
+	for _, id := range volIDs {
+		st.Volumes = append(st.Volumes, Volume{Volume: volumes[id]})
+	}
+
+	appIDs := make([]string, 0, len(apps))
+	for id := range apps {
+		appIDs = append(appIDs, id)
+	}
+	sortStrings(appIDs)
+	for _, id := range appIDs {
+		st.Apps = append(st.Apps, App{Config: apps[id]})
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -176,7 +275,7 @@ func (s *Store) flushMap(m map[string]supervisor.Config) error {
 	}
 
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("state: write %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, s.path); err != nil {

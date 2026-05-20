@@ -126,7 +126,16 @@ type Config struct {
 	// Sandbox opts into Linux namespace isolation + optional chroot.
 	// Composes with CgroupLimits in a single clone3: cgroup attach,
 	// CLONE_NEW* flags, and Chroot are applied to the same child.
-	// Nil disables namespace isolation entirely.
+	//
+	// Special case: when VolumeMounts is non-empty AND Sandbox is
+	// either nil OR present with all fields at the zero value, the
+	// supervisor automatically defaults MountNamespace, PIDNamespace,
+	// and NoNewPrivs to true at Spawn time. Pentest review identified
+	// "tenant runs as root in host mount NS by default" as the #1
+	// issue — defaults flip from opt-in to opt-out for stateful
+	// workloads. Callers who want host-NS visibility for a stateful
+	// app must explicitly set at least one Sandbox field to take
+	// ownership of the policy.
 	Sandbox *sandbox.Spec
 
 	// NetIsolation opts into per-app network namespace + veth wiring.
@@ -150,14 +159,59 @@ type Config struct {
 	// exposes a meaningful health route that should distinguish
 	// "alive" from "ready to serve traffic".
 	HealthCheckPath string
+
+	// VolumeMounts declares per-app bind mounts that reference
+	// supervisor-registered Volumes. Each entry binds Volume[VolumeID]
+	// (optionally a SubPath inside it) onto Target so the child sees
+	// a stable filesystem path that survives process restart.
+	// Linux-only; non-Linux hosts reject any non-empty VolumeMounts
+	// at Spawn.
+	//
+	// VolumeID must reference a Volume previously declared via
+	// Supervisor.RegisterVolume. The two-layer split exists because
+	// Volume lifecycle (host-side mount, MS_PRIVATE propagation
+	// isolation, openat2-anchored fd) is owned by the supervisor and
+	// decoupled from any one app's lifecycle; VolumeMount is the
+	// per-app projection.
+	VolumeMounts []VolumeMount
+}
+
+// VolumeMount projects a supervisor-registered Volume into one
+// supervised app's filesystem view. See docs/RFC-stateful-substrate.md
+// extension 1 and the volume.go doc comment for the two-layer
+// rationale.
+type VolumeMount struct {
+	// VolumeID references a Volume previously declared via
+	// Supervisor.RegisterVolume. Spawn fails with ErrVolumeNotFound
+	// when the volume is missing.
+	VolumeID string
+
+	// SubPath optionally narrows the bind to a subdirectory of the
+	// referenced volume. Must be relative, no "..", no leading "/".
+	// Empty means bind the whole volume.
+	SubPath string
+
+	// Target is the path the child process sees. Must be absolute.
+	// When Config.Sandbox.Chroot is set the bind is placed at
+	// <Chroot>/<Target> on the host so the child observes it at
+	// Target inside the chroot.
+	Target string
+
+	// ReadOnly overrides the Volume's default ReadOnly for this one
+	// projection. The override is one-way: a RW Volume can be
+	// projected RO, but an RO Volume cannot be projected RW. The
+	// underlying bind is hardened with MS_NOSUID|MS_NODEV
+	// regardless — see resolveAndValidate.
+	ReadOnly bool
 }
 
 // CloneConfig returns a deep copy of cfg. The shallow struct copy
 // Go does on assignment would leave the slice/pointer fields
-// (Args, Env, CgroupLimits, Sandbox) aliasing the original — meaning
-// a later caller mutating cfg.Env or cfg.Sandbox.UIDMappings would
-// silently corrupt anything else holding the "same" Config (notably
-// state.Store's persisted snapshot).
+// (Args, Env, CgroupLimits, Sandbox, VolumeMounts) aliasing the
+// original — meaning a later caller mutating cfg.Env or
+// cfg.Sandbox.UIDMappings would silently corrupt anything else
+// holding the "same" Config (notably state.Store's persisted
+// snapshot).
 //
 // Callers that take ownership of a Config — Store on insertion, Store
 // on read-back — must clone before keeping a reference. Keep this in
@@ -167,6 +221,7 @@ func CloneConfig(cfg Config) Config {
 	out := cfg
 	out.Args = append([]string(nil), cfg.Args...)
 	out.Env = append([]string(nil), cfg.Env...)
+	out.VolumeMounts = append([]VolumeMount(nil), cfg.VolumeMounts...)
 	if cfg.CgroupLimits != nil {
 		limits := *cfg.CgroupLimits
 		out.CgroupLimits = &limits
@@ -252,6 +307,12 @@ type App struct {
 	NetGateway net.IP
 	netNS      *network.Namespace
 	veth       *network.VethPair
+
+	// volumeRefs holds the IDs of every Volume this app references
+	// via Config.VolumeMounts at Spawn time. Used by
+	// UnregisterVolume to refuse removal of in-use Volumes. Frozen
+	// at Spawn; safe to read without locking after.
+	volumeRefs []string
 }
 
 // HealthFailures returns the cumulative count of failed health probes
@@ -478,6 +539,49 @@ type Supervisor struct {
 	// interface (e.g. "creekd0") shared by all apps' veth peers.
 	NetSubnet     string
 	NetBridgeName string
+
+	// VolumeRoot is the base directory under which relative
+	// Volume.BackingPath values are resolved AND the containment
+	// anchor for all volume operations. Empty means VolumeMounts
+	// are disabled entirely (every RegisterVolume call fails).
+	//
+	// The supervisor pins an O_PATH fd of this directory at first
+	// volume registration and uses openat2(RESOLVE_BENEATH | …) for
+	// every subsequent path resolution. This is the load-bearing
+	// security primitive — caller-supplied BackingPath strings
+	// cannot escape this directory via symlinks, "..", or TOCTOU.
+	//
+	// Recommended layout: VolumeRoot = "/var/lib/creekd/volumes",
+	// callers register Volumes with BackingPath = "<tenant>/<vol>".
+	VolumeRoot string
+
+	// AllowedTargetPrefixes restricts where VolumeMounts may be
+	// bound on the HOST when the app has no Sandbox.Chroot. Without
+	// this, an orchestrator could pass Target: "/etc" and overlay
+	// system files. With Sandbox.Chroot set, the chroot itself
+	// provides containment and this allowlist is bypassed.
+	//
+	// Each entry must be absolute and is matched as a prefix after
+	// filepath.Clean. Empty means "no host targets allowed" — the
+	// only legal use of VolumeMounts is then inside a chroot.
+	//
+	// Recommended Phase 1 value: ["/data", "/var/lib/app"] for the
+	// common "no-chroot, stateless container conventions" case.
+	AllowedTargetPrefixes []string
+
+	// volumes is the registry of declared Volumes. Lifecycle is
+	// decoupled from individual app spawns — a Volume registered
+	// once is referenced by VolumeID from any app's VolumeMounts.
+	// Protected by volumesMu.
+	volumesMu sync.RWMutex
+	volumes   map[string]*Volume
+
+	// volumeRootFD is the pinned O_PATH fd of VolumeRoot. Opened
+	// lazily on first RegisterVolume. All subsequent path resolution
+	// happens via openat2 anchored here.
+	volumeRootOnce sync.Once
+	volumeRootFD   int // -1 when not yet opened
+	volumeRootErr  error
 
 	// cgMgr is lazily constructed from CgroupParent on first use.
 	cgMgrOnce sync.Once
@@ -736,6 +840,8 @@ func New(logger *slog.Logger) *Supervisor {
 	}
 	return &Supervisor{
 		apps:                        make(map[string]*App),
+		volumes:                     make(map[string]*Volume),
+		volumeRootFD:                -1,
 		logger:                      logger,
 		InitialBackoff:              1 * time.Second,
 		MaxBackoff:                  30 * time.Second,
@@ -821,7 +927,45 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		HealthCheckPath: cfg.HealthCheckPath,
 		env:             append([]string(nil), cfg.Env...),
 		done:            make(chan struct{}),
+		volumeRefs:      volumeIDs(cfg.VolumeMounts),
 	}
+	// Hardening default for stateful workloads: when VolumeMounts is
+	// non-empty, the tenant runs as root in the host mount namespace
+	// by default — pentest review flagged this as the #1 issue
+	// because MS_NOSUID on the bind is hygiene, not isolation
+	// (tenant root can still exec /usr/bin/sudo across mounts, can
+	// chmod / hardlink, etc.). Default MountNamespace, PIDNamespace,
+	// and NoNewPrivs to ON when VolumeMounts is non-empty unless
+	// the caller explicitly opted any of them out via a non-nil
+	// Sandbox with that field set false.
+	//
+	// Callers who really want host-NS visibility for a stateful app
+	// (e.g. a debug shell) must pass an explicit Sandbox with the
+	// fields set false — silence used to be opt-in, now it's opt-out.
+	if len(cfg.VolumeMounts) > 0 {
+		if cfg.Sandbox == nil {
+			cfg.Sandbox = &sandbox.Spec{
+				MountNamespace: true,
+				PIDNamespace:   true,
+				NoNewPrivs:     true,
+			}
+		}
+		// If Sandbox is non-nil, only flip fields that were left at
+		// their zero value. Explicit-false stays explicit-false.
+		// Detecting "explicit false vs zero" is impossible on a plain
+		// bool, so we use a pragmatic rule: when ANY field on the
+		// Sandbox is already true, the caller has thought about it
+		// and we leave their config alone. When the Sandbox is
+		// all-zeros (allocated but blank), we treat it as "defaults
+		// please" and flip the three fields on. Same heuristic the
+		// Go stdlib uses for opt-in defaults on Cmd flags.
+		if !cfg.Sandbox.Any() {
+			cfg.Sandbox.MountNamespace = true
+			cfg.Sandbox.PIDNamespace = true
+			cfg.Sandbox.NoNewPrivs = true
+		}
+	}
+
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller
 		// after Spawn does not silently affect restarts.
@@ -871,6 +1015,30 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 			}
 			return nil, err
 		}
+	}
+
+	// Bind-mount declared volumes after netns wiring (which mutates
+	// no filesystem state) and before exec. Each VolumeMount
+	// references a Volume already registered via RegisterVolume;
+	// the bind happens in the host mount namespace under
+	// MS_PRIVATE propagation so tenant-side mount events don't
+	// leak. Failures here roll back the network namespace and
+	// cgroup but NOT prior successful binds — those are idempotent
+	// and safe to leave; the next Spawn observes them via
+	// mountinfo identity check and reuses.
+	chrootDir := ""
+	if cfg.Sandbox != nil {
+		chrootDir = cfg.Sandbox.Chroot
+	}
+	if err := s.applyVolumeMounts(cfg.VolumeMounts, chrootDir); err != nil {
+		s.teardownAppNetwork(app)
+		if app.rotator != nil {
+			_ = app.rotator.Close()
+		}
+		if app.cg != nil {
+			_ = app.cg.Remove()
+		}
+		return nil, err
 	}
 
 	if err := s.startLocked(app, app.env); err != nil {

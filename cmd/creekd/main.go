@@ -157,6 +157,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			Addr:              addr,
 			Handler:           router,
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       60 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			MaxHeaderBytes:    16 << 10,
 		}
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -188,10 +192,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"auth", adminToken != "",
 		)
 	}
+	// Pentest H4: without ReadTimeout/WriteTimeout/IdleTimeout, a
+	// slow-body sender holds a connection (and its goroutine) open
+	// indefinitely. MaxHeaderBytes is bounded too — header floods
+	// were the cheapest pre-AdminAPI DoS path.
 	adminSrv := &http.Server{
 		Addr:              adminAddr,
 		Handler:           adminServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	adminLn, err := net.Listen("tcp", adminAddr)
 	if err != nil {
@@ -323,11 +335,27 @@ func envOr(key, fallback string) string {
 }
 
 // restoreFromState re-spawns every app recorded in store and
-// re-registers each on the dispatch router. Per-app failures are
-// logged and skipped so one corrupted entry can't block the rest.
+// re-registers each on the dispatch router. Volumes are restored
+// BEFORE apps so VolumeMount references resolve. Per-entry failures
+// are logged and skipped so one corrupted entry can't block the rest.
 // Returns the count of apps that came back up.
 func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 	router *dispatch.Router, store *state.Store) int {
+	for _, vol := range store.Volumes() {
+		if err := supervisor.ValidateID(vol.ID); err != nil {
+			logger.Error("restore: skipping invalid volume id",
+				"id", vol.ID, "err", err,
+			)
+			continue
+		}
+		if err := sup.RegisterVolume(vol); err != nil {
+			logger.Error("restore: volume register failed",
+				"id", vol.ID, "err", err,
+			)
+			continue
+		}
+	}
+
 	restored := 0
 	for _, cfg := range store.Apps() {
 		// Defense in depth: reject obviously-malformed IDs from the

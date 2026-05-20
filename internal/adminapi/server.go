@@ -106,6 +106,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/apps/{id}/restart", s.guard(s.handleRestart))
 	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
 	s.mux.HandleFunc("GET /v1/apps/{id}/stats", s.guard(s.handleStats))
+
+	s.mux.HandleFunc("POST /v1/volumes", s.guard(s.handleVolumeRegister))
+	s.mux.HandleFunc("GET /v1/volumes", s.guard(s.handleVolumesList))
+	s.mux.HandleFunc("GET /v1/volumes/{id}", s.guard(s.handleVolumeGet))
+	s.mux.HandleFunc("DELETE /v1/volumes/{id}", s.guard(s.handleVolumeDelete))
 }
 
 // guard wraps h with the bearer-token check. When s.token is empty
@@ -169,6 +174,7 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 		NetIsolation:    req.NetIsolation,
 		Sandbox:         req.Sandbox.toSandboxSpec(),
 		HealthCheckPath: req.HealthCheckPath,
+		VolumeMounts:    toSupervisorVolumeMounts(req.VolumeMounts),
 	}
 
 	app, err := s.sup.Spawn(cfg)
@@ -305,6 +311,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 			NetIsolation:    req.NetIsolation,
 			Sandbox:         req.Sandbox.toSandboxSpec(),
 			HealthCheckPath: req.HealthCheckPath,
+			VolumeMounts:    toSupervisorVolumeMounts(req.VolumeMounts),
 		},
 		ReadyTimeout:      msOr(req.ReadyTimeoutMS, 0),
 		PollInterval:      msOr(req.PollIntervalMS, 0),
@@ -441,39 +448,149 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+// MaxRequestBodyBytes caps request body size at the decoder. Set to
+// 64 KiB — well above any realistic SpawnRequest (~few KiB for
+// command + args + env + volume_mounts) and far below what a single
+// slow-body attacker can use to OOM the daemon. Pentest review (H4):
+// without this cap, an attacker with admin token can stream a 10GiB
+// body and OOM creekd.
+const MaxRequestBodyBytes = 64 << 10
+
 // decodeJSON reads and JSON-decodes the request body into dst.
 // Rejects unknown fields so typos in client payloads surface as 400
-// rather than silent drops.
+// rather than silent drops. Body is capped at MaxRequestBodyBytes
+// via http.MaxBytesReader so a slow / oversized body cannot OOM
+// the daemon.
 func decodeJSON(r *http.Request, dst any) error {
-	if r.Body == nil {
-		return errors.New("empty body")
-	}
-	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	return nil
+	return decodeJSONInner(nil, r, dst, false)
 }
 
 // decodeJSONAllowEmpty is like decodeJSON but tolerates an empty body
 // — leaves dst at its zero value. Used by handlers (e.g. restart)
 // where the body is optional.
 func decodeJSONAllowEmpty(r *http.Request, dst any) error {
+	return decodeJSONInner(nil, r, dst, true)
+}
+
+// decodeJSONInner is the shared implementation. w is optional; when
+// non-nil http.MaxBytesReader wires the limit into the response
+// hijacker for a clean 413 surface. When nil (most current call
+// sites), the limit is still enforced — the caller just sees a
+// generic decode error on overflow.
+func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool) error {
 	if r.Body == nil {
-		return nil
+		if allowEmpty {
+			return nil
+		}
+		return errors.New("empty body")
 	}
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		if errors.Is(err, io.EOF) {
+		if allowEmpty && errors.Is(err, io.EOF) {
 			return nil
 		}
 		return err
 	}
 	return nil
+}
+
+// handleVolumeRegister implements POST /v1/volumes.
+//
+// On success the supervisor has pinned an O_PATH fd of the backing
+// directory under VolumeRoot and applied MS_PRIVATE propagation.
+// The Volume is also persisted via state.Store so a daemon restart
+// re-registers it before any app re-spawn can reference it.
+func (s *Server) handleVolumeRegister(w http.ResponseWriter, r *http.Request) {
+	var req VolumeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, CodeBadRequest, "decode: "+err.Error())
+		return
+	}
+	v := supervisor.Volume{
+		ID:          req.ID,
+		BackingPath: req.BackingPath,
+		ReadOnly:    req.ReadOnly,
+	}
+	if err := s.sup.RegisterVolume(v); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrVolumeAlreadyExists):
+			writeError(w, http.StatusConflict, CodeConflict, err.Error())
+		case errors.Is(err, supervisor.ErrVolumeBackingMissing),
+			errors.Is(err, supervisor.ErrVolumeRootRequired):
+			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		}
+		return
+	}
+	stored, _ := s.sup.Volume(req.ID)
+
+	if s.store != nil {
+		if serr := s.store.AddVolume(stored); serr != nil {
+			_ = s.sup.UnregisterVolume(req.ID, true)
+			writeError(w, http.StatusInternalServerError, CodeInternal,
+				"state.AddVolume: "+serr.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, volumeViewOf(stored))
+}
+
+// handleVolumesList implements GET /v1/volumes.
+func (s *Server) handleVolumesList(w http.ResponseWriter, _ *http.Request) {
+	vols := s.sup.Volumes()
+	out := VolumesListResponse{Volumes: make([]VolumeView, 0, len(vols))}
+	for _, v := range vols {
+		out.Volumes = append(out.Volumes, volumeViewOf(v))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleVolumeGet implements GET /v1/volumes/{id}.
+func (s *Server) handleVolumeGet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	v, ok := s.sup.Volume(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, CodeNotFound, "volume not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeViewOf(v))
+}
+
+// handleVolumeDelete implements DELETE /v1/volumes/{id}. Refuses
+// when any registered app still references the volume; pass
+// ?force=true to override (the operator's "I know what I'm doing"
+// switch — does NOT unmount existing binds, those persist by
+// design).
+func (s *Server) handleVolumeDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	force := r.URL.Query().Get("force") == "true"
+
+	if err := s.sup.UnregisterVolume(id, force); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrVolumeNotFound):
+			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+		case errors.Is(err, supervisor.ErrVolumeInUse):
+			writeError(w, http.StatusConflict, CodeConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		}
+		return
+	}
+
+	if s.store != nil {
+		if err := s.store.RemoveVolume(id); err != nil {
+			writeError(w, http.StatusInternalServerError, CodeInternal,
+				"state.RemoveVolume: "+err.Error())
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // writeJSON writes status + JSON body.

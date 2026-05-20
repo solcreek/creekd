@@ -13,17 +13,18 @@ import (
 // Exactly one of (Command + Args) or (Runtime + Entry) must be set;
 // see supervisor.Config for the resolution rules.
 type SpawnRequest struct {
-	ID              string   `json:"id"`
-	Runtime         string   `json:"runtime,omitempty"`
-	Entry           string   `json:"entry,omitempty"`
-	Command         string   `json:"command,omitempty"`
-	Args            []string `json:"args,omitempty"`
-	Port            int      `json:"port"`
-	Env             []string `json:"env,omitempty"`
-	Limits          *Limits  `json:"limits,omitempty"`
-	NetIsolation    bool     `json:"net_isolation,omitempty"`
-	Sandbox         *Sandbox `json:"sandbox,omitempty"`
-	HealthCheckPath string   `json:"health_check_path,omitempty"`
+	ID              string        `json:"id"`
+	Runtime         string        `json:"runtime,omitempty"`
+	Entry           string        `json:"entry,omitempty"`
+	Command         string        `json:"command,omitempty"`
+	Args            []string      `json:"args,omitempty"`
+	Port            int           `json:"port"`
+	Env             []string      `json:"env,omitempty"`
+	Limits          *Limits       `json:"limits,omitempty"`
+	NetIsolation    bool          `json:"net_isolation,omitempty"`
+	Sandbox         *Sandbox      `json:"sandbox,omitempty"`
+	HealthCheckPath string        `json:"health_check_path,omitempty"`
+	VolumeMounts    []VolumeMount `json:"volume_mounts,omitempty"`
 }
 
 // RestartRequest is the body of POST /v1/apps/{id}/restart. An empty
@@ -37,19 +38,20 @@ type RestartRequest struct {
 // identifies the v1 app; the body describes v2. Port must differ
 // from v1's current port.
 type DeployRequest struct {
-	Runtime         string   `json:"runtime,omitempty"`
-	Entry           string   `json:"entry,omitempty"`
-	Command         string   `json:"command,omitempty"`
-	Args            []string `json:"args,omitempty"`
-	Port            int      `json:"port"`
-	Env             []string `json:"env,omitempty"`
-	Limits          *Limits  `json:"limits,omitempty"`
-	NetIsolation    bool     `json:"net_isolation,omitempty"`
-	Sandbox         *Sandbox `json:"sandbox,omitempty"`
-	HealthCheckPath string   `json:"health_check_path,omitempty"`
-	ReadyTimeoutMS  int64    `json:"ready_timeout_ms,omitempty"`
-	PollIntervalMS  int64    `json:"poll_interval_ms,omitempty"`
-	GracefulV1MS    int64    `json:"graceful_v1_ms,omitempty"`
+	Runtime         string        `json:"runtime,omitempty"`
+	Entry           string        `json:"entry,omitempty"`
+	Command         string        `json:"command,omitempty"`
+	Args            []string      `json:"args,omitempty"`
+	Port            int           `json:"port"`
+	Env             []string      `json:"env,omitempty"`
+	Limits          *Limits       `json:"limits,omitempty"`
+	NetIsolation    bool          `json:"net_isolation,omitempty"`
+	Sandbox         *Sandbox      `json:"sandbox,omitempty"`
+	HealthCheckPath string        `json:"health_check_path,omitempty"`
+	VolumeMounts    []VolumeMount `json:"volume_mounts,omitempty"`
+	ReadyTimeoutMS  int64         `json:"ready_timeout_ms,omitempty"`
+	PollIntervalMS  int64         `json:"poll_interval_ms,omitempty"`
+	GracefulV1MS    int64         `json:"graceful_v1_ms,omitempty"`
 }
 
 // Limits mirrors cgroup.Limits in the JSON wire format. Zero fields
@@ -118,6 +120,69 @@ func (s *Sandbox) toSandboxSpec() *sandbox.Spec {
 		return nil
 	}
 	return &spec
+}
+
+// VolumeMount mirrors supervisor.VolumeMount in JSON. VolumeID
+// references a Volume previously created via POST /v1/volumes;
+// SubPath optionally narrows the bind to a subdirectory; Target
+// is the path the child sees; ReadOnly tightens (never relaxes)
+// the Volume's RO setting.
+type VolumeMount struct {
+	VolumeID string `json:"volume_id"`
+	SubPath  string `json:"sub_path,omitempty"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"read_only,omitempty"`
+}
+
+// toSupervisorVolumeMounts maps the API representation to the
+// supervisor-internal type. Returns nil for nil/empty input.
+func toSupervisorVolumeMounts(vms []VolumeMount) []supervisor.VolumeMount {
+	if len(vms) == 0 {
+		return nil
+	}
+	out := make([]supervisor.VolumeMount, len(vms))
+	for i, v := range vms {
+		out[i] = supervisor.VolumeMount{
+			VolumeID: v.VolumeID,
+			SubPath:  v.SubPath,
+			Target:   v.Target,
+			ReadOnly: v.ReadOnly,
+		}
+	}
+	return out
+}
+
+// VolumeRequest is the body of POST /v1/volumes. BackingPath is
+// relative to the supervisor's VolumeRoot (e.g. "tenant-a/pg-data").
+// The directory must already exist on the host; creekd does not
+// create tenant data dirs.
+type VolumeRequest struct {
+	ID          string `json:"id"`
+	BackingPath string `json:"backing_path"`
+	ReadOnly    bool   `json:"read_only,omitempty"`
+}
+
+// VolumeView is the JSON shape of GET /v1/volumes responses.
+type VolumeView struct {
+	ID          string `json:"id"`
+	BackingPath string `json:"backing_path"`
+	ReadOnly    bool   `json:"read_only,omitempty"`
+	FSType      string `json:"fs_type,omitempty"`
+}
+
+// VolumesListResponse is the body of GET /v1/volumes.
+type VolumesListResponse struct {
+	Volumes []VolumeView `json:"volumes"`
+}
+
+// volumeViewOf snapshots a supervisor.Volume into a VolumeView.
+func volumeViewOf(v supervisor.Volume) VolumeView {
+	return VolumeView{
+		ID:          v.ID,
+		BackingPath: v.BackingPath,
+		ReadOnly:    v.ReadOnly,
+		FSType:      v.FSType,
+	}
 }
 
 // AppView is the JSON representation of a supervised app — returned

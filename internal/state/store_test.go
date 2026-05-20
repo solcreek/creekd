@@ -385,6 +385,100 @@ func TestAppsDeepCopiesReturnedConfigs(t *testing.T) {
 	}
 }
 
+func TestVolumeAddAndRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s1, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	v := supervisor.Volume{
+		ID: "vol-a", BackingPath: "tenant-a/data", ReadOnly: false, FSType: "ext4",
+	}
+	if err := s1.AddVolume(v); err != nil {
+		t.Fatalf("AddVolume: %v", err)
+	}
+
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got := s2.Volumes()
+	if len(got) != 1 {
+		t.Fatalf("reload: %d volumes, want 1", len(got))
+	}
+	if got[0].ID != "vol-a" || got[0].BackingPath != "tenant-a/data" || got[0].FSType != "ext4" {
+		t.Errorf("reload mismatch: %+v", got[0])
+	}
+}
+
+func TestVolumeRemove(t *testing.T) {
+	s := newStore(t)
+	_ = s.AddVolume(supervisor.Volume{ID: "vol-a", BackingPath: "a/data"})
+	_ = s.AddVolume(supervisor.Volume{ID: "vol-b", BackingPath: "b/data"})
+
+	if err := s.RemoveVolume("vol-a"); err != nil {
+		t.Fatalf("RemoveVolume: %v", err)
+	}
+	got := s.Volumes()
+	if len(got) != 1 || got[0].ID != "vol-b" {
+		t.Errorf("after remove: %+v", got)
+	}
+}
+
+func TestVolumeRemoveUnknownIsNoop(t *testing.T) {
+	s := newStore(t)
+	if err := s.RemoveVolume("ghost"); err != nil {
+		t.Errorf("RemoveVolume of unknown: %v", err)
+	}
+}
+
+func TestVolumeAndAppCoexistInSameStateFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s1, _ := NewStore(path)
+
+	_ = s1.AddVolume(supervisor.Volume{ID: "vol-a", BackingPath: "a/data"})
+	_ = s1.AddApp(supervisor.Config{
+		ID: "myapp", Command: "sleep", Port: 9000,
+	})
+
+	// Reload from disk; both should survive.
+	s2, _ := NewStore(path)
+	if len(s2.Volumes()) != 1 || s2.Volumes()[0].ID != "vol-a" {
+		t.Errorf("volumes lost on reload: %+v", s2.Volumes())
+	}
+	if len(s2.Apps()) != 1 || s2.Apps()[0].ID != "myapp" {
+		t.Errorf("apps lost on reload: %+v", s2.Apps())
+	}
+}
+
+func TestVolumeAddRejectsEmptyID(t *testing.T) {
+	s := newStore(t)
+	if err := s.AddVolume(supervisor.Volume{BackingPath: "a/data"}); err == nil {
+		t.Error("expected error for empty volume id")
+	}
+}
+
+func TestVolumeOrderingAlphabeticalOnReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s1, _ := NewStore(path)
+	_ = s1.AddVolume(supervisor.Volume{ID: "z", BackingPath: "z/data"})
+	_ = s1.AddVolume(supervisor.Volume{ID: "a", BackingPath: "a/data"})
+	_ = s1.AddVolume(supervisor.Volume{ID: "m", BackingPath: "m/data"})
+
+	s2, _ := NewStore(path)
+	got := s2.Volumes()
+	want := []string{"a", "m", "z"}
+	for i, v := range got {
+		if v.ID != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, v.ID, want[i])
+		}
+	}
+}
+
 func mkID(worker, iter int) string {
 	out := []byte("w--i--")
 	out[1] = byte('0' + (worker / 10 % 10))

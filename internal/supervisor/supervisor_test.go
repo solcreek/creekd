@@ -152,6 +152,7 @@ func TestCloneConfigCoversAllAliasableFields(t *testing.T) {
 		"Env":          reflect.Slice,
 		"CgroupLimits": reflect.Pointer,
 		"Sandbox":      reflect.Pointer,
+		"VolumeMounts": reflect.Slice,
 	}
 
 	typ := reflect.TypeOf(Config{})
