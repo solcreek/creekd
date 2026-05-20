@@ -20,7 +20,7 @@ cd examples/<name>
 ./down.sh          # tears it all down
 ```
 
-Each example's `up.sh` is self-contained — separate `creekd` instance, separate `bin/`, separate `state/`. You can have all four running simultaneously without collisions (the dispatch listener is always on `127.0.0.1:9000`, so only one example can claim it at a time; teardown is fast).
+Each example's `up.sh` is self-contained — separate `bin/`, separate `state/`. Only one example runs at a time because creekd's dispatch listener always binds `127.0.0.1:9000`; `down.sh` is fast, so switching between examples is just `down.sh && cd ../other && ./up.sh`.
 
 ## Which one to read first
 
