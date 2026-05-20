@@ -222,13 +222,73 @@ func (s *Supervisor) bindOneMount(rootFD int, rm resolvedMount) error {
 		}
 	}
 
-	// MkdirAll the parent only — the leaf itself we will create via
-	// a race-free Mkdirat under an O_PATH parent fd. This is the C1
-	// fix: never resolve the full target string at mount time.
+	// Identity check via mountinfo for idempotent re-spawn (same
+	// Volume → same target is a no-op). Done BEFORE creating the
+	// target dir so a re-spawn doesn't churn dirs unnecessarily.
+	bound, sameSource, err := isAlreadyBoundExact(rm.HostTarget, vol, srcStat)
+	if err != nil {
+		return fmt.Errorf("check existing mount: %w", err)
+	}
+	if bound && !sameSource {
+		return fmt.Errorf("target %q already bound to a different source", rm.HostTarget)
+	}
+	if bound {
+		// Same source already bound — nothing to do.
+		return nil
+	}
+
+	// Prepare target: MkdirAll the parent, then atomically create
+	// + open the leaf via openTargetRaceFree (pentest C1).
 	parent := filepath.Dir(rm.HostTarget)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("mkdir target parent %q: %w", parent, err)
 	}
+
+	// Atomic kernel-mount path (kernel ≥5.12) closes pentest H1/H2/H3:
+	//   H1 — no MS_PRIVATE window: propagation is set inside the
+	//        detached tree before attach.
+	//   H2 — no RW window: MOUNT_ATTR_RDONLY applied atomically.
+	//   H3 — recursive flag application: AT_RECURSIVE propagates
+	//        NOSUID/NODEV to sub-mounts of the source.
+	// Falls back to the legacy MS_BIND → MS_PRIVATE → MS_REMOUNT
+	// sequence on older kernels (ENOSYS).
+	if atomicMountAvailable() {
+		parentFD, leaf, err := openTargetParent(rm.HostTarget)
+		if err != nil {
+			return fmt.Errorf("open target parent: %w", err)
+		}
+		defer unix.Close(parentFD)
+		// Create the leaf in advance — move_mount requires the
+		// destination to exist.
+		if err := unix.Mkdirat(parentFD, leaf, 0o755); err != nil {
+			if !errors.Is(err, unix.EEXIST) {
+				return fmt.Errorf("mkdirat leaf %q: %w", leaf, err)
+			}
+		}
+		if err := bindAtomic(srcFD, parentFD, leaf, rm.ReadOnly); err != nil {
+			if !isENOSYS(err) {
+				return fmt.Errorf("atomic bind: %w", err)
+			}
+			// Kernel raced the probe (rare) — fall through to
+			// legacy path below.
+		} else {
+			// Defense in depth: verify mountinfo says ro for an RO
+			// projection. The atomic path sets MOUNT_ATTR_RDONLY
+			// directly so this is belt-and-braces.
+			if rm.ReadOnly {
+				if ok, err := verifyReadOnly(rm.HostTarget); err != nil {
+					return fmt.Errorf("verify readonly: %w", err)
+				} else if !ok {
+					return fmt.Errorf("target %q atomic mount but mountinfo still reports rw", rm.HostTarget)
+				}
+			}
+			return nil
+		}
+	}
+
+	// Legacy fallback path (kernel <5.12). Pentest H1/H2/H3 are NOT
+	// fully closed here — operator should upgrade for hostile-tenant
+	// deployments.
 	tgtFD, err := openTargetRaceFree(rm.HostTarget)
 	if err != nil {
 		return fmt.Errorf("open target %q: %w", rm.HostTarget, err)
@@ -238,25 +298,12 @@ func (s *Supervisor) bindOneMount(rootFD int, rm resolvedMount) error {
 	srcFDPath := fmt.Sprintf("/proc/self/fd/%d", srcFD)
 	tgtFDPath := fmt.Sprintf("/proc/self/fd/%d", tgtFD)
 
-	// Identity check via mountinfo for idempotent re-spawn (same
-	// Volume → same target is a no-op). Compares the mount's source
-	// inode against the Volume's stored (devMajor:devMinor + inode).
-	bound, sameSource, err := isAlreadyBoundExact(rm.HostTarget, vol, srcStat)
-	if err != nil {
-		return fmt.Errorf("check existing mount: %w", err)
+	flags := uintptr(unix.MS_BIND | unix.MS_NOSUID | unix.MS_NODEV)
+	if err := unix.Mount(srcFDPath, tgtFDPath, "", flags, ""); err != nil {
+		return fmt.Errorf("bind: %w", err)
 	}
-	if bound && !sameSource {
-		return fmt.Errorf("target %q already bound to a different source", rm.HostTarget)
-	}
-
-	if !bound {
-		flags := uintptr(unix.MS_BIND | unix.MS_NOSUID | unix.MS_NODEV)
-		if err := unix.Mount(srcFDPath, tgtFDPath, "", flags, ""); err != nil {
-			return fmt.Errorf("bind: %w", err)
-		}
-		if err := unix.Mount("", tgtFDPath, "", unix.MS_PRIVATE, ""); err != nil {
-			return fmt.Errorf("MS_PRIVATE on target: %w", err)
-		}
+	if err := unix.Mount("", tgtFDPath, "", unix.MS_PRIVATE, ""); err != nil {
+		return fmt.Errorf("MS_PRIVATE on target: %w", err)
 	}
 
 	if rm.ReadOnly {
@@ -272,6 +319,20 @@ func (s *Supervisor) bindOneMount(rootFD int, rm resolvedMount) error {
 	}
 
 	return nil
+}
+
+// openTargetParent opens the parent directory of hostTarget as an
+// O_PATH fd and returns the leaf name. Used by the atomic mount
+// path to anchor mount_setattr/move_mount on the parent fd, which
+// is race-free against symlink swaps of the leaf.
+func openTargetParent(hostTarget string) (int, string, error) {
+	parent := filepath.Dir(hostTarget)
+	leaf := filepath.Base(hostTarget)
+	parentFD, err := unix.Open(parent, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, "", fmt.Errorf("open parent %q: %w", parent, err)
+	}
+	return parentFD, leaf, nil
 }
 
 // openTargetRaceFree opens hostTarget for use as a mount destination,
