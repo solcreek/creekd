@@ -100,6 +100,35 @@ func TestSpawnEmptyIDRejected(t *testing.T) {
 	}
 }
 
+// Spawn must enforce the ID grammar itself, even when external
+// callers (admin API, state restore) already gate on ValidateID.
+// Defense in depth — a future caller that forgets to pre-validate
+// will be caught here rather than landing a malformed ID in the
+// log dir / cgroup / netns / state key.
+func TestSpawnValidatesIDGrammar(t *testing.T) {
+	sup := newTestSupervisor()
+	bad := []string{
+		"-leading-hyphen",
+		"UPPER",
+		"has space",
+		"has/slash",
+		"has..dots",
+		"emoji-🚀",
+	}
+	for _, id := range bad {
+		_, err := sup.Spawn(Config{
+			ID: id, Command: "sleep", Args: []string{"1"}, Port: 9004,
+		})
+		if err == nil {
+			t.Errorf("Spawn(%q) accepted invalid id; want ErrInvalidID", id)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidID) {
+			t.Errorf("Spawn(%q) returned %v; want ErrInvalidID", id, err)
+		}
+	}
+}
+
 func TestStopRemovesFromRegistry(t *testing.T) {
 	sup := newTestSupervisor()
 

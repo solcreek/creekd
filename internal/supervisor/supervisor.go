@@ -643,15 +643,33 @@ func (s *Supervisor) computeBackoff(count int) time.Duration {
 	return d
 }
 
-// Spawn starts a new supervised app. Returns ErrAlreadyRunning if an
-// app with the same ID is already in the registry.
+// Spawn starts a new supervised app. The ID is validated against
+// ValidateID before any side effects — log dir creation, cgroup
+// slice setup, netns allocation, registry insertion. Returns
+// ErrInvalidID on grammar failure, ErrAlreadyRunning if an app with
+// the same ID is already in the registry.
 //
-// Callers that accept user input — e.g. the admin API handler and
-// the state-file restore path — are responsible for calling
-// ValidateID first. Spawn itself accepts any non-empty ID so that
-// Deploy can use synthetic temp keys (deployTempID) that wouldn't
-// pass the user-facing grammar.
+// External callers (admin API, state-file restore) should call this
+// method. Internal callers that need to spawn under a synthetic
+// non-grammar ID — Deploy's two-process blue-green flip uses
+// deployTempID() which contains "__" — call spawnUnchecked directly.
+// Admin API and restore paths also call ValidateID at their own
+// entry point as an explicit guard; the duplicated check here is
+// cheap (one string scan) and means new external callers can't
+// accidentally skip validation.
 func (s *Supervisor) Spawn(cfg Config) (*App, error) {
+	if err := ValidateID(cfg.ID); err != nil {
+		return nil, err
+	}
+	return s.spawnUnchecked(cfg)
+}
+
+// spawnUnchecked is the validation-free spawn primitive. Callers
+// must ensure the ID is either grammar-valid (via ValidateID) OR a
+// supervisor-internal synthetic ID (e.g. deployTempID). The only
+// hard requirement here is non-empty — derived names (log dir,
+// cgroup, netns) still need *some* string.
+func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("supervisor: empty app id")
 	}
@@ -1417,11 +1435,13 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 
 	// Spawn v2 under a temp ID so it has its own registry slot,
 	// watch goroutine, and pipe drainage. The same temp ID is what
-	// we'll use to clean up if v2 turns out unhealthy.
+	// we'll use to clean up if v2 turns out unhealthy. tempID
+	// deliberately contains "__" (deployTempID adds the suffix) so
+	// it fails ValidateID — go through spawnUnchecked instead.
 	tempID := deployTempID(cfg.ID)
 	v2Cfg := cfg.Config
 	v2Cfg.ID = tempID
-	v2, err := s.Spawn(v2Cfg)
+	v2, err := s.spawnUnchecked(v2Cfg)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: spawn v2: %w", err)
 	}
