@@ -48,7 +48,7 @@ Patch release within 24 hours of `v0.1.0`, addressing six issues surfaced by an 
 ### Added
 
 - `examples/bun-app/` — first example exercising the `--runtime bun --entry server.ts` path. Uses Bun-native features (`Bun.serve`, `bun:sqlite`, SSE streaming through the dispatch reverse proxy) so swapping in Node would actually fail.
-- `examples/README.md` — index page with a scannable four-row table of all runnable recipes.
+- `examples/README.md` — index page with a scannable table of all runnable recipes (four rows at this release; more added in later versions).
 - `TestConfigureSupervisorFromEnv` — pins all four `CREEKD_*` env vars used by the daemon. This is the test that should have existed in `v0.1.0` to catch the net-iso gap.
 - `TestSpawnRejectsInvalidID` — admin-API-level coverage for the new ID grammar.
 - `TestResetPreservesEnv` — marker-file roundtrip through crash-loop + Reset.

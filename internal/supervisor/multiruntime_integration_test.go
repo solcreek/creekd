@@ -168,7 +168,7 @@ func TestMultiRuntimeConcurrentDispatch(t *testing.T) {
 	// can be slow on first JIT pass, especially with the race detector
 	// loaded and multiple children spawning at once — be generous.
 	for _, a := range actives {
-		waitForHTTPReady(t, a.port, 15*time.Second)
+		waitForHTTPReady(t, apps[a.fx.rt], a.port, 15*time.Second)
 	}
 
 	// Capture original PIDs to detect any unwanted restart later.

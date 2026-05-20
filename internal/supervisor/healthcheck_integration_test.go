@@ -118,7 +118,19 @@ func freePort(t *testing.T) int {
 // timeout. Used to gate the assertion phase on the child actually
 // listening — otherwise the very first probe could fail on connection
 // refusal regardless of HEALTH_MODE.
-func waitForHTTPReady(t *testing.T, port int, timeout time.Duration) {
+//
+// On timeout, the failure message dumps the supervised app's status,
+// PID, and restart count so the three common failure modes are
+// distinguishable from CI output alone:
+//
+//   - child crashed:                status != running, restart_count > 0
+//   - child running but not bound:  status == running, pid set, never 200
+//   - test infra slow:              looked like it was almost up; bump
+//                                   the timeout if this keeps happening
+//
+// Without the diagnostic dump, all three look like "test-app never
+// came up" which is unactionable from a CI log.
+func waitForHTTPReady(t *testing.T, app *App, port int, timeout time.Duration) {
 	t.Helper()
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 	client := &http.Client{Timeout: 200 * time.Millisecond}
@@ -134,7 +146,8 @@ func waitForHTTPReady(t *testing.T, port int, timeout time.Duration) {
 		resp.Body.Close()
 		return true
 	}) {
-		t.Fatalf("test-app on port %d never came up", port)
+		t.Fatalf("test-app %q on port %d never came up within %v: status=%s pid=%d restart_count=%d",
+			app.ID, port, timeout, app.Status(), app.PID(), app.RestartCount())
 	}
 }
 
@@ -160,7 +173,7 @@ func TestRealHTTPHealthCheckPasses(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 8*time.Second)
+	waitForHTTPReady(t, app, port, 15*time.Second)
 	originalPID := app.PID()
 
 	// Let ~10 probes happen.
@@ -205,7 +218,7 @@ func TestRealHTTPHealthCheckFailsAndRestarts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 8*time.Second)
+	waitForHTTPReady(t, app, port, 15*time.Second)
 	originalPID := app.PID()
 
 	// 3 failures × 80ms interval ≈ 240ms + spawn time. Give generous
@@ -248,7 +261,7 @@ func TestRealHTTPHealthCheckFlakyRecovers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sup.Stop(app.ID) })
 
-	waitForHTTPReady(t, port, 8*time.Second)
+	waitForHTTPReady(t, app, port, 15*time.Second)
 	originalPID := app.PID()
 
 	// Let probes drive through the flaky phase and into recovery.

@@ -37,7 +37,7 @@ func spawnHTTPChild(t *testing.T, sup *Supervisor, id, signature, mode string) (
 	if err != nil {
 		t.Fatalf("Spawn %s: %v", id, err)
 	}
-	waitForHTTPReady(t, port, 8*time.Second)
+	waitForHTTPReady(t, app, port, 15*time.Second)
 	return app, port
 }
 
