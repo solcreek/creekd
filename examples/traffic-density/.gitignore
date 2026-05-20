@@ -1,0 +1,2 @@
+# bench reads fixtures from ../stack-density/stacks/ and
+# ../nextjs-density/app/.next/standalone/ — nothing local.
