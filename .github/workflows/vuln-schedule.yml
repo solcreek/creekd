@@ -1,0 +1,28 @@
+name: vuln (weekly)
+
+# govulncheck on a weekly schedule. The PR/push trigger in ci.yml
+# catches new code introducing vulnerable deps; this one catches the
+# inverse case — CVEs disclosed against deps that are already pinned
+# in go.mod (no code change → no PR trigger). Without the schedule
+# leg, "a CVE was published last Tuesday against prometheus/common"
+# would never surface until the next unrelated PR.
+#
+# Monday 06:00 UTC keeps the noise concentrated at the start of the
+# week. GitHub schedule cron has 10-30 min delay during peak demand
+# — that's fine for vuln scans. workflow_dispatch enables manual
+# runs (e.g. immediately after a `go mod tidy`).
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+          repo-checkout: false

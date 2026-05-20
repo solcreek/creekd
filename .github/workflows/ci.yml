@@ -59,3 +59,18 @@ jobs:
         # once so the runner doesn't OOM holding 3s worth of spawned
         # child processes per bench.
         run: make bench-smoke
+
+  vuln:
+    name: vuln (govulncheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # govulncheck uses call-graph analysis so it only fails on CVEs
+      # in code paths we actually reach — not just "any version of any
+      # dep". Failures on PR/push catch newly-introduced vulnerable
+      # deps; the weekly schedule in vuln-schedule.yml covers CVEs
+      # disclosed against deps that are already in go.mod.
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go.mod
+          repo-checkout: false
