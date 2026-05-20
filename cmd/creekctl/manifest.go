@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/solcreek/creekd/internal/adminapi"
 )
@@ -68,6 +69,9 @@ func loadManifest(path string) (*CreekdManifest, string, error) {
 	if m.Entrypoint == "" {
 		return nil, "", errors.New("--from: missing entrypoint")
 	}
+	if err := validateEntrypoint(m.Entrypoint); err != nil {
+		return nil, "", fmt.Errorf("--from: %s: %w", absPath, err)
+	}
 	if m.Port <= 0 || m.Port > 65535 {
 		return nil, "", fmt.Errorf("--from: port=%d out of range (1..65535)", m.Port)
 	}
@@ -77,6 +81,32 @@ func loadManifest(path string) (*CreekdManifest, string, error) {
 	projectDir := filepath.Dir(manifestDir)
 
 	return &m, projectDir, nil
+}
+
+// validateEntrypoint rejects entrypoints that could resolve outside
+// the manifest's project directory. The adapter always writes a path
+// relative to the project root (e.g. ".next/standalone/server.js"),
+// so anything absolute or containing parent-dir traversal is either
+// a corrupted manifest, a supply-chain compromise of the adapter, or
+// a hand-edited file pointing somewhere unsafe.
+//
+// Even under creekctl's local trust model (the user runs it on their
+// own dev machine against their own manifest), guarding here means
+// that a future use case where manifests cross trust boundaries —
+// e.g. a hosted control plane consuming customer-provided manifests
+// — doesn't need a second layer of defence to be added later.
+func validateEntrypoint(ep string) error {
+	if filepath.IsAbs(ep) {
+		return fmt.Errorf("entrypoint %q must be relative to the project root, not absolute", ep)
+	}
+	clean := filepath.Clean(ep)
+	// Clean turns "./a/../../b" into "../b"; any leading ".." (or the
+	// literal "..") in the cleaned form means the path escapes
+	// projectDir once joined.
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, `..\`) {
+		return fmt.Errorf("entrypoint %q escapes the project directory via ..", ep)
+	}
+	return nil
 }
 
 // applyManifestTo seeds the SpawnRequest from a manifest. CLI flags

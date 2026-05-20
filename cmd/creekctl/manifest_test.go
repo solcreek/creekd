@@ -108,6 +108,48 @@ func TestLoadManifestRejectsMissingEntrypoint(t *testing.T) {
 	}
 }
 
+// Absolute entrypoint in the manifest is rejected — the adapter
+// always writes relative paths; an absolute one means corruption or
+// tampering and would resolve outside the project root once joined.
+func TestLoadManifestRejectsAbsoluteEntrypoint(t *testing.T) {
+	body := strings.Replace(goodManifest,
+		`"entrypoint": ".next/standalone/server.js"`,
+		`"entrypoint": "/etc/passwd"`, 1)
+	mp, _ := writeManifest(t, body)
+	_, _, err := loadManifest(mp)
+	if err == nil {
+		t.Fatal("want error for absolute entrypoint, got nil")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("error %q should mention 'absolute'", err)
+	}
+}
+
+// Parent-dir traversal (".." segments after Clean) is rejected for
+// the same reason. Covers both ../ and the rarer ..\ separator that
+// could arrive from a Windows-authored manifest.
+func TestLoadManifestRejectsTraversalEntrypoint(t *testing.T) {
+	for _, ep := range []string{
+		"../escape.js",
+		"./../escape.js",
+		".next/../../escape.js",
+		"..",
+	} {
+		body := strings.Replace(goodManifest,
+			`"entrypoint": ".next/standalone/server.js"`,
+			`"entrypoint": "`+ep+`"`, 1)
+		mp, _ := writeManifest(t, body)
+		_, _, err := loadManifest(mp)
+		if err == nil {
+			t.Errorf("entrypoint %q: want error, got nil", ep)
+			continue
+		}
+		if !strings.Contains(err.Error(), "escape") {
+			t.Errorf("entrypoint %q: error %q should mention 'escape'", ep, err)
+		}
+	}
+}
+
 func TestApplyManifestSeedsEmptyRequest(t *testing.T) {
 	_, projectDir := writeManifest(t, goodManifest)
 	m := &CreekdManifest{
