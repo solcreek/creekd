@@ -22,7 +22,7 @@
 # creekd as a plain process supervisor without per-app caps), drop
 # --privileged.
 
-ARG GO_VERSION=1.22
+ARG GO_VERSION=1.26
 
 FROM golang:${GO_VERSION}-bookworm AS builder
 ARG VERSION=0.0.0-docker
