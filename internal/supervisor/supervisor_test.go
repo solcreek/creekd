@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,56 @@ func TestSpawnValidatesIDGrammar(t *testing.T) {
 		}
 		if !errors.Is(err, ErrInvalidID) {
 			t.Errorf("Spawn(%q) returned %v; want ErrInvalidID", id, err)
+		}
+	}
+}
+
+// Tripwire: CloneConfig must keep its deep-copy logic in sync with
+// the Config struct. If a new slice, map, or pointer field is added
+// to Config without a matching clone in CloneConfig, the next caller
+// to mutate that field can corrupt state.Store's persisted snapshot.
+//
+// This test walks Config's fields via reflection and asserts that
+// the set of aliasable fields (slice / map / pointer) matches a
+// hard-coded expected set. Adding a new aliasable field will fail
+// this test; the fix is to:
+//
+//  1. Add the field to the `expected` set below.
+//  2. Add the deep-copy line to CloneConfig.
+//
+// The matching aliasing-mutation test in internal/state/store_test.go
+// proves the clone actually works for the fields that exist today.
+func TestCloneConfigCoversAllAliasableFields(t *testing.T) {
+	expected := map[string]reflect.Kind{
+		"Args":         reflect.Slice,
+		"Env":          reflect.Slice,
+		"CgroupLimits": reflect.Pointer,
+		"Sandbox":      reflect.Pointer,
+	}
+
+	typ := reflect.TypeOf(Config{})
+	found := map[string]reflect.Kind{}
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		switch f.Type.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Pointer:
+			found[f.Name] = f.Type.Kind()
+		}
+	}
+
+	for name, kind := range expected {
+		got, ok := found[name]
+		if !ok {
+			t.Errorf("Config field %q was removed but is still in CloneConfig's expected set — remove from this test and CloneConfig", name)
+			continue
+		}
+		if got != kind {
+			t.Errorf("Config field %q kind changed (was %s, now %s) — verify CloneConfig still copies it correctly", name, kind, got)
+		}
+	}
+	for name := range found {
+		if _, ok := expected[name]; !ok {
+			t.Errorf("Config field %q is a new %s field — add a deep-copy line to CloneConfig and add the name to this test's `expected` set", name, found[name])
 		}
 	}
 }
