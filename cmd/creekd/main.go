@@ -61,6 +61,7 @@ import (
 
 	"github.com/solcreek/creekd/internal/adminapi"
 	"github.com/solcreek/creekd/internal/dispatch"
+	"github.com/solcreek/creekd/internal/metrics"
 	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
@@ -124,6 +125,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	router := dispatch.NewRouter()
 
+	// Observability: a Prometheus registry that collects per-app
+	// cgroup state lazily on scrape, plus push counters for dispatch
+	// bytes/requests. Mounted as GET /metrics on the admin listener
+	// below, gated by the same bearer token.
+	m := metrics.New(sup, version)
+	router.SetObserver(m.ObserveDispatch)
+
 	// Load persisted state (if enabled) and replay each declared
 	// app through Spawn so the platform survives creekd's own
 	// restart. Failures per-app are logged and skipped — one
@@ -172,6 +180,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if store != nil {
 		adminServer.SetStore(store)
 	}
+	adminServer.SetMetricsHandler(m.Handler())
 	if os.Getenv("CREEKD_DEBUG_PPROF") == "1" {
 		adminServer.EnablePprof()
 		logger.Info("pprof endpoints mounted",
