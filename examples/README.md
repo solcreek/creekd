@@ -1,6 +1,6 @@
 # Examples
 
-Six runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
+Seven runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
 
 | Example | What it proves | Compares to | Linux required? |
 |---|---|---|---|
@@ -10,6 +10,7 @@ Six runnable recipes that each prove one slice of what creekd is for. Every exam
 | [`bun-app/`](bun-app/) | `--runtime bun --entry server.ts` end-to-end: Bun.serve, bun:sqlite, SSE streaming through the dispatch reverse proxy | n/a — this is the runtime-coverage demo | no (needs Bun installed) |
 | [`nextjs-density/`](nextjs-density/) | Idle RAM density: how many Next.js apps fit on one host with `@solcreek/adapter-creekd` | **`docker run`** — measured 1.45× per-app PSS overhead, 1.63× total kernel RAM, 45× faster spawn on Linux ([COMPARISON.md](nextjs-density/COMPARISON.md)) | no (uses docker for the comparison side; bare side runs anywhere) |
 | [`stack-density/`](stack-density/) | Per-app idle PSS across stacks: Bun (8.8 MB) / Hono (12 MB) / SvelteKit (18 MB) / Astro (23 MB) / Next.js (48 MB) | Across stacks rather than supervisors — picking a lighter framework dwarfs every other density lever ([STACKS.md](stack-density/STACKS.md)) | yes (needs /proc/&lt;pid&gt;/smaps_rollup) |
+| [`traffic-density/`](traffic-density/) | Per-app PSS through idle → warm → sustained → burst → cooldown across all 5 stacks | Layered on top of stack-density to measure the **traffic inflation multiplier** capacity-planning math depends on — bun-hello / hono ~1.06×, sveltekit ~1.68×, next.js ~1.33× ([COMPARISON.md](traffic-density/COMPARISON.md)) | yes |
 
 ## How to run any one of them
 
@@ -38,6 +39,7 @@ cd examples/pm2-replacement && ./up.sh && go run ./bench -n 20
 cd examples/sandboxed-eval  && ./bench/run.sh
 cd examples/nextjs-density  && ./up.sh && go run ./bench -n 10
 cd examples/stack-density   && ./bootstrap.sh && ./measure.sh   # Linux-only
+cd examples/traffic-density && ./bootstrap.sh && go run ./bench  # Linux-only, ~16 min
 ```
 
 The numbers in the comparison docs were measured on a darwin/amd64 host with Docker Desktop. Your absolute numbers will differ; the ratios should be in the same ballpark.
