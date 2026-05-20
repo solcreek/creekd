@@ -35,6 +35,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -54,7 +55,29 @@ import (
 // Falls back to "0.0.0-dev" for plain `go build`.
 var version = "0.0.0-dev"
 
+// handleVersionFlag prints the build version to out and returns true
+// when args[1] is one of --version / -v / version. Used by install.sh
+// and operator tooling to identify a binary without booting the
+// daemon. Without this, `creekd --version` falls through to the
+// daemon path, binds ports, and hangs the caller's command
+// substitution forever.
+func handleVersionFlag(args []string, out io.Writer) bool {
+	if len(args) < 2 {
+		return false
+	}
+	switch args[1] {
+	case "--version", "-v", "version":
+		fmt.Fprintln(out, version)
+		return true
+	}
+	return false
+}
+
 func main() {
+	if handleVersionFlag(os.Args, os.Stdout) {
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))

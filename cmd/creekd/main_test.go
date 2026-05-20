@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/solcreek/creekd/internal/supervisor"
@@ -65,5 +67,40 @@ func TestEnvOr(t *testing.T) {
 	t.Setenv("CREEKD_TEST_VAR", "set")
 	if got := envOr("CREEKD_TEST_VAR", "fallback"); got != "set" {
 		t.Errorf("set env: got %q, want set", got)
+	}
+}
+
+// handleVersionFlag is the early-exit path that prevents
+// `creekd --version` from booting the daemon and hanging install.sh.
+// Three acceptable flag spellings; anything else should fall through
+// to the normal daemon startup path.
+func TestHandleVersionFlag(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		wantPrint bool
+	}{
+		{"long flag", []string{"creekd", "--version"}, true},
+		{"short flag", []string{"creekd", "-v"}, true},
+		{"subcommand-style", []string{"creekd", "version"}, true},
+		{"no args", []string{"creekd"}, false},
+		{"unrelated arg", []string{"creekd", "--admin-addr=127.0.0.1:9080"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			got := handleVersionFlag(c.args, &buf)
+			if got != c.wantPrint {
+				t.Errorf("return = %v, want %v", got, c.wantPrint)
+			}
+			printed := buf.String()
+			if c.wantPrint {
+				if !strings.Contains(printed, version) {
+					t.Errorf("output %q does not contain version %q", printed, version)
+				}
+			} else if printed != "" {
+				t.Errorf("output should be empty for non-version args, got %q", printed)
+			}
+		})
 	}
 }
