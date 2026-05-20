@@ -8,7 +8,22 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Added
 
-- `creekctl up --from <manifest.json>` reads a manifest written by [`@solcreek/adapter-creekd`](https://github.com/solcreek/adapter-creekd) and seeds the spawn request (runtime, entrypoint, port). CLI flags retain priority — any value the user passes on the command line overrides the corresponding manifest field. Validates manifest version, target, framework, runtime, and port range; rejects malformed JSON with a clear error.
+- `creekctl up --from <manifest.json>` reads a manifest written by [`@solcreek/adapter-creekd`](https://github.com/solcreek/adapter-creekd) and seeds the spawn request (runtime, entrypoint, port). CLI flags retain priority — any value the user passes on the command line overrides the corresponding manifest field. Validates manifest version, target, framework, runtime, and port range; rejects malformed JSON with a clear error. Entrypoint is rejected if absolute or containing `..` traversal.
+- `creekctl deploy --from <manifest.json>` — symmetric counterpart for blue-green redeploy from an updated manifest. Same CLI flag precedence as `up --from`, same three fields seeded (runtime, entrypoint, port). Closes the adapter manifest's continuous-deploy loop: rebuild → manifest updates → `deploy --from` pushes the new artifact.
+- `examples/nextjs-density/` — Next.js idle RAM density bench vs `docker run`. Measured Linux numbers (Hetzner cx33, Bun 1.3.14): 1.45× per-app PSS overhead for docker; 1.63× total kernel memory; 45× faster bare-bun spawn for N=50.
+- `examples/stack-density/` — per-app idle PSS across 5 stacks (Bun raw, Hono, SvelteKit, Astro, Next.js). The lightest stack fits ~5× more apps per host than the heaviest. Bash-only harness, Linux-only (uses `/proc/<pid>/smaps_rollup`).
+
+### Fixed
+
+- `creekd --version` / `-v` / `version` now print the build-time version and exit 0 before the daemon initialises. Previously fell through to daemon startup, bound the dispatch + admin ports, and hung any command substitution (notably `install.sh`'s post-install version display).
+- `supervisor.Spawn` now validates the app ID itself via `ValidateID` before any side effects. External callers (admin API, state restore) already validated upstream; this closes the gap if a future caller forgets. Deploy's internal blue-green spawn uses `spawnUnchecked` because its `deployTempID` deliberately fails the grammar.
+- `state.Store` AddApp/RemoveApp use copy-on-write semantics: build a candidate map, flush to disk, swap in-memory only on flush success. A failed flush no longer leaks into the in-memory cache where a later successful flush would silently persist the supposedly-failed change.
+- `state.Store` deep-copies `supervisor.Config` on store and retrieve. Args/Env slices and CgroupLimits/Sandbox pointer targets are no longer aliased between caller and persisted snapshot.
+- `creekctl up --from` / `deploy --from` reject manifest entrypoints that are absolute paths or contain `..` traversal. Defense in depth — currently runs under a local trust model, but the validation removes the requirement for a second layer later if a hosted control plane ever consumes customer manifests.
+
+### Changed
+
+- Several internal `doc.go` package docs rewritten to match implementation: `runtime` (Detect inspects file fingerprints, not source imports), `dispatch` (stdlib httputil.ReverseProxy, no Caddy embed, no health-gated routing), `cgroup` (non-Linux returns ErrUnsupported and fails the spawn, doesn't silently degrade), `state` (cloneMap comment now accurately describes the aliasing rule).
 
 ## [0.1.1] - 2026-05-19
 

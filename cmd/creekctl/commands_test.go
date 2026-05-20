@@ -595,21 +595,32 @@ func TestUpFromManifestMissingFileErrors(t *testing.T) {
 	}
 }
 
-// newDeployCaptureServer returns an httptest server that captures the
-// JSON body of POST /v1/apps/<id>/deploy under a mutex and answers
-// with a synthetic running AppView. The harness lets the CLI test
-// run the full runDeploy path without needing a real v2 process to
-// become healthy.
-func newDeployCaptureServer(t *testing.T) (string, *adminapi.DeployRequest, *sync.Mutex) {
+// deployCapture tracks whether the deploy admin endpoint was hit and,
+// if so, what request body the client sent. The Called field is the
+// canonical "was the API touched" signal — checking captured.Port
+// alone is weak because Port defaults to 0 anyway, so a missing-
+// manifest case where the CLI never reached the network would look
+// indistinguishable from a request that just happened to set port 0.
+type deployCapture struct {
+	mu      sync.Mutex
+	Called  bool
+	Request adminapi.DeployRequest
+}
+
+// newDeployCaptureServer returns an httptest server that records
+// every POST /v1/apps/<id>/deploy and answers with a synthetic
+// running AppView. The harness lets the CLI test run the full
+// runDeploy path without needing a real v2 process to become healthy.
+func newDeployCaptureServer(t *testing.T) (string, *deployCapture) {
 	t.Helper()
-	var mu sync.Mutex
-	captured := &adminapi.DeployRequest{}
+	cap := &deployCapture{}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/deploy") {
-			mu.Lock()
-			defer mu.Unlock()
-			if err := json.NewDecoder(r.Body).Decode(captured); err != nil {
+			cap.mu.Lock()
+			defer cap.mu.Unlock()
+			cap.Called = true
+			if err := json.NewDecoder(r.Body).Decode(&cap.Request); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -617,7 +628,7 @@ func newDeployCaptureServer(t *testing.T) (string, *adminapi.DeployRequest, *syn
 			_ = json.NewEncoder(w).Encode(adminapi.AppView{
 				ID:     "deploy-from-test",
 				Status: "running",
-				Port:   captured.Port,
+				Port:   cap.Request.Port,
 			})
 			return
 		}
@@ -626,7 +637,7 @@ func newDeployCaptureServer(t *testing.T) (string, *adminapi.DeployRequest, *syn
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return srv.URL, captured, &mu
+	return srv.URL, cap
 }
 
 // Integration: `deploy --from` loads the manifest, seeds the
@@ -635,7 +646,7 @@ func newDeployCaptureServer(t *testing.T) (string, *adminapi.DeployRequest, *syn
 // (real supervisor.Deploy needs v2 to become healthy, which a sleep
 // command can't do).
 func TestDeployFromManifestSeedsPort(t *testing.T) {
-	url, captured, mu := newDeployCaptureServer(t)
+	url, cap := newDeployCaptureServer(t)
 	manifestPort := freeTCPPort(t)
 	manifestPath := writeBenchManifest(t, "bun", "server.js", manifestPort)
 
@@ -648,23 +659,26 @@ func TestDeployFromManifestSeedsPort(t *testing.T) {
 		t.Fatalf("deploy --from: %v", err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if captured.Port != manifestPort {
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if !cap.Called {
+		t.Fatal("admin API was not called")
+	}
+	if cap.Request.Port != manifestPort {
 		t.Errorf("DeployRequest.Port = %d, want %d (from manifest)",
-			captured.Port, manifestPort)
+			cap.Request.Port, manifestPort)
 	}
-	if captured.Runtime != "bun" {
-		t.Errorf("DeployRequest.Runtime = %q, want bun (from manifest)", captured.Runtime)
+	if cap.Request.Runtime != "bun" {
+		t.Errorf("DeployRequest.Runtime = %q, want bun (from manifest)", cap.Request.Runtime)
 	}
-	if !strings.HasSuffix(captured.Entry, "server.js") {
-		t.Errorf("DeployRequest.Entry = %q, want suffix server.js", captured.Entry)
+	if !strings.HasSuffix(cap.Request.Entry, "server.js") {
+		t.Errorf("DeployRequest.Entry = %q, want suffix server.js", cap.Request.Entry)
 	}
 }
 
 // CLI --port overrides manifest port, same precedence rule as up.
 func TestDeployFromManifestCLIPortOverrides(t *testing.T) {
-	url, captured, mu := newDeployCaptureServer(t)
+	url, cap := newDeployCaptureServer(t)
 	manifestPort := freeTCPPort(t)
 	cliPort := freeTCPPort(t)
 	if manifestPort == cliPort {
@@ -682,18 +696,21 @@ func TestDeployFromManifestCLIPortOverrides(t *testing.T) {
 		t.Fatalf("deploy --from --port: %v", err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if captured.Port != cliPort {
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if !cap.Called {
+		t.Fatal("admin API was not called")
+	}
+	if cap.Request.Port != cliPort {
 		t.Errorf("DeployRequest.Port = %d, want %d (CLI --port should override manifest)",
-			captured.Port, cliPort)
+			cap.Request.Port, cliPort)
 	}
 }
 
 // `deploy --from` against a path that doesn't exist surfaces a
 // helpful error and doesn't trip the admin API.
 func TestDeployFromManifestMissingFileErrors(t *testing.T) {
-	url, captured, mu := newDeployCaptureServer(t)
+	url, cap := newDeployCaptureServer(t)
 	_, err := runSub(t, "deploy", []string{
 		"nope", "--server", url,
 		"--command", "sleep", "--arg", "30",
@@ -705,9 +722,9 @@ func TestDeployFromManifestMissingFileErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "--from") {
 		t.Errorf("error %q should mention --from", err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if captured.Port != 0 {
-		t.Errorf("admin API was called despite missing manifest; captured Port=%d", captured.Port)
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if cap.Called {
+		t.Error("admin API was called despite missing manifest — runDeploy should error out before client.Deploy")
 	}
 }

@@ -164,7 +164,7 @@ func BenchmarkList(b *testing.B) {
 			sup := newTestSupervisor()
 			for i := 0; i < n; i++ {
 				if _, err := sup.Spawn(Config{
-					ID:      fmt.Sprintf("L%d", i),
+					ID:      fmt.Sprintf("l%d", i),
 					Command: "sleep",
 					Args:    []string{"30"},
 					Port:    35000 + i,
@@ -174,7 +174,7 @@ func BenchmarkList(b *testing.B) {
 			}
 			b.Cleanup(func() {
 				for i := 0; i < n; i++ {
-					_ = sup.Stop(fmt.Sprintf("L%d", i))
+					_ = sup.Stop(fmt.Sprintf("l%d", i))
 				}
 			})
 
