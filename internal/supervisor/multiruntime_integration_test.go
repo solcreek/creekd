@@ -138,7 +138,7 @@ func TestMultiRuntimeConcurrentDispatch(t *testing.T) {
 	}
 
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckInterval = 200 * time.Millisecond
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	sup.HealthCheckFailureThreshold = 3

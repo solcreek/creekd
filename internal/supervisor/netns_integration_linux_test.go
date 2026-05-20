@@ -216,7 +216,7 @@ func TestNetIsolationHealthProbeReachesContainer(t *testing.T) {
 	// Probe path: the test HTTP child serves /health → 200 always
 	// (HEALTH_MODE="" → always-pass). Enable the background probe
 	// loop with a short interval so a failing probe shows up fast.
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckInterval = 50 * time.Millisecond
 	sup.HealthCheckTimeout = 1 * time.Second
 	sup.HealthCheckFailureThreshold = 3
@@ -265,7 +265,7 @@ func TestNetIsolationDeployRoutesViaNetIP(t *testing.T) {
 	requireNetPrivilegeSup(t)
 
 	sup := newNetSupervisor(t)
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckTimeout = 1 * time.Second
 	sup.HealthCheckInterval = 0
 

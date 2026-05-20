@@ -60,7 +60,7 @@ func fetchBody(t *testing.T, router *dispatch.Router, appID, path string) (int, 
 // from the registry after Deploy returns.
 func TestDeployBlueGreenHappyPath(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	// Disable the background probe for this test — Deploy drives its
 	// own health-wait. (The probe being on would still produce a
@@ -139,7 +139,7 @@ func TestDeployBlueGreenHappyPath(t *testing.T) {
 // the router.
 func TestDeployRollbackOnUnhealthyV2(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckTimeout = 300 * time.Millisecond
 	sup.HealthCheckInterval = 0
 
@@ -235,7 +235,7 @@ func TestDeployErrorOnSamePort(t *testing.T) {
 // replacement). Deploy must still spawn v2, swap registry, stop v1.
 func TestDeployWithoutRouter(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0
 

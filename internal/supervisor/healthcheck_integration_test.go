@@ -155,7 +155,7 @@ func waitForHTTPReady(t *testing.T, app *App, port int, timeout time.Duration) {
 // not be restarted by the probe.
 func TestRealHTTPHealthCheckPasses(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckInterval = 80 * time.Millisecond
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	sup.HealthCheckFailureThreshold = 3
@@ -196,7 +196,7 @@ func TestRealHTTPHealthCheckPasses(t *testing.T) {
 // PID must be observable.
 func TestRealHTTPHealthCheckFailsAndRestarts(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckInterval = 80 * time.Millisecond
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	sup.HealthCheckFailureThreshold = 3
@@ -242,7 +242,7 @@ func TestRealHTTPHealthCheckFailsAndRestarts(t *testing.T) {
 // pins down the "consecutive failures only" semantics in the real path.
 func TestRealHTTPHealthCheckFlakyRecovers(t *testing.T) {
 	sup := newTestSupervisor()
-	sup.HealthChecker = &HTTPHealthChecker{}
+	sup.HealthChecker = &HTTPHealthChecker{Path: "/health"}
 	sup.HealthCheckInterval = 80 * time.Millisecond
 	sup.HealthCheckTimeout = 500 * time.Millisecond
 	sup.HealthCheckFailureThreshold = 4 // child fails 2 then recovers

@@ -142,6 +142,14 @@ type Config struct {
 	// Cleanup undoes all of the above when the app is stopped. The
 	// container IP is exposed via App.NetIP for dispatch routing.
 	NetIsolation bool
+
+	// HealthCheckPath overrides the supervisor-wide health probe path
+	// for this one app. Empty falls back to the supervisor default
+	// ("/" — any HTTP server responds to it). Set this to a specific
+	// readiness endpoint (e.g. "/healthz", "/-/ready") when the app
+	// exposes a meaningful health route that should distinguish
+	// "alive" from "ready to serve traffic".
+	HealthCheckPath string
 }
 
 // CloneConfig returns a deep copy of cfg. The shallow struct copy
@@ -184,6 +192,11 @@ type App struct {
 	Command string
 	Args    []string
 	Port    int
+
+	// HealthCheckPath is the per-app override for the HTTP health
+	// probe path. Empty means use the supervisor-wide default. Set
+	// at Spawn time from Config; immutable across this App's life.
+	HealthCheckPath string
 
 	// env holds the extra environment variables from Config.Env.
 	// Used by every restart path (watch goroutine + Reset) so the
@@ -657,7 +670,18 @@ type HealthChecker interface {
 }
 
 // HTTPHealthChecker performs `GET http://127.0.0.1:<port><Path>` and
-// considers the app healthy iff the response status is 2xx.
+// considers the app **alive** iff the connection succeeds and the
+// server returns any non-5xx response within the timeout. 4xx (e.g.
+// 404 when the app doesn't expose Path) does NOT count as a failure —
+// the goal is "is the HTTP server responsive?", not "does this
+// specific endpoint exist?". Apps that want strict readiness checks
+// can configure a specific endpoint via per-app HealthCheckPath +
+// expose it with the response code they want.
+//
+// This is a deliberately lenient default. The earlier strict 2xx-only
+// behaviour false-positive-killed every app that didn't expose
+// `/health`, which is most apps in practice (the convention is split
+// between /health, /healthz, /-/health, none, etc.).
 type HTTPHealthChecker struct {
 	Path   string
 	Client *http.Client
@@ -665,9 +689,15 @@ type HTTPHealthChecker struct {
 
 // Check implements HealthChecker.
 func (h *HTTPHealthChecker) Check(ctx context.Context, app *App) error {
-	path := h.Path
+	// Per-app override wins over the supervisor-wide default; both
+	// empty falls back to "/" (the most permissive endpoint — any
+	// HTTP server that accepts requests will answer it).
+	path := app.HealthCheckPath
 	if path == "" {
-		path = "/health"
+		path = h.Path
+	}
+	if path == "" {
+		path = "/"
 	}
 	client := h.Client
 	if client == nil {
@@ -693,8 +723,8 @@ func (h *HTTPHealthChecker) Check(ctx context.Context, app *App) error {
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("health: unexpected status %d", resp.StatusCode)
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("health: server error %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -783,13 +813,14 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 	}
 
 	app := &App{
-		ID:      cfg.ID,
-		Runtime: rt,
-		Command: cmd,
-		Args:    args,
-		Port:    cfg.Port,
-		env:     append([]string(nil), cfg.Env...),
-		done:    make(chan struct{}),
+		ID:              cfg.ID,
+		Runtime:         rt,
+		Command:         cmd,
+		Args:            args,
+		Port:            cfg.Port,
+		HealthCheckPath: cfg.HealthCheckPath,
+		env:             append([]string(nil), cfg.Env...),
+		done:            make(chan struct{}),
 	}
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller
