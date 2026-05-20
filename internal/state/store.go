@@ -78,29 +78,44 @@ func (s *Store) Apps() []supervisor.Config {
 // it is replaced — admin Spawn rejects duplicates upstream, so this
 // behaviour matters only for the Deploy path which legitimately
 // overwrites.
+//
+// Copy-on-write: builds a candidate map, flushes that to disk, and
+// only on flush success does it swap s.apps. If the flush fails the
+// in-memory cache stays at the pre-call state, matching the on-disk
+// state. Without this, a failed flush would leave in-memory ahead of
+// disk; a subsequent successful flush would then persist what was
+// reported as failed.
 func (s *Store) AddApp(cfg supervisor.Config) error {
 	if cfg.ID == "" {
 		return errors.New("state: empty app id")
 	}
 	s.mu.Lock()
-	s.apps[cfg.ID] = cfg
-	err := s.flushLocked()
-	s.mu.Unlock()
-	return err
+	defer s.mu.Unlock()
+	next := cloneMap(s.apps)
+	next[cfg.ID] = cfg
+	if err := s.flushMap(next); err != nil {
+		return err
+	}
+	s.apps = next
+	return nil
 }
 
 // RemoveApp drops the entry for id. Removing an unknown id is a
-// no-op (the on-disk state is already in sync).
+// no-op (the on-disk state is already in sync). Same copy-on-write
+// rule as AddApp — a flush failure leaves the in-memory cache intact.
 func (s *Store) RemoveApp(id string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.apps[id]; !ok {
-		s.mu.Unlock()
 		return nil
 	}
-	delete(s.apps, id)
-	err := s.flushLocked()
-	s.mu.Unlock()
-	return err
+	next := cloneMap(s.apps)
+	delete(next, id)
+	if err := s.flushMap(next); err != nil {
+		return err
+	}
+	s.apps = next
+	return nil
 }
 
 // load reads the JSON file into the in-memory cache. Missing file
@@ -133,20 +148,21 @@ func (s *Store) load() error {
 	return nil
 }
 
-// flushLocked writes the current in-memory state to disk atomically.
-// Caller must hold s.mu.
-func (s *Store) flushLocked() error {
+// flushMap writes the given map snapshot to disk atomically. Used by
+// AddApp / RemoveApp after they build a candidate "next" map but
+// before they swap it into s.apps. Caller must hold s.mu.
+func (s *Store) flushMap(m map[string]supervisor.Config) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return fmt.Errorf("state: mkdir %s: %w", filepath.Dir(s.path), err)
 	}
 	st := State{Version: FormatVersion}
-	ids := make([]string, 0, len(s.apps))
-	for id := range s.apps {
+	ids := make([]string, 0, len(m))
+	for id := range m {
 		ids = append(ids, id)
 	}
 	sortStrings(ids)
 	for _, id := range ids {
-		st.Apps = append(st.Apps, App{Config: s.apps[id]})
+		st.Apps = append(st.Apps, App{Config: m[id]})
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -162,6 +178,16 @@ func (s *Store) flushLocked() error {
 		return fmt.Errorf("state: rename %s → %s: %w", tmp, s.path, err)
 	}
 	return nil
+}
+
+// cloneMap returns a shallow copy of src. supervisor.Config is a
+// value type, so a shallow copy is a full copy.
+func cloneMap(src map[string]supervisor.Config) map[string]supervisor.Config {
+	dst := make(map[string]supervisor.Config, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 // sortStrings sorts in-place. Inlined to avoid an explicit "sort"

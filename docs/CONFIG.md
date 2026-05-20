@@ -24,7 +24,7 @@ Clients send the token in the `Authorization: Bearer <token>` header.
 
 ### `CREEKD_DISPATCH_ADDR`
 
-Listen address for the public dispatch proxy (data plane). This is where end-user HTTP traffic arrives; the router forwards each request to the right app process based on a hostname / route key.
+Listen address for the public dispatch proxy (data plane). This is where end-user HTTP traffic arrives; the router forwards each request to the right app process based on the `X-Creek-App` header (or `?app=<id>` query parameter as a fallback for clients that can't set headers).
 
 - **Default**: `127.0.0.1:9000`
 - **Format**: `host:port`
