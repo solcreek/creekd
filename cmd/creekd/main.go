@@ -41,6 +41,15 @@
 //	                     bridge interface to attach per-app veth pairs
 //	                     to (e.g. creekbr0). Pairs with CREEKD_NET_SUBNET;
 //	                     both must be set together
+//	CREEKD_VOLUME_ROOT   base directory under which Volume.BackingPath
+//	                     values are resolved. Empty disables the
+//	                     Volume substrate (every RegisterVolume errors).
+//	CREEKD_ALLOWED_TARGET_PREFIXES
+//	                     colon-separated allowlist of absolute host
+//	                     paths under which VolumeMount.Target may
+//	                     land when Sandbox.Chroot is empty. Forbidden
+//	                     system prefixes (/etc, /proc, /sys, /dev, …)
+//	                     are rejected regardless.
 package main
 
 import (
@@ -281,7 +290,32 @@ func configureSupervisorFromEnv(sup *supervisor.Supervisor) error {
 	if v := os.Getenv("CREEKD_NET_BRIDGE_NAME"); v != "" {
 		sup.NetBridgeName = v
 	}
+	// VolumeRoot anchors POST /v1/volumes registrations. Empty
+	// disables the Volume substrate (every RegisterVolume errors).
+	if v := os.Getenv("CREEKD_VOLUME_ROOT"); v != "" {
+		sup.VolumeRoot = v
+	}
+	// AllowedTargetPrefixes restricts host-side Target paths when an
+	// app's Sandbox.Chroot is empty. Format: colon-separated absolute
+	// prefixes (mirroring PATH). Forbidden system prefixes are
+	// rejected at validation time regardless of this list.
+	if v := os.Getenv("CREEKD_ALLOWED_TARGET_PREFIXES"); v != "" {
+		sup.AllowedTargetPrefixes = splitColonList(v)
+	}
 	return nil
+}
+
+// splitColonList parses a PATH-style colon-separated list, dropping
+// empty entries. Used by env-var knobs that accept multiple paths.
+func splitColonList(s string) []string {
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(s, ":") {
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }
 
 // parseSize parses a human-friendly byte count: a bare integer

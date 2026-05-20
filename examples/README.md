@@ -1,6 +1,6 @@
 # Examples
 
-Nine runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
+Ten runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
 
 | Example | What it proves | Compares to | Linux required? |
 |---|---|---|---|
@@ -13,6 +13,7 @@ Nine runnable recipes that each prove one slice of what creekd is for. Every exa
 | [`traffic-density/`](traffic-density/) | Per-app PSS through idle → warm → sustained → burst → cooldown across all 5 stacks | Layered on top of stack-density to measure the **traffic inflation multiplier** capacity-planning math depends on — bun-hello / hono ~1.06×, sveltekit ~1.68×, next.js ~1.33× ([COMPARISON.md](traffic-density/COMPARISON.md)) | yes |
 | [`cgroup-memory-tuning/`](cgroup-memory-tuning/) | What's the right `memory.high` default? False-positive sweep + containment + sibling-impact across three phases | Empirical justification for `CREEKD_DEFAULT_MEMORY_HIGH=256M`: 0 throttle events at idle, 11% overshoot under runaway, +2 ms p50 to neighbors ([RESULTS.md](cgroup-memory-tuning/RESULTS.md)) | yes (cgroup v2 + root) |
 | [`observability/`](observability/) | Prometheus-format `/metrics` endpoint — per-app cgroup state, dispatch byte/request counters, daemon rollup | Wires to any Prom-compatible scraper (Prometheus / OTel Collector / Grafana Alloy / Datadog Agent). Token-guarded, lazy collectors, push counters for dispatch ([README.md](observability/README.md)) | no |
+| [`volume-poc/`](volume-poc/) | RFC extension 1 — Volume + VolumeMount substrate, end-to-end happy path + 12-vector attack matrix asserting every hardening path | Demonstrates the threat-model boundary every pentest finding was designed to hold ([README.md](volume-poc/README.md)) | yes (root + bind mounts) |
 
 ## How to run any one of them
 
