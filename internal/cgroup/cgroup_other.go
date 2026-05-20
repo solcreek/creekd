@@ -16,10 +16,11 @@ var ErrUnsupported = errors.New("cgroup: not supported on this platform")
 // Limits matches the Linux-side shape so callers can construct it
 // portably; the values are simply ignored on non-Linux.
 type Limits struct {
-	MemoryMax int64
-	PidsMax   int64
-	CPUQuota  int64
-	CPUPeriod int64
+	MemoryHigh int64
+	MemoryMax  int64
+	PidsMax    int64
+	CPUQuota   int64
+	CPUPeriod  int64
 }
 
 // Stats mirrors the Linux-side shape. Always returns zero on non-Linux.

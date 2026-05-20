@@ -26,7 +26,16 @@ const DefaultPeriod int64 = 100_000
 // Zero-valued fields are treated as "no limit" (the literal string
 // "max" in cgroup v2).
 type Limits struct {
-	// MemoryMax caps RSS+swap in bytes. 0 means unlimited.
+	// MemoryHigh is a SOFT cap (memory.high). Crossing it triggers
+	// kernel allocation throttling and aggressive page reclaim, but
+	// does NOT OOM-kill the process. Used for noisy-neighbor
+	// protection — a spiking app degrades in isolation rather than
+	// taking down the whole host. 0 means no soft cap.
+	MemoryHigh int64
+	// MemoryMax is a HARD cap (memory.max). Exceeding it invokes the
+	// kernel OOM killer on the cgroup. Use sparingly; prefer
+	// MemoryHigh + a generous MemoryMax (or zero MemoryMax). 0 means
+	// unlimited.
 	MemoryMax int64
 	// PidsMax caps the number of tasks. 0 means unlimited.
 	PidsMax int64
@@ -162,6 +171,9 @@ func (c *Cgroup) Name() string { return c.name }
 // applyLimits writes the configured limits to cgroup files. Zero
 // values become "max".
 func (c *Cgroup) applyLimits(lim Limits) error {
+	if err := writeMaxOrValue(filepath.Join(c.path, "memory.high"), lim.MemoryHigh); err != nil {
+		return err
+	}
 	if err := writeMaxOrValue(filepath.Join(c.path, "memory.max"), lim.MemoryMax); err != nil {
 		return err
 	}

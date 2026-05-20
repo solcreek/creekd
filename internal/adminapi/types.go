@@ -52,11 +52,16 @@ type DeployRequest struct {
 
 // Limits mirrors cgroup.Limits in the JSON wire format. Zero fields
 // mean "no limit" — same semantic as the cgroup package.
+//
+// MemoryHigh is the soft cap (throttle without OOM-kill) — recommended
+// for noisy-neighbor protection. MemoryMax is the hard cap (OOM-kill
+// on overrun); pair with MemoryHigh as defense in depth.
 type Limits struct {
-	MemoryMaxBytes int64 `json:"memory_max_bytes,omitempty"`
-	PidsMax        int64 `json:"pids_max,omitempty"`
-	CPUQuotaUS     int64 `json:"cpu_quota_us,omitempty"`
-	CPUPeriodUS    int64 `json:"cpu_period_us,omitempty"`
+	MemoryHighBytes int64 `json:"memory_high_bytes,omitempty"`
+	MemoryMaxBytes  int64 `json:"memory_max_bytes,omitempty"`
+	PidsMax         int64 `json:"pids_max,omitempty"`
+	CPUQuotaUS      int64 `json:"cpu_quota_us,omitempty"`
+	CPUPeriodUS     int64 `json:"cpu_period_us,omitempty"`
 }
 
 // toCgroupLimits maps the API Limits to the cgroup-internal type, or
@@ -65,14 +70,15 @@ func (l *Limits) toCgroupLimits() *cgroup.Limits {
 	if l == nil {
 		return nil
 	}
-	if l.MemoryMaxBytes == 0 && l.PidsMax == 0 && l.CPUQuotaUS == 0 {
+	if l.MemoryHighBytes == 0 && l.MemoryMaxBytes == 0 && l.PidsMax == 0 && l.CPUQuotaUS == 0 {
 		return nil
 	}
 	return &cgroup.Limits{
-		MemoryMax: l.MemoryMaxBytes,
-		PidsMax:   l.PidsMax,
-		CPUQuota:  l.CPUQuotaUS,
-		CPUPeriod: l.CPUPeriodUS,
+		MemoryHigh: l.MemoryHighBytes,
+		MemoryMax:  l.MemoryMaxBytes,
+		PidsMax:    l.PidsMax,
+		CPUQuota:   l.CPUQuotaUS,
+		CPUPeriod:  l.CPUPeriodUS,
 	}
 }
 

@@ -167,6 +167,41 @@ func TestLimitsFlagsToAPI(t *testing.T) {
 			t.Error("expected error for invalid size")
 		}
 	})
+	t.Run("memory-high alone returns limits", func(t *testing.T) {
+		lf := limitsFlags{memoryHigh: "128M"}
+		got, err := lf.toAPI()
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected non-nil limits when --memory-high set")
+		}
+		if got.MemoryHighBytes != 128*1024*1024 {
+			t.Errorf("MemoryHighBytes = %d, want %d", got.MemoryHighBytes, 128*1024*1024)
+		}
+		if got.MemoryMaxBytes != 0 {
+			t.Errorf("MemoryMaxBytes = %d, want 0 (not set)", got.MemoryMaxBytes)
+		}
+	})
+	t.Run("both high and max coexist", func(t *testing.T) {
+		lf := limitsFlags{memoryHigh: "256M", memoryMax: "1G"}
+		got, err := lf.toAPI()
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if got.MemoryHighBytes != 256*1024*1024 {
+			t.Errorf("MemoryHighBytes = %d, want 256MiB", got.MemoryHighBytes)
+		}
+		if got.MemoryMaxBytes != 1024*1024*1024 {
+			t.Errorf("MemoryMaxBytes = %d, want 1GiB", got.MemoryMaxBytes)
+		}
+	})
+	t.Run("invalid memory-high surfaces error", func(t *testing.T) {
+		lf := limitsFlags{memoryHigh: "bogus"}
+		if _, err := lf.toAPI(); err == nil {
+			t.Error("expected error for invalid --memory-high size")
+		}
+	})
 }
 
 func TestSandboxFlagsToAPI(t *testing.T) {

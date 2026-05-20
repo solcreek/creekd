@@ -81,15 +81,18 @@ func newFlagSet(name string) *flag.FlagSet {
 // time, not flag-parse time (Go's flag package can't easily
 // report parse errors with custom logic).
 type limitsFlags struct {
-	memoryMax string
-	pidsMax   int64
-	cpuQuota  int64
-	cpuPeriod int64
+	memoryHigh string
+	memoryMax  string
+	pidsMax    int64
+	cpuQuota   int64
+	cpuPeriod  int64
 }
 
 func (lf *limitsFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&lf.memoryHigh, "memory-high", "",
+		"soft memory cap (e.g. 256M, 1G). Triggers kernel throttle + reclaim without OOM-kill. Preferred for noisy-neighbor protection. 0/empty = no soft cap")
 	fs.StringVar(&lf.memoryMax, "memory-max", "",
-		"hard memory cap (e.g. 256M, 1G). Includes swap. 0/empty = unlimited")
+		"hard memory cap (e.g. 256M, 1G). Includes swap. Triggers OOM-kill on overrun. 0/empty = unlimited")
 	fs.Int64Var(&lf.pidsMax, "pids-max", 0,
 		"max number of tasks in the cgroup. 0 = unlimited")
 	fs.Int64Var(&lf.cpuQuota, "cpu-quota-us", 0,
@@ -101,18 +104,23 @@ func (lf *limitsFlags) register(fs *flag.FlagSet) {
 // toAPI returns the wire-format Limits, or nil when every field is
 // zero/unset (which the API treats as "no cgroup at all").
 func (lf *limitsFlags) toAPI() (*adminapi.Limits, error) {
-	mem, err := parseSize(lf.memoryMax)
+	memHigh, err := parseSize(lf.memoryHigh)
+	if err != nil {
+		return nil, fmt.Errorf("--memory-high: %w", err)
+	}
+	memMax, err := parseSize(lf.memoryMax)
 	if err != nil {
 		return nil, fmt.Errorf("--memory-max: %w", err)
 	}
-	if mem == 0 && lf.pidsMax == 0 && lf.cpuQuota == 0 {
+	if memHigh == 0 && memMax == 0 && lf.pidsMax == 0 && lf.cpuQuota == 0 {
 		return nil, nil
 	}
 	return &adminapi.Limits{
-		MemoryMaxBytes: mem,
-		PidsMax:        lf.pidsMax,
-		CPUQuotaUS:     lf.cpuQuota,
-		CPUPeriodUS:    lf.cpuPeriod,
+		MemoryHighBytes: memHigh,
+		MemoryMaxBytes:  memMax,
+		PidsMax:         lf.pidsMax,
+		CPUQuotaUS:      lf.cpuQuota,
+		CPUPeriodUS:     lf.cpuPeriod,
 	}, nil
 }
 
