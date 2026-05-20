@@ -5,7 +5,7 @@
 # of the host OS. cgroup tests need /sys/fs/cgroup mounted rw and
 # CAP_SYS_ADMIN, which the docker run flags in the Makefile provide.
 
-FROM golang:1.22-bookworm
+FROM golang:1.26-bookworm
 
 # Coreutils gives us `head` / `tr` which the OOM test relies on; sleep
 # is in coreutils too. Already part of bookworm-base but keep explicit

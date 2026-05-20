@@ -77,7 +77,10 @@ func TestObserveDispatch(t *testing.T) {
 
 	srv := httptest.NewServer(m.Handler())
 	defer srv.Close()
-	resp, _ := http.Get(srv.URL)
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	text := string(body)
