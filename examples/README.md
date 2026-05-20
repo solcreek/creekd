@@ -1,6 +1,6 @@
 # Examples
 
-Eight runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
+Nine runnable recipes that each prove one slice of what creekd is for. Every example builds creekd + creekctl from source, boots the daemon locally, spawns one or more apps via `creekctl up`, and shows the result through curl. All self-contained — no shared state between them.
 
 | Example | What it proves | Compares to | Linux required? |
 |---|---|---|---|
@@ -12,6 +12,7 @@ Eight runnable recipes that each prove one slice of what creekd is for. Every ex
 | [`stack-density/`](stack-density/) | Per-app idle PSS across stacks: Bun (8.8 MB) / Hono (12 MB) / SvelteKit (18 MB) / Astro (23 MB) / Next.js (48 MB) | Across stacks rather than supervisors — picking a lighter framework dwarfs every other density lever ([STACKS.md](stack-density/STACKS.md)) | yes (needs /proc/&lt;pid&gt;/smaps_rollup) |
 | [`traffic-density/`](traffic-density/) | Per-app PSS through idle → warm → sustained → burst → cooldown across all 5 stacks | Layered on top of stack-density to measure the **traffic inflation multiplier** capacity-planning math depends on — bun-hello / hono ~1.06×, sveltekit ~1.68×, next.js ~1.33× ([COMPARISON.md](traffic-density/COMPARISON.md)) | yes |
 | [`cgroup-memory-tuning/`](cgroup-memory-tuning/) | What's the right `memory.high` default? False-positive sweep + containment + sibling-impact across three phases | Empirical justification for `CREEKD_DEFAULT_MEMORY_HIGH=256M`: 0 throttle events at idle, 11% overshoot under runaway, +2 ms p50 to neighbors ([RESULTS.md](cgroup-memory-tuning/RESULTS.md)) | yes (cgroup v2 + root) |
+| [`observability/`](observability/) | Prometheus-format `/metrics` endpoint — per-app cgroup state, dispatch byte/request counters, daemon rollup | Wires to any Prom-compatible scraper (Prometheus / OTel Collector / Grafana Alloy / Datadog Agent). Token-guarded, lazy collectors, push counters for dispatch ([README.md](observability/README.md)) | no |
 
 ## How to run any one of them
 

@@ -1,0 +1,5 @@
+bin/
+state/
+creekd.log
+creekd.pid
+.token
