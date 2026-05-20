@@ -108,7 +108,7 @@ For real apps see [`docs/CONFIG.md`](docs/CONFIG.md) and the runtime profiles in
 
 Control plane and data plane are **separate listeners** so admin tooling can sit behind one auth boundary while end-user traffic goes through another. The dispatch listener is also independently disable-able for admin-only deployments.
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for design rationale.
+See [`docs/DESIGN.md`](docs/DESIGN.md) for design rationale and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the principles that govern what gets added.
 
 ## Configuration
 

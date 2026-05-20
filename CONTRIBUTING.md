@@ -12,6 +12,7 @@ Issues and pull requests are welcome. The fastest path to a merged PR:
 2. Keep PRs small and focused. One logical change per PR.
 3. Make CI green (`go test -race ./...`, plus `make test-linux` if you touch cgroup / sandbox / network paths).
 4. If behavior changes, update the relevant `docs/` file in the same PR.
+5. If your change adds a dependency or a feature that picks behavior on the operator's behalf, read [`ARCHITECTURE.md`](ARCHITECTURE.md) first. Both are gated.
 
 For security issues, see [`SECURITY.md`](SECURITY.md) — please do **not** open public issues for vulnerabilities.
 
