@@ -281,6 +281,110 @@ func TestRemoveAppFlushFailureLeavesMemoryClean(t *testing.T) {
 	}
 }
 
+// AddApp must deep-copy the inbound Config so a later mutation by
+// the caller can't reach back into the persisted snapshot. Without
+// supervisor.CloneConfig, mutating cfg.Env (or Args, or
+// Sandbox.UIDMappings) after AddApp would silently change what gets
+// written on the next flush.
+func TestAddAppDeepCopiesInboundConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	envOriginal := []string{"FOO=bar"}
+	argsOriginal := []string{"server.js"}
+	cfg := supervisor.Config{
+		ID:      "alias-test",
+		Command: "bun",
+		Args:    argsOriginal,
+		Env:     envOriginal,
+		Port:    9000,
+		Sandbox: &sandbox.Spec{
+			UserNamespace: true,
+			UIDMappings:   []sandbox.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+		},
+		CgroupLimits: &cgroup.Limits{MemoryMax: 64 * 1024 * 1024},
+	}
+	if err := s.AddApp(cfg); err != nil {
+		t.Fatalf("AddApp: %v", err)
+	}
+
+	// Mutate every aliasable surface on the caller's copy AFTER the
+	// store should have taken ownership.
+	cfg.Args[0] = "tampered.js"
+	cfg.Env[0] = "FOO=tampered"
+	cfg.Env = append(cfg.Env, "INJECTED=yes")
+	cfg.Sandbox.UIDMappings[0].HostID = 0 // attacker wants real root mapped in
+	cfg.CgroupLimits.MemoryMax = 999
+
+	// Read back via Apps(). The deep copy on insertion should mean
+	// none of the caller's mutations leaked through.
+	got := s.Apps()
+	if len(got) != 1 {
+		t.Fatalf("Apps() = %d entries, want 1", len(got))
+	}
+	stored := got[0]
+	if stored.Args[0] != "server.js" {
+		t.Errorf("Args[0] = %q; mutation leaked through (want server.js)", stored.Args[0])
+	}
+	if len(stored.Env) != 1 || stored.Env[0] != "FOO=bar" {
+		t.Errorf("Env = %v; mutation leaked through (want [FOO=bar])", stored.Env)
+	}
+	if stored.Sandbox.UIDMappings[0].HostID != 100000 {
+		t.Errorf("Sandbox.UIDMappings[0].HostID = %d; mutation leaked through (want 100000)",
+			stored.Sandbox.UIDMappings[0].HostID)
+	}
+	if stored.CgroupLimits.MemoryMax != 64*1024*1024 {
+		t.Errorf("CgroupLimits.MemoryMax = %d; mutation leaked through",
+			stored.CgroupLimits.MemoryMax)
+	}
+
+	// Reload from disk and confirm the on-disk state was never
+	// polluted either (the next flush would have written it if so).
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	persisted := s2.Apps()
+	if persisted[0].Env[0] != "FOO=bar" {
+		t.Errorf("on-disk Env = %v; want [FOO=bar]", persisted[0].Env)
+	}
+}
+
+// Apps() must also deep-copy on the way out so callers can't mutate
+// the persisted snapshot through the returned slice.
+func TestAppsDeepCopiesReturnedConfigs(t *testing.T) {
+	s := newStore(t)
+	cfg := supervisor.Config{
+		ID:      "snapshot-test",
+		Command: "bun",
+		Env:     []string{"FOO=bar"},
+		Port:    9000,
+	}
+	if err := s.AddApp(cfg); err != nil {
+		t.Fatalf("AddApp: %v", err)
+	}
+
+	first := s.Apps()
+	// Caller mutates what we returned.
+	first[0].Env[0] = "FOO=tampered"
+	first[0].Env = append(first[0].Env, "INJECTED=yes")
+
+	// A subsequent Apps() must not show the mutation.
+	second := s.Apps()
+	if second[0].Env[0] != "FOO=bar" {
+		t.Errorf("Env[0] = %q; first-caller mutation leaked back (want FOO=bar)",
+			second[0].Env[0])
+	}
+	if len(second[0].Env) != 1 {
+		t.Errorf("Env length = %d; first-caller append leaked back (want 1)",
+			len(second[0].Env))
+	}
+}
+
 func mkID(worker, iter int) string {
 	out := []byte("w--i--")
 	out[1] = byte('0' + (worker / 10 % 10))

@@ -144,6 +144,34 @@ type Config struct {
 	NetIsolation bool
 }
 
+// CloneConfig returns a deep copy of cfg. The shallow struct copy
+// Go does on assignment would leave the slice/pointer fields
+// (Args, Env, CgroupLimits, Sandbox) aliasing the original — meaning
+// a later caller mutating cfg.Env or cfg.Sandbox.UIDMappings would
+// silently corrupt anything else holding the "same" Config (notably
+// state.Store's persisted snapshot).
+//
+// Callers that take ownership of a Config — Store on insertion, Store
+// on read-back — must clone before keeping a reference. Keep this in
+// sync with the Config struct: when a new slice or pointer field is
+// added above, deep-copy it here too.
+func CloneConfig(cfg Config) Config {
+	out := cfg
+	out.Args = append([]string(nil), cfg.Args...)
+	out.Env = append([]string(nil), cfg.Env...)
+	if cfg.CgroupLimits != nil {
+		limits := *cfg.CgroupLimits
+		out.CgroupLimits = &limits
+	}
+	if cfg.Sandbox != nil {
+		spec := *cfg.Sandbox
+		spec.UIDMappings = append([]sandbox.IDMap(nil), cfg.Sandbox.UIDMappings...)
+		spec.GIDMappings = append([]sandbox.IDMap(nil), cfg.Sandbox.GIDMappings...)
+		out.Sandbox = &spec
+	}
+	return out
+}
+
 // App is one supervised application instance.
 //
 // Exported fields (ID, Runtime, Command, Args, Port) are immutable

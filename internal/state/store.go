@@ -59,6 +59,10 @@ func (s *Store) Path() string { return s.path }
 
 // Apps returns a snapshot of every persisted config in alphabetical
 // order. Useful for replaying through supervisor.Spawn at startup.
+//
+// Each returned Config is a deep copy via supervisor.CloneConfig —
+// caller mutations to Args, Env, CgroupLimits, or Sandbox can't leak
+// back into the Store's persisted snapshot.
 func (s *Store) Apps() []supervisor.Config {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -69,7 +73,7 @@ func (s *Store) Apps() []supervisor.Config {
 	sortStrings(ids)
 	out := make([]supervisor.Config, 0, len(ids))
 	for _, id := range ids {
-		out = append(out, s.apps[id])
+		out = append(out, supervisor.CloneConfig(s.apps[id]))
 	}
 	return out
 }
@@ -92,7 +96,9 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	next := cloneMap(s.apps)
-	next[cfg.ID] = cfg
+	// Deep-clone the inbound config so a later mutation by the caller
+	// (e.g. appending to cfg.Env) cannot reach back into our snapshot.
+	next[cfg.ID] = supervisor.CloneConfig(cfg)
 	if err := s.flushMap(next); err != nil {
 		return err
 	}
@@ -180,8 +186,15 @@ func (s *Store) flushMap(m map[string]supervisor.Config) error {
 	return nil
 }
 
-// cloneMap returns a shallow copy of src. supervisor.Config is a
-// value type, so a shallow copy is a full copy.
+// cloneMap returns a copy of src at the map level only — Config
+// values still share the same Args/Env slices and CgroupLimits/
+// Sandbox pointer targets with src. That's fine for the copy-on-
+// write swap (we throw next away on flush failure), because the
+// inbound Config from AddApp goes through supervisor.CloneConfig
+// before landing in next, and Apps() clones again on the way out.
+// In other words: aliasing inside the Store is permitted because no
+// internal code mutates a stored Config; aliasing across the Store
+// boundary is what supervisor.CloneConfig prevents.
 func cloneMap(src map[string]supervisor.Config) map[string]supervisor.Config {
 	dst := make(map[string]supervisor.Config, len(src)+1)
 	for k, v := range src {
