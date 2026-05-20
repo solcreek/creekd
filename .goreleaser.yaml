@@ -5,7 +5,8 @@
 #   - darwin/amd64, darwin/arm64 binaries (creekctl + creekd; creekd's
 #     Linux-only paths are guarded at runtime, so the binary is useful
 #     for development)
-#   - per-arch tarballs and a SHA256SUMS file
+#   - per-arch tarballs and a checksums.txt file (SHA256; install.sh
+#     downloads it under this exact name to verify the tarball)
 #   - a GitHub Release with auto-generated changelog
 #
 # CGO is off everywhere — Phase 1 has no native dependencies. When the
