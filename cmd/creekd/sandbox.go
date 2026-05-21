@@ -1,3 +1,5 @@
+//go:build creekd_sandbox
+
 package main
 
 import (

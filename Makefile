@@ -9,13 +9,23 @@ GO ?= go
 DOCKER ?= docker
 DOCKER_IMAGE_TAG ?= creekd-test:dev
 
+# build produces the production binary (no sandbox/lima code).
+# Use build-dev for the full binary with sandbox support.
 .PHONY: build
 build:
 	$(GO) build ./...
 
+.PHONY: build-dev
+build-dev:
+	$(GO) build -tags creekd_sandbox ./...
+
 .PHONY: test
 test:
 	$(GO) test -race -count=1 -timeout 120s ./...
+
+.PHONY: test-dev
+test-dev:
+	$(GO) test -tags creekd_sandbox -race -count=1 -timeout 120s ./...
 
 .PHONY: test-cover
 test-cover:

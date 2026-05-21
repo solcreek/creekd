@@ -33,6 +33,13 @@ builds:
       - -X main.version={{.Version}}
     goos: [linux, darwin]
     goarch: [amd64, arm64]
+    overrides:
+      - goos: darwin
+        goarch: amd64
+        tags: [creekd_sandbox]
+      - goos: darwin
+        goarch: arm64
+        tags: [creekd_sandbox]
 
   - id: creekctl
     main: ./cmd/creekctl
