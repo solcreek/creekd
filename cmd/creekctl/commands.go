@@ -42,6 +42,12 @@ var subcommands = map[string]*subcommand{
 	"stats":   {Name: "stats", Description: "show resource counters", Run: runStats},
 }
 
+func init() {
+	subcommands["describe"] = &subcommand{
+		Name: "describe", Description: "introspect command schema (agent-facing)", Run: runDescribe,
+	}
+}
+
 // commonFlags holds the global knobs every subcommand accepts. They
 // are registered on each subcommand's flag set rather than parsed
 // globally so a typo before the subcommand still produces a clear
@@ -50,16 +56,33 @@ type commonFlags struct {
 	server string
 	token  string
 	json   bool
+	dryRun bool
 }
 
-// register attaches --server / --token / --json onto fs and seeds
-// defaults from environment.
+// register attaches --server / --token / --json / --dry-run onto fs
+// and seeds defaults from environment.
 func (cf *commonFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&cf.server, "server", os.Getenv("CREEKCTL_SERVER"),
 		"admin API base URL (or $CREEKCTL_SERVER)")
 	fs.StringVar(&cf.token, "token", os.Getenv("CREEKCTL_TOKEN"),
 		"bearer token (or $CREEKCTL_TOKEN)")
 	fs.BoolVar(&cf.json, "json", false, "JSON output")
+	fs.BoolVar(&cf.dryRun, "dry-run", false, "validate inputs without executing")
+}
+
+// resolveJSON enables JSON output when --json is set, OUTPUT_FORMAT=json
+// is in the environment, or NO_TTY=1 is set (for agent pipelines).
+func (cf *commonFlags) resolveJSON() {
+	if cf.json {
+		return
+	}
+	if v := os.Getenv("OUTPUT_FORMAT"); strings.EqualFold(v, "json") {
+		cf.json = true
+		return
+	}
+	if os.Getenv("NO_TTY") == "1" {
+		cf.json = true
+	}
 }
 
 // client returns a configured adminclient ready to call.
@@ -233,6 +256,7 @@ func runPS(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	apps, err := cf.client().List(ctx)
 	if err != nil {
 		return err
@@ -256,6 +280,7 @@ func runGet(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	app, err := cf.client().Get(ctx, id)
 	if err != nil {
 		return err
@@ -327,6 +352,18 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		}
 		applyManifestTo(&req, manifest, projectDir)
 	}
+	if err := validateStringInputs(
+		"command", req.Command,
+		"entry", req.Entry,
+		"runtime", req.Runtime,
+		"health-path", req.HealthCheckPath,
+	); err != nil {
+		return err
+	}
+	cf.resolveJSON()
+	if cf.dryRun {
+		return writeDryRun(w, "up", id, req, cf.json)
+	}
 	app, err := cf.client().Spawn(ctx, req)
 	if err != nil {
 		return err
@@ -350,6 +387,10 @@ func runRM(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	cf.resolveJSON()
+	if cf.dryRun {
+		return writeDryRun(w, "rm", id, nil, cf.json)
+	}
 	if err := cf.client().Stop(ctx, id); err != nil {
 		return err
 	}
@@ -371,6 +412,7 @@ func runRestart(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	app, err := cf.client().Restart(ctx, id, adminapi.RestartRequest{TimeoutMS: *timeoutMS})
 	if err != nil {
 		return err
@@ -394,6 +436,7 @@ func runReset(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	app, err := cf.client().Reset(ctx, id)
 	if err != nil {
 		return err
@@ -459,6 +502,18 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		}
 		applyManifestToDeploy(&req, manifest, projectDir)
 	}
+	if err := validateStringInputs(
+		"command", req.Command,
+		"entry", req.Entry,
+		"runtime", req.Runtime,
+		"health-path", req.HealthCheckPath,
+	); err != nil {
+		return err
+	}
+	cf.resolveJSON()
+	if cf.dryRun {
+		return writeDryRun(w, "deploy", id, req, cf.json)
+	}
 	app, err := cf.client().Deploy(ctx, id, req)
 	if err != nil {
 		return err
@@ -504,6 +559,7 @@ func runStats(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	s, err := cf.client().Stats(ctx, id)
 	if err != nil {
 		return err
@@ -514,7 +570,111 @@ func runStats(ctx context.Context, w io.Writer, argv []string) error {
 	return writeStatsDetail(w, s)
 }
 
+// --- input validation ---------------------------------------------
+
+// rejectControlChars returns an error if s contains any byte below
+// ASCII 0x20 (space). Agents sometimes hallucinate invisible
+// characters in string values; rejecting them early prevents
+// downstream confusion.
+func rejectControlChars(label, s string) error {
+	for i, b := range []byte(s) {
+		if b < 0x20 {
+			return fmt.Errorf("invalid %s: control character 0x%02x at byte %d", label, b, i)
+		}
+	}
+	return nil
+}
+
+// validateStringInputs checks agent-facing string flags for control
+// characters that would indicate hallucination.
+func validateStringInputs(pairs ...string) error {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if err := rejectControlChars(pairs[i], pairs[i+1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// --- describe ----------------------------------------------------
+
+type flagInfo struct {
+	Name     string `json:"name"`
+	Default  string `json:"default,omitempty"`
+	Usage    string `json:"usage"`
+	Required bool   `json:"required,omitempty"`
+}
+
+type commandInfo struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Flags       []flagInfo `json:"flags"`
+}
+
+func runDescribe(_ context.Context, w io.Writer, argv []string) error {
+	if len(argv) == 0 {
+		all := make([]commandInfo, 0, len(subcommands))
+		for _, cmd := range subcommands {
+			all = append(all, commandInfo{Name: cmd.Name, Description: cmd.Description})
+		}
+		return writeJSON(w, all)
+	}
+	name := argv[0]
+	cmd, ok := subcommands[name]
+	if !ok {
+		return fmt.Errorf("unknown command %q", name)
+	}
+	fs := newFlagSet(name)
+	var cf commonFlags
+	cf.register(fs)
+	if name == "up" || name == "deploy" {
+		var lf limitsFlags
+		lf.register(fs)
+		var sf sandboxFlags
+		sf.register(fs)
+	}
+	var flags []flagInfo
+	fs.VisitAll(func(f *flag.Flag) {
+		flags = append(flags, flagInfo{
+			Name:    f.Name,
+			Default: f.DefValue,
+			Usage:   f.Usage,
+		})
+	})
+	info := commandInfo{
+		Name:        cmd.Name,
+		Description: cmd.Description,
+		Flags:       flags,
+	}
+	return writeJSON(w, info)
+}
+
 // --- output helpers -----------------------------------------------
+
+// writeDryRun prints what a mutating command would do without executing.
+func writeDryRun(w io.Writer, verb, id string, payload any, jsonMode bool) error {
+	type dryRunOutput struct {
+		DryRun  bool   `json:"dry_run"`
+		Command string `json:"command"`
+		ID      string `json:"id"`
+		Payload any    `json:"payload,omitempty"`
+	}
+	out := dryRunOutput{
+		DryRun:  true,
+		Command: verb,
+		ID:      id,
+		Payload: payload,
+	}
+	if jsonMode {
+		return writeJSON(w, out)
+	}
+	fmt.Fprintf(w, "dry-run: would %s %s\n", verb, id)
+	if payload != nil {
+		data, _ := json.MarshalIndent(payload, "  ", "  ")
+		fmt.Fprintf(w, "  payload: %s\n", data)
+	}
+	return nil
+}
 
 // writeJSON encodes v as indented JSON to w.
 func writeJSON(w io.Writer, v any) error {

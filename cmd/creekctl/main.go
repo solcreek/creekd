@@ -79,13 +79,15 @@ Commands:
   deploy <id>        blue-green deploy a new version (flags: --port, ...)
   logs <id>          tail the per-app log (--tail N)
   stats <id>         show cgroup-tracked resource counters
+  describe [cmd]     introspect command schema as JSON (agent-facing)
   version            print version
   help               this message
 
 Global flags (also accepted as env vars):
   --server URL        admin API base (CREEKCTL_SERVER, default 127.0.0.1:9080)
   --token TOKEN       bearer token (CREEKCTL_TOKEN)
-  --json              machine-readable output
+  --json              machine-readable output (auto-enabled when stdout is not a TTY)
+  --dry-run           validate inputs without executing (mutating commands)
 
 Run "creekctl <command> --help" for the flags each subcommand accepts.`)
 	os.Exit(code)
