@@ -68,6 +68,24 @@ Agent loop:
   creek deploy            ← ship to production
 ```
 
+## Event stream (Phase 1, next)
+
+`GET /v1/apps/{id}/events` — SSE endpoint for app state transitions.
+Eliminates polling for agent monitoring workflows.
+
+```
+data: {"type":"status_changed","status":"running","pid":1234,"ts":"..."}
+data: {"type":"health_failure","consecutive":3,"ts":"..."}
+data: {"type":"oom_kill","memory_max_bytes":268435456,"ts":"..."}
+data: {"type":"restart","restart_count":5,"ts":"..."}
+```
+
+Agent workflow becomes event-driven:
+```
+creekctl ensure my-app ...  → spawn/no-op
+creekctl events my-app      → stream status changes (blocks until event)
+```
+
 ## Phase 2 (post-launch)
 
 - Unified build pipeline: Dockerfile-first + Nixpacks fallback (both produce OCI image; creekd runs one artifact type regardless of build path)
