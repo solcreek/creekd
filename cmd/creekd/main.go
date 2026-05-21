@@ -105,7 +105,13 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	logger.Info("creekd starting", "version", version)
+
+	// Subcommand dispatch: "sandbox" routes to the sandbox flow;
+	// everything else (including no args) runs the daemon.
+	sub := ""
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		sub = os.Args[1]
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -119,11 +125,21 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, logger); err != nil {
+	var err error
+	switch sub {
+	case "sandbox":
+		err = runSandbox(ctx, logger, os.Args[2:])
+	default:
+		logger.Info("creekd starting", "version", version)
+		err = run(ctx, logger)
+		if err == nil {
+			logger.Info("creekd stopped cleanly")
+		}
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "creekd: %v\n", err)
 		os.Exit(1)
 	}
-	logger.Info("creekd stopped cleanly")
 }
 
 func run(ctx context.Context, logger *slog.Logger) error {
