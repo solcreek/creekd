@@ -110,6 +110,30 @@ creekctl get my-app --json --fields id,status,pid
 creekctl stats my-app --json --fields id,memory_current_bytes,oom_kills
 ```
 
+## Event stream (status monitoring)
+
+```bash
+creekctl events my-app
+```
+
+SSE stream of app state transitions. Blocks until disconnected.
+Eliminates polling — the agent receives events as they happen:
+
+```json
+{"type":"status_changed","app_id":"my-app","status":"running","pid":1234,"ts":"..."}
+{"type":"health_failure","app_id":"my-app","health_failures":3,"ts":"..."}
+{"type":"status_changed","app_id":"my-app","status":"crashed","ts":"..."}
+{"type":"status_changed","app_id":"my-app","status":"running","pid":1235,"ts":"..."}
+```
+
+Event types: `status_changed`, `health_failure`, `restart`, `oom_kill`.
+
+Agent deploy-and-monitor pattern:
+```bash
+creekctl ensure my-app --runtime bun --port 3000   # spawn
+creekctl events my-app                              # monitor (blocks)
+```
+
 ## Common patterns
 
 ```bash

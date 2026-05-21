@@ -79,6 +79,7 @@ Commands:
   reset <id>         clear crash-loop and resume
   deploy <id>        blue-green deploy a new version (flags: --port, ...)
   logs <id>          tail the per-app log (--tail N)
+  events <id>        stream app state transitions (SSE)
   stats <id>         show cgroup-tracked resource counters
   describe [cmd]     introspect command schema as JSON (agent-facing)
   version            print version

@@ -1,6 +1,7 @@
 package adminclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -246,6 +247,43 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return req, nil
+}
+
+// Events opens an SSE connection to /v1/apps/{id}/events and calls fn
+// for each event. Blocks until the context is cancelled or the server
+// closes the connection. Returns nil on clean context cancellation.
+func (c *Client) Events(ctx context.Context, id string, fn func(line []byte) error) error {
+	req, err := c.newRequest(ctx, "GET", "/v1/apps/"+url.PathEscape(id)+"/events", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("admin api: events: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return parseAPIError(resp.StatusCode, body)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		const prefix = "data: "
+		if len(line) > len(prefix) && string(line[:len(prefix)]) == prefix {
+			if err := fn(line[len(prefix):]); err != nil {
+				return err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("admin api: events stream: %w", err)
+	}
+	return nil
 }
 
 // parseAPIError unmarshals the server's ErrorResponse if possible;

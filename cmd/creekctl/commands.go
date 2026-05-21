@@ -40,6 +40,7 @@ var subcommands = map[string]*subcommand{
 	"reset":   {Name: "reset", Description: "clear crash-loop", Run: runReset},
 	"deploy":  {Name: "deploy", Description: "blue-green deploy", Run: runDeploy},
 	"logs":    {Name: "logs", Description: "tail per-app log", Run: runLogs},
+	"events":  {Name: "events", Description: "stream app state transitions (SSE)", Run: runEvents},
 	"stats":   {Name: "stats", Description: "show resource counters", Run: runStats},
 }
 
@@ -670,6 +671,25 @@ func runLogs(ctx context.Context, w io.Writer, argv []string) error {
 	}
 	_, err = io.Copy(w, strings.NewReader(body))
 	return err
+}
+
+// --- events -------------------------------------------------------
+
+func runEvents(ctx context.Context, w io.Writer, argv []string) error {
+	id, rest, err := requireSplitID(argv)
+	if err != nil {
+		return err
+	}
+	fs := newFlagSet("events")
+	var cf commonFlags
+	cf.register(fs)
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	return cf.client().Events(ctx, id, func(line []byte) error {
+		_, err := fmt.Fprintf(w, "%s\n", line)
+		return err
+	})
 }
 
 // --- stats --------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/pprof"
@@ -105,6 +106,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/apps/{id}/reset", s.guard(s.handleReset))
 	s.mux.HandleFunc("POST /v1/apps/{id}/restart", s.guard(s.handleRestart))
 	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
+	s.mux.HandleFunc("GET /v1/apps/{id}/events", s.guard(s.handleEvents))
 	s.mux.HandleFunc("GET /v1/apps/{id}/stats", s.guard(s.handleStats))
 
 	s.mux.HandleFunc("POST /v1/volumes", s.guard(s.handleVolumeRegister))
@@ -392,6 +394,52 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleEvents handles GET /v1/apps/{id}/events. SSE stream of app
+// state transitions. The connection stays open until the client
+// disconnects or the request context is cancelled.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	app := s.sup.Get(id)
+	if app == nil {
+		writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, CodeInternal, "streaming not supported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	subID, ch := s.sup.Events.Subscribe(64)
+	defer s.sup.Events.Unsubscribe(subID)
+
+	ctx := r.Context()
+	enc := json.NewEncoder(w)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			if evt.AppID != id {
+				continue
+			}
+			fmt.Fprintf(w, "data: ")
+			enc.Encode(evt)
+			flusher.Flush()
+		}
+	}
 }
 
 // handleStats handles GET /v1/apps/{id}/stats. Returns a StatsView

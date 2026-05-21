@@ -280,6 +280,10 @@ type App struct {
 	// and written via sync/atomic.
 	healthFailures int64
 
+	// sup is a back-reference to the owning Supervisor, used by
+	// setStatus to emit events. Set at Spawn time.
+	sup *Supervisor
+
 	// rotator captures stdout/stderr to per-app log files when LogDir
 	// is configured. Nil when LogDir is empty (tests use Stdout/Stderr
 	// writers directly). Owned by the App for its full lifetime;
@@ -378,11 +382,29 @@ func (a *App) setState(cmd *exec.Cmd, status Status, startedAt time.Time) {
 	a.startedAt = startedAt
 }
 
-// setStatus updates just the status under App.mu.
+// setStatus updates just the status under App.mu and emits an event
+// if the supervisor's EventBus is wired up.
 func (a *App) setStatus(status Status) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.status = status
+	a.mu.Unlock()
+	if a.sup != nil {
+		a.sup.emit(Event{
+			Type:         EventStatusChanged,
+			AppID:        a.ID,
+			Status:       status.String(),
+			PID:          a.PID(),
+			RestartCount: a.RestartCount(),
+			Timestamp:    time.Now(),
+		})
+	}
+}
+
+// emit publishes an event to the supervisor's EventBus. Nil-safe.
+func (s *Supervisor) emit(e Event) {
+	if s.Events != nil {
+		s.Events.Publish(e)
+	}
 }
 
 // snapshotCmd returns the current exec.Cmd reference under lock so the
@@ -593,6 +615,11 @@ type Supervisor struct {
 	netPool   *network.IPPool
 	netBridge *network.Bridge
 	netErr    error
+
+	// Events is the pub/sub bus for app state transitions. Subscribers
+	// (e.g. the admin API SSE endpoint) receive events for all apps.
+	// Nil-safe: if unset, no events are emitted.
+	Events *EventBus
 }
 
 // cgroupManager returns the lazily-constructed cgroup manager, or nil
@@ -855,6 +882,7 @@ func New(logger *slog.Logger) *Supervisor {
 		HealthCheckTimeout:          2 * time.Second,
 		HealthCheckFailureThreshold: 3,
 		HealthChecker:               &HTTPHealthChecker{},
+		Events:                      NewEventBus(),
 	}
 }
 
@@ -928,6 +956,7 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		env:             append([]string(nil), cfg.Env...),
 		done:            make(chan struct{}),
 		volumeRefs:      volumeIDs(cfg.VolumeMounts),
+		sup:             s,
 	}
 	// Hardening default for stateful workloads: when VolumeMounts is
 	// non-empty, the tenant runs as root in the host mount namespace
@@ -1394,6 +1423,12 @@ func (s *Supervisor) probe(app *App, done <-chan struct{}) {
 
 		failures++
 		atomic.AddInt64(&app.healthFailures, 1)
+		s.emit(Event{
+			Type:           EventHealthFailure,
+			AppID:          app.ID,
+			HealthFailures: atomic.LoadInt64(&app.healthFailures),
+			Timestamp:      time.Now(),
+		})
 		s.logger.Warn("health check failed",
 			"id", app.ID,
 			"attempt", failures,
