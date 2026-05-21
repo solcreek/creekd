@@ -323,6 +323,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, supervisor.ErrNotFound):
 			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+		case errors.Is(err, supervisor.ErrPortConflict):
+			writeError(w, http.StatusConflict, CodePortConflict, err.Error())
 		case errors.Is(err, supervisor.ErrDeployUnhealthy):
 			writeError(w, http.StatusBadGateway, CodeUnhealthy, err.Error())
 		case errors.Is(err, supervisor.ErrDeployConflict):

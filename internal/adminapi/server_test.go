@@ -344,8 +344,13 @@ func TestDeploySamePortReturnsBadRequest(t *testing.T) {
 
 	req := DeployRequest{Port: port, Command: "sleep", Args: []string{"30"}}
 	status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
-	if status != http.StatusBadRequest {
-		t.Errorf("status = %d body = %s, want 400", status, body)
+	if status != http.StatusConflict {
+		t.Errorf("status = %d body = %s, want 409", status, body)
+	}
+	var er ErrorResponse
+	mustJSON(t, body, &er)
+	if er.Code != CodePortConflict {
+		t.Errorf("code = %q, want %q", er.Code, CodePortConflict)
 	}
 }
 

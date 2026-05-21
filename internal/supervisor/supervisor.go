@@ -1660,6 +1660,7 @@ var (
 	ErrAlreadyRunning  = errors.New("app already running")
 	ErrNotFound        = errors.New("app not found")
 	ErrNotCrashLooping = errors.New("app not in crash-loop state")
+	ErrPortConflict    = errors.New("port conflict")
 	ErrDeployConflict  = errors.New("deploy: concurrent change detected")
 	ErrDeployUnhealthy = errors.New("deploy: v2 never became healthy")
 )
@@ -1727,7 +1728,7 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 		return nil, fmt.Errorf("deploy: app %q not found: %w", cfg.ID, ErrNotFound)
 	}
 	if cfg.Port == v1.Port {
-		return nil, fmt.Errorf("deploy: v2 port %d must differ from v1", cfg.Port)
+		return nil, fmt.Errorf("deploy: v2 port %d must differ from v1: %w", cfg.Port, ErrPortConflict)
 	}
 
 	// Spawn v2 under a temp ID so it has its own registry slot,
