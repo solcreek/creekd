@@ -31,12 +31,12 @@ type port struct {
 func runSandbox(ctx context.Context, logger *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("sandbox", flag.ContinueOnError)
 	var (
-		autoInstall bool
+		nonInteractive bool
 		jsonOutput  bool
 		stop        bool
 		destroy     bool
 	)
-	fs.BoolVar(&autoInstall, "auto-install", false, "install Lima without prompting")
+	fs.BoolVar(&nonInteractive, "non-interactive", false, "suppress interactive prompts (for agent/CI use)")
 	fs.BoolVar(&jsonOutput, "json", false, "machine-readable output")
 	fs.BoolVar(&stop, "stop", false, "stop the sandbox VM")
 	fs.BoolVar(&destroy, "destroy", false, "destroy the sandbox VM")
@@ -86,7 +86,16 @@ func runSandbox(ctx context.Context, logger *slog.Logger, args []string) error {
 	}
 
 	if !lima.Available() {
-		if autoInstall {
+		if jsonOutput {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(map[string]string{
+				"error":   "lima_not_found",
+				"message": "limactl not found in PATH",
+				"hint":    "brew install lima",
+			})
+		}
+		if nonInteractive {
 			return fmt.Errorf("Lima (limactl) not found. Install with: brew install lima")
 		}
 		fmt.Fprintln(os.Stderr, "  Lima not found. Install? (Y/n) ")

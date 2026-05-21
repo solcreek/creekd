@@ -34,10 +34,10 @@ hard-coding flag lists from documentation.
 ## Sandbox (local development)
 
 ```bash
-creekd sandbox ./my-app --auto-install --json
+creekd sandbox ./my-app --non-interactive --json
 ```
 
-- `--auto-install`: provisions Lima VM without interactive prompts.
+- `--non-interactive`: provisions Lima VM without interactive prompts.
 - `--json`: structured status output (VM name, ports, primitives).
 - `--stop` / `--destroy`: VM lifecycle management.
 - Reads `creek.toml` in the app directory for primitive declarations.
