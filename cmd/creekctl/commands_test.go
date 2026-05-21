@@ -788,3 +788,367 @@ func TestDeployFromManifestMissingFileErrors(t *testing.T) {
 		t.Error("admin API was called despite missing manifest — runDeploy should error out before client.Deploy")
 	}
 }
+
+// --- agent-DX feature tests ----------------------------------------
+
+func TestRejectControlChars(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"clean", "hello-world", false},
+		{"empty", "", false},
+		{"null byte", "hello\x00world", true},
+		{"tab", "hello\tworld", true},
+		{"newline", "hello\nworld", true},
+		{"space is ok", "hello world", false},
+		{"unicode ok", "こんにちは", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := rejectControlChars("test", c.input)
+			if c.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestFilterFieldsSingleObject(t *testing.T) {
+	input := map[string]any{"id": "app1", "status": "running", "port": 3000, "pid": 1234}
+	result, err := filterFields(input, "id,status")
+	if err != nil {
+		t.Fatalf("filterFields: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map, got %T", result)
+	}
+	if m["id"] != "app1" {
+		t.Errorf("id = %v, want app1", m["id"])
+	}
+	if m["status"] != "running" {
+		t.Errorf("status = %v, want running", m["status"])
+	}
+	if _, exists := m["port"]; exists {
+		t.Error("port should be filtered out")
+	}
+	if _, exists := m["pid"]; exists {
+		t.Error("pid should be filtered out")
+	}
+}
+
+func TestFilterFieldsArray(t *testing.T) {
+	input := []map[string]any{
+		{"id": "a", "status": "running", "port": 3000},
+		{"id": "b", "status": "stopped", "port": 3001},
+	}
+	result, err := filterFields(input, "id,port")
+	if err != nil {
+		t.Fatalf("filterFields: %v", err)
+	}
+	arr, ok := result.([]map[string]any)
+	if !ok {
+		t.Fatalf("expected []map, got %T", result)
+	}
+	if len(arr) != 2 {
+		t.Fatalf("len = %d, want 2", len(arr))
+	}
+	if arr[0]["id"] != "a" {
+		t.Errorf("[0].id = %v, want a", arr[0]["id"])
+	}
+	if _, exists := arr[0]["status"]; exists {
+		t.Error("[0].status should be filtered out")
+	}
+}
+
+func TestFilterFieldsEmpty(t *testing.T) {
+	input := map[string]any{"id": "x"}
+	result, err := filterFields(input, "")
+	if err != nil {
+		t.Fatalf("filterFields: %v", err)
+	}
+	m := result.(map[string]any)
+	if m["id"] != "x" {
+		t.Error("empty fields should return unfiltered")
+	}
+}
+
+func TestFilterFieldsUnknownField(t *testing.T) {
+	input := map[string]any{"id": "x", "status": "running"}
+	result, err := filterFields(input, "id,nonexistent")
+	if err != nil {
+		t.Fatalf("filterFields: %v", err)
+	}
+	m := result.(map[string]any)
+	if m["id"] != "x" {
+		t.Errorf("id = %v, want x", m["id"])
+	}
+	if _, exists := m["nonexistent"]; exists {
+		t.Error("nonexistent should not appear")
+	}
+}
+
+func TestWriteDryRunJSON(t *testing.T) {
+	var buf bytes.Buffer
+	payload := map[string]any{"runtime": "bun", "port": 3000}
+	err := writeDryRun(&buf, "up", "my-app", payload, true)
+	if err != nil {
+		t.Fatalf("writeDryRun: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, buf.String())
+	}
+	if got["dry_run"] != true {
+		t.Errorf("dry_run = %v, want true", got["dry_run"])
+	}
+	if got["command"] != "up" {
+		t.Errorf("command = %v, want up", got["command"])
+	}
+	if got["id"] != "my-app" {
+		t.Errorf("id = %v, want my-app", got["id"])
+	}
+}
+
+func TestWriteDryRunHuman(t *testing.T) {
+	var buf bytes.Buffer
+	err := writeDryRun(&buf, "rm", "my-app", nil, false)
+	if err != nil {
+		t.Fatalf("writeDryRun: %v", err)
+	}
+	if !strings.Contains(buf.String(), "dry-run") {
+		t.Errorf("human output missing 'dry-run': %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "my-app") {
+		t.Errorf("human output missing app id: %s", buf.String())
+	}
+}
+
+func TestDescribeListsAllCommands(t *testing.T) {
+	out, err := runSub(t, "describe", nil)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	var commands []map[string]any
+	if err := json.Unmarshal([]byte(out), &commands); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	if len(commands) < 10 {
+		t.Errorf("expected at least 10 commands, got %d", len(commands))
+	}
+	names := make(map[string]bool)
+	for _, c := range commands {
+		if n, ok := c["name"].(string); ok {
+			names[n] = true
+		}
+	}
+	for _, want := range []string{"ps", "up", "ensure", "deploy", "describe", "events"} {
+		if !names[want] {
+			t.Errorf("describe output missing command %q", want)
+		}
+	}
+}
+
+func TestDescribeSpecificCommand(t *testing.T) {
+	out, err := runSub(t, "describe", []string{"up"})
+	if err != nil {
+		t.Fatalf("describe up: %v", err)
+	}
+	var info map[string]any
+	if err := json.Unmarshal([]byte(out), &info); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	if info["name"] != "up" {
+		t.Errorf("name = %v, want up", info["name"])
+	}
+	flags, ok := info["flags"].([]any)
+	if !ok || len(flags) == 0 {
+		t.Error("expected non-empty flags array")
+	}
+}
+
+func TestDescribeUnknownCommand(t *testing.T) {
+	_, err := runSub(t, "describe", []string{"nonexistent"})
+	if err == nil {
+		t.Error("expected error for unknown command")
+	}
+}
+
+func TestEnsureCreatesNewApp(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	out, err := runSub(t, "ensure", []string{
+		"ens1", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	})
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("ens1") })
+	if !strings.Contains(out, "ens1") || !strings.Contains(out, "running") {
+		t.Errorf("ensure output missing expected fields:\n%s", out)
+	}
+}
+
+func TestEnsureIdempotent(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+
+	// First call: creates.
+	_, err := runSub(t, "ensure", []string{
+		"ens2", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	})
+	if err != nil {
+		t.Fatalf("ensure (first): %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("ens2") })
+
+	// Second call: should not error (idempotent).
+	out, err := runSub(t, "ensure", []string{
+		"ens2", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	})
+	if err != nil {
+		t.Fatalf("ensure (second): %v", err)
+	}
+	if !strings.Contains(out, "ens2") {
+		t.Errorf("ensure idempotent output missing app id:\n%s", out)
+	}
+}
+
+func TestDryRunDoesNotSpawn(t *testing.T) {
+	url, _ := newTestBackend(t)
+	port := freeTCPPort(t)
+	out, err := runSub(t, "up", []string{
+		"dry1", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+		"--dry-run",
+	})
+	if err != nil {
+		t.Fatalf("up --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry-run") {
+		t.Errorf("dry-run output missing marker:\n%s", out)
+	}
+
+	// Verify app was not actually spawned.
+	psOut, err := runSub(t, "ps", []string{"--server", url})
+	if err != nil {
+		t.Fatalf("ps: %v", err)
+	}
+	if strings.Contains(psOut, "dry1") {
+		t.Error("app was spawned despite --dry-run")
+	}
+}
+
+func TestDryRunJSON(t *testing.T) {
+	url, _ := newTestBackend(t)
+	port := freeTCPPort(t)
+	out, err := runSub(t, "up", []string{
+		"dry2", "--server", url, "--json",
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+		"--dry-run",
+	})
+	if err != nil {
+		t.Fatalf("up --dry-run --json: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	if got["dry_run"] != true {
+		t.Errorf("dry_run = %v, want true", got["dry_run"])
+	}
+}
+
+func TestPSFieldsFilter(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"flt", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("flt") })
+
+	out, err := runSub(t, "ps", []string{"--server", url, "--json", "--fields", "id,status"})
+	if err != nil {
+		t.Fatalf("ps --fields: %v", err)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(out), &arr); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+	if len(arr) == 0 {
+		t.Fatal("expected at least 1 app")
+	}
+	app := arr[0]
+	if _, ok := app["id"]; !ok {
+		t.Error("id field missing despite --fields id,status")
+	}
+	if _, ok := app["port"]; ok {
+		t.Error("port field should be filtered out")
+	}
+}
+
+func TestJsonInputUp(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	payload := fmt.Sprintf(`{"command":"sleep","args":["30"],"port":%d}`, port)
+	out, err := runSub(t, "up", []string{
+		"jin", "--server", url, "--json-input", payload,
+	})
+	if err != nil {
+		t.Fatalf("up --json-input: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("jin") })
+	if !strings.Contains(out, "jin") {
+		t.Errorf("output missing app id:\n%s", out)
+	}
+}
+
+func TestJsonInputInvalid(t *testing.T) {
+	url, _ := newTestBackend(t)
+	_, err := runSub(t, "up", []string{
+		"bad", "--server", url, "--json-input", "not json",
+	})
+	if err == nil {
+		t.Error("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "--json-input") {
+		t.Errorf("error should mention --json-input: %v", err)
+	}
+}
+
+func TestRMDryRun(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"rmd", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("rmd") })
+
+	out, err := runSub(t, "rm", []string{"rmd", "--server", url, "--dry-run"})
+	if err != nil {
+		t.Fatalf("rm --dry-run: %v", err)
+	}
+	if !strings.Contains(out, "dry-run") {
+		t.Errorf("output missing dry-run marker:\n%s", out)
+	}
+
+	// App should still be running.
+	app := sup.Get("rmd")
+	if app == nil {
+		t.Error("app was removed despite --dry-run")
+	}
+}
