@@ -59,22 +59,50 @@ export CREEKCTL_TOKEN="your-token"
 
 Use environment variables. No browser-redirect auth flows.
 
+## Raw JSON input (agent-optimized)
+
+For `up` and `deploy`, pass the full API payload directly instead of
+individual flags. Maps 1:1 to the admin API schema — zero translation:
+
+```bash
+creekctl up my-app --json-input '{
+  "runtime": "bun",
+  "entry": "src/index.ts",
+  "port": 3000,
+  "limits": {"memory_high_bytes": 268435456}
+}'
+```
+
+## Field filtering (context window discipline)
+
+Use `--fields` on read commands to limit response size:
+
+```bash
+creekctl ps --json --fields id,status,port
+creekctl get my-app --json --fields id,status,pid
+creekctl stats my-app --json --fields id,memory_current_bytes,oom_kills
+```
+
 ## Common patterns
 
 ```bash
-# List apps (JSON for parsing)
-creekctl ps --json
+# List apps — minimal fields for context efficiency
+creekctl ps --json --fields id,status,port
 
-# Spawn, validate first
+# Spawn — validate first, then execute
 creekctl up my-app --runtime bun --port 3000 --dry-run
 creekctl up my-app --runtime bun --port 3000
 
-# Blue-green deploy, validate first
+# Spawn with raw JSON payload
+creekctl up my-app --json-input '{"runtime":"bun","entry":"src/index.ts","port":3000}' --dry-run
+creekctl up my-app --json-input '{"runtime":"bun","entry":"src/index.ts","port":3000}'
+
+# Blue-green deploy — validate first
 creekctl deploy my-app --runtime bun --port 3001 --dry-run
 creekctl deploy my-app --runtime bun --port 3001
 
-# Check resource usage
-creekctl stats my-app --json
+# Check resource usage — specific fields only
+creekctl stats my-app --json --fields id,memory_current_bytes,oom_kills
 
 # Introspect before calling
 creekctl describe up

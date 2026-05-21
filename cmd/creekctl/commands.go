@@ -253,6 +253,7 @@ func runPS(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("ps")
 	var cf commonFlags
 	cf.register(fs)
+	fields := fs.String("fields", "", "comma-separated field names to include (JSON mode)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -262,6 +263,13 @@ func runPS(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	if cf.json {
+		if *fields != "" {
+			filtered, err := filterFields(apps, *fields)
+			if err != nil {
+				return err
+			}
+			return writeJSON(w, filtered)
+		}
 		return writeJSON(w, apps)
 	}
 	return writeAppTable(w, apps)
@@ -277,6 +285,7 @@ func runGet(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("get")
 	var cf commonFlags
 	cf.register(fs)
+	fields := fs.String("fields", "", "comma-separated field names to include (JSON mode)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -286,6 +295,13 @@ func runGet(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	if cf.json {
+		if *fields != "" {
+			filtered, err := filterFields(app, *fields)
+			if err != nil {
+				return err
+			}
+			return writeJSON(w, filtered)
+		}
 		return writeJSON(w, app)
 	}
 	return writeAppDetail(w, app)
@@ -319,6 +335,7 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		port       = fs.Int("port", 0, "dispatch port the app listens on")
 		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
 		healthPath = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
+		jsonInput  = fs.String("json-input", "", "raw SpawnRequest JSON (agent-facing; overrides individual flags)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		netIso     = fs.Bool("net-isolation", false, "spawn inside a per-app netns")
@@ -328,29 +345,37 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	limits, err := lf.toAPI()
-	if err != nil {
-		return err
-	}
-	req := adminapi.SpawnRequest{
-		ID:              id,
-		Command:         *command,
-		Entry:           *entry,
-		Runtime:         *runtimeArg,
-		Args:            args,
-		Env:             env,
-		Port:            *port,
-		Limits:          limits,
-		NetIsolation:    *netIso,
-		Sandbox:         sf.toAPI(),
-		HealthCheckPath: *healthPath,
-	}
-	if *fromPath != "" {
-		manifest, projectDir, err := loadManifest(*fromPath)
+	var req adminapi.SpawnRequest
+	if *jsonInput != "" {
+		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
+			return fmt.Errorf("--json-input: %w", err)
+		}
+		req.ID = id
+	} else {
+		limits, err := lf.toAPI()
 		if err != nil {
 			return err
 		}
-		applyManifestTo(&req, manifest, projectDir)
+		req = adminapi.SpawnRequest{
+			ID:              id,
+			Command:         *command,
+			Entry:           *entry,
+			Runtime:         *runtimeArg,
+			Args:            args,
+			Env:             env,
+			Port:            *port,
+			Limits:          limits,
+			NetIsolation:    *netIso,
+			Sandbox:         sf.toAPI(),
+			HealthCheckPath: *healthPath,
+		}
+		if *fromPath != "" {
+			manifest, projectDir, err := loadManifest(*fromPath)
+			if err != nil {
+				return err
+			}
+			applyManifestTo(&req, manifest, projectDir)
+		}
 	}
 	if err := validateStringInputs(
 		"command", req.Command,
@@ -468,6 +493,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		port       = fs.Int("port", 0, "v2 port (must differ from v1's)")
 		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
 		healthPath = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
+		jsonInput  = fs.String("json-input", "", "raw DeployRequest JSON (agent-facing; overrides individual flags)")
 		args       stringSliceFlag
 		env        stringSliceFlag
 		readyMS    = fs.Int64("ready-timeout-ms", 0, "max wait for v2 to be healthy")
@@ -478,29 +504,36 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	limits, err := lf.toAPI()
-	if err != nil {
-		return err
-	}
-	req := adminapi.DeployRequest{
-		Command:         *command,
-		Entry:           *entry,
-		Runtime:         *runtimeArg,
-		Args:            args,
-		Env:             env,
-		Port:            *port,
-		Limits:          limits,
-		ReadyTimeoutMS:  *readyMS,
-		NetIsolation:    *netIso,
-		Sandbox:         sf.toAPI(),
-		HealthCheckPath: *healthPath,
-	}
-	if *fromPath != "" {
-		manifest, projectDir, err := loadManifest(*fromPath)
+	var req adminapi.DeployRequest
+	if *jsonInput != "" {
+		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
+			return fmt.Errorf("--json-input: %w", err)
+		}
+	} else {
+		limits, err := lf.toAPI()
 		if err != nil {
 			return err
 		}
-		applyManifestToDeploy(&req, manifest, projectDir)
+		req = adminapi.DeployRequest{
+			Command:         *command,
+			Entry:           *entry,
+			Runtime:         *runtimeArg,
+			Args:            args,
+			Env:             env,
+			Port:            *port,
+			Limits:          limits,
+			ReadyTimeoutMS:  *readyMS,
+			NetIsolation:    *netIso,
+			Sandbox:         sf.toAPI(),
+			HealthCheckPath: *healthPath,
+		}
+		if *fromPath != "" {
+			manifest, projectDir, err := loadManifest(*fromPath)
+			if err != nil {
+				return err
+			}
+			applyManifestToDeploy(&req, manifest, projectDir)
+		}
 	}
 	if err := validateStringInputs(
 		"command", req.Command,
@@ -556,6 +589,7 @@ func runStats(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("stats")
 	var cf commonFlags
 	cf.register(fs)
+	fields := fs.String("fields", "", "comma-separated field names to include (JSON mode)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -565,6 +599,13 @@ func runStats(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	if cf.json {
+		if *fields != "" {
+			filtered, err := filterFields(s, *fields)
+			if err != nil {
+				return err
+			}
+			return writeJSON(w, filtered)
+		}
 		return writeJSON(w, s)
 	}
 	return writeStatsDetail(w, s)
@@ -647,6 +688,55 @@ func runDescribe(_ context.Context, w io.Writer, argv []string) error {
 		Flags:       flags,
 	}
 	return writeJSON(w, info)
+}
+
+// --- field filtering -----------------------------------------------
+
+// filterFields takes a JSON-serializable value and returns a filtered
+// version containing only the specified fields. Works on both single
+// objects and slices. Used by --fields to protect agent context windows.
+func filterFields(v any, fields string) (any, error) {
+	if fields == "" {
+		return v, nil
+	}
+	wanted := make(map[string]bool)
+	for _, f := range strings.Split(fields, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			wanted[f] = true
+		}
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	// Try as array first
+	var arr []map[string]any
+	if err := json.Unmarshal(data, &arr); err == nil {
+		result := make([]map[string]any, len(arr))
+		for i, obj := range arr {
+			filtered := make(map[string]any)
+			for k, val := range obj {
+				if wanted[k] {
+					filtered[k] = val
+				}
+			}
+			result[i] = filtered
+		}
+		return result, nil
+	}
+	// Try as single object
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return v, nil
+	}
+	filtered := make(map[string]any)
+	for k, val := range obj {
+		if wanted[k] {
+			filtered[k] = val
+		}
+	}
+	return filtered, nil
 }
 
 // --- output helpers -----------------------------------------------
