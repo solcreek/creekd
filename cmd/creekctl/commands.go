@@ -34,6 +34,7 @@ var subcommands = map[string]*subcommand{
 	"ps":      {Name: "ps", Description: "list all apps", Run: runPS},
 	"get":     {Name: "get", Description: "show one app", Run: runGet},
 	"up":      {Name: "up", Description: "spawn a new app", Run: runUp},
+	"ensure":  {Name: "ensure", Description: "idempotent spawn (create if absent, no-op if running)", Run: runEnsure},
 	"rm":      {Name: "rm", Description: "stop an app", Run: runRM},
 	"restart": {Name: "restart", Description: "cycle an app", Run: runRestart},
 	"reset":   {Name: "reset", Description: "clear crash-loop", Run: runReset},
@@ -390,6 +391,98 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		return writeDryRun(w, "up", id, req, cf.json)
 	}
 	app, err := cf.client().Spawn(ctx, req)
+	if err != nil {
+		return err
+	}
+	if cf.json {
+		return writeJSON(w, app)
+	}
+	return writeAppDetail(w, app)
+}
+
+// --- ensure ------------------------------------------------------
+
+// runEnsure is the idempotent spawn verb: creates the app if absent,
+// no-ops if already running. Agents use this to avoid the two-step
+// "ps → branch → up" pattern.
+func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
+	id, rest, err := requireSplitID(argv)
+	if err != nil {
+		return err
+	}
+	fs := newFlagSet("ensure")
+	var cf commonFlags
+	cf.register(fs)
+	var lf limitsFlags
+	lf.register(fs)
+	var sf sandboxFlags
+	sf.register(fs)
+	var (
+		command    = fs.String("command", "", "executable to run (explicit mode)")
+		entry      = fs.String("entry", "", "entry script (with --runtime)")
+		runtimeArg = fs.String("runtime", "", "bun|node|deno (with --entry)")
+		port       = fs.Int("port", 0, "dispatch port the app listens on")
+		fromPath   = fs.String("from", "", "path to manifest.json")
+		healthPath = fs.String("health-path", "", "HTTP liveness probe path")
+		jsonInput  = fs.String("json-input", "", "raw SpawnRequest JSON")
+		args       stringSliceFlag
+		env        stringSliceFlag
+		netIso     = fs.Bool("net-isolation", false, "spawn inside a per-app netns")
+	)
+	fs.Var(&args, "arg", "argument (repeat for multiple)")
+	fs.Var(&env, "env", "environment KEY=VAL (repeat for multiple)")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+	var req adminapi.SpawnRequest
+	if *jsonInput != "" {
+		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
+			return fmt.Errorf("--json-input: %w", err)
+		}
+		req.ID = id
+	} else {
+		limits, err := lf.toAPI()
+		if err != nil {
+			return err
+		}
+		req = adminapi.SpawnRequest{
+			ID:              id,
+			Command:         *command,
+			Entry:           *entry,
+			Runtime:         *runtimeArg,
+			Args:            args,
+			Env:             env,
+			Port:            *port,
+			Limits:          limits,
+			NetIsolation:    *netIso,
+			Sandbox:         sf.toAPI(),
+			HealthCheckPath: *healthPath,
+		}
+		if *fromPath != "" {
+			manifest, projectDir, err := loadManifest(*fromPath)
+			if err != nil {
+				return err
+			}
+			applyManifestTo(&req, manifest, projectDir)
+		}
+	}
+	if err := validateStringInputs(
+		"command", req.Command,
+		"entry", req.Entry,
+		"runtime", req.Runtime,
+		"health-path", req.HealthCheckPath,
+	); err != nil {
+		return err
+	}
+	cf.resolveJSON()
+	if cf.dryRun {
+		return writeDryRun(w, "ensure", id, req, cf.json)
+	}
+	client := cf.client()
+	app, err := client.Spawn(ctx, req)
+	if err != nil && adminclient.IsAlreadyRunning(err) {
+		app, err = client.Get(ctx, id)
+	}
 	if err != nil {
 		return err
 	}

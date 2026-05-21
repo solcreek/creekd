@@ -124,8 +124,8 @@ func TestSpawnDuplicateReturnsAPIError(t *testing.T) {
 	if apiErr.Status != http.StatusConflict {
 		t.Errorf("Status = %d, want 409", apiErr.Status)
 	}
-	if apiErr.Code != adminapi.CodeConflict {
-		t.Errorf("Code = %q, want %q", apiErr.Code, adminapi.CodeConflict)
+	if apiErr.Code != adminapi.CodeAlreadyRunning {
+		t.Errorf("Code = %q, want %q", apiErr.Code, adminapi.CodeAlreadyRunning)
 	}
 }
 

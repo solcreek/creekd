@@ -257,14 +257,19 @@ type ErrorResponse struct {
 	Message string `json:"error"`
 }
 
-// Error codes used in ErrorResponse.Code.
+// Error codes used in ErrorResponse.Code. Agents branch on these
+// values programmatically — keep them stable across versions.
 const (
-	CodeBadRequest   = "bad_request"
-	CodeUnauthorized = "unauthorized"
-	CodeNotFound     = "not_found"
-	CodeConflict     = "conflict"
-	CodeUnhealthy    = "deploy_unhealthy"
-	CodeInternal     = "internal"
+	CodeBadRequest      = "bad_request"
+	CodeUnauthorized    = "unauthorized"
+	CodeNotFound        = "not_found"
+	CodeConflict        = "conflict"
+	CodeAlreadyRunning  = "already_running"
+	CodePortConflict    = "port_conflict"
+	CodeInvalidID       = "invalid_id"
+	CodeInvalidRuntime  = "invalid_runtime"
+	CodeUnhealthy       = "deploy_unhealthy"
+	CodeInternal        = "internal"
 )
 
 // parseRuntime returns the resolved Runtime or empty string if the

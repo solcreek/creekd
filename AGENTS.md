@@ -9,16 +9,43 @@ encode what agents cannot intuit from `--help` alone.
 - Set `OUTPUT_FORMAT=json` or `NO_TTY=1` to auto-enable JSON
   without passing the flag on every call.
 
-## Mutating commands
+## Idempotent provisioning
 
-`up`, `rm`, `deploy` modify state. Always validate first:
+**Prefer `ensure` over `up` for agent workflows.** It creates the
+app if absent and no-ops if already running — no need to check `ps`
+first:
 
 ```bash
-creekctl up my-app --runtime bun --port 3000 --dry-run
+creekctl ensure my-app --runtime bun --port 3000
+```
+
+This eliminates the two-step "ps → branch → up" pattern. Safe to
+call repeatedly in retry loops or re-entrant pipelines.
+
+## Mutating commands
+
+`up`, `ensure`, `rm`, `deploy` modify state. Always validate first:
+
+```bash
+creekctl ensure my-app --runtime bun --port 3000 --dry-run
 ```
 
 `--dry-run` validates all inputs and prints what would happen
 without executing. Use it before every mutating operation.
+
+## Error codes
+
+API errors return structured JSON with a `code` field for
+programmatic branching:
+
+| Code | Meaning |
+|---|---|
+| `already_running` | App exists (use `ensure` to avoid this) |
+| `not_found` | App ID not registered |
+| `invalid_id` | ID fails grammar check |
+| `port_conflict` | Port already in use |
+| `deploy_unhealthy` | v2 failed health check during blue-green |
+| `bad_request` | Generic validation failure |
 
 ## Schema introspection
 
@@ -89,13 +116,14 @@ creekctl stats my-app --json --fields id,memory_current_bytes,oom_kills
 # List apps — minimal fields for context efficiency
 creekctl ps --json --fields id,status,port
 
-# Spawn — validate first, then execute
-creekctl up my-app --runtime bun --port 3000 --dry-run
-creekctl up my-app --runtime bun --port 3000
+# Idempotent spawn (preferred for agents — safe to retry)
+creekctl ensure my-app --runtime bun --port 3000
 
-# Spawn with raw JSON payload
-creekctl up my-app --json-input '{"runtime":"bun","entry":"src/index.ts","port":3000}' --dry-run
-creekctl up my-app --json-input '{"runtime":"bun","entry":"src/index.ts","port":3000}'
+# Idempotent spawn with raw JSON
+creekctl ensure my-app --json-input '{"runtime":"bun","entry":"src/index.ts","port":3000}'
+
+# Non-idempotent spawn (errors if already running)
+creekctl up my-app --runtime bun --port 3000
 
 # Blue-green deploy — validate first
 creekctl deploy my-app --runtime bun --port 3001 --dry-run

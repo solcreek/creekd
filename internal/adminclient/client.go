@@ -84,6 +84,12 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &ae) && ae.Status == http.StatusNotFound
 }
 
+// IsAlreadyRunning reports whether err indicates the app already exists.
+func IsAlreadyRunning(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Code == "already_running"
+}
+
 // List fetches all registered apps.
 func (c *Client) List(ctx context.Context) ([]adminapi.AppView, error) {
 	var resp adminapi.ListResponse

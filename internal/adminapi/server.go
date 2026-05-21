@@ -223,10 +223,10 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 func (s *Server) mapSpawnError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, supervisor.ErrAlreadyRunning):
-		writeError(w, http.StatusConflict, CodeConflict, err.Error())
+		writeError(w, http.StatusConflict, CodeAlreadyRunning, err.Error())
+	case errors.Is(err, supervisor.ErrInvalidID):
+		writeError(w, http.StatusBadRequest, CodeInvalidID, err.Error())
 	default:
-		// Spawn returns descriptive errors for empty fields, bad
-		// runtime, missing binary, etc. — surface them as 400.
 		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
 	}
 }

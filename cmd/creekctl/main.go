@@ -73,6 +73,7 @@ Commands:
   ps                 list all apps on the host
   get <id>           show one app
   up <id>            spawn a new app (flags: --command, --port, ...)
+  ensure <id>        idempotent spawn (create if absent, no-op if running)
   rm <id>            stop and de-register an app
   restart <id>       cycle an app's process in place
   reset <id>         clear crash-loop and resume

@@ -159,8 +159,8 @@ func TestSpawnDuplicateReturns409(t *testing.T) {
 	}
 	var er ErrorResponse
 	mustJSON(t, body, &er)
-	if er.Code != CodeConflict {
-		t.Errorf("code = %q, want %q", er.Code, CodeConflict)
+	if er.Code != CodeAlreadyRunning {
+		t.Errorf("code = %q, want %q", er.Code, CodeAlreadyRunning)
 	}
 }
 
