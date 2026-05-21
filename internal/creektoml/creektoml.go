@@ -37,9 +37,9 @@ type StorageConfig struct {
 
 var (
 	validRuntimes       = []string{"bun", "node", "deno"}
-	validDatabaseDriver = []string{"sqlite", "postgres"}
+	validDatabaseDriver = []string{"sqlite", "postgres", "mysql"}
 	validCacheDriver    = []string{"sqlite", "redis"}
-	validStorageDriver  = []string{"fs"}
+	validStorageDriver  = []string{"fs", "s3"}
 )
 
 func Load(path string) (*Config, error) {
@@ -98,12 +98,18 @@ func (c *Config) RequiredPrimitives() []string {
 	switch c.Database.Driver {
 	case "postgres":
 		prims = append(prims, "postgres")
+	case "mysql":
+		prims = append(prims, "mysql")
 	case "sqlite":
 		prims = append(prims, "sqlite")
 	}
 
 	if c.Cache.Driver == "redis" {
 		prims = append(prims, "redis")
+	}
+
+	if c.Storage.Driver == "s3" {
+		prims = append(prims, "s3")
 	}
 
 	return prims

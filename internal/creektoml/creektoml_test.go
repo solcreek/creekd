@@ -128,10 +128,28 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid database driver",
+			name: "valid mysql driver",
 			cfg: Config{
 				App:      AppConfig{Runtime: "bun"},
 				Database: DatabaseConfig{Driver: "mysql"},
+				Cache:    CacheConfig{Driver: "sqlite"},
+				Storage:  StorageConfig{Driver: "fs"},
+			},
+		},
+		{
+			name: "valid s3 storage",
+			cfg: Config{
+				App:      AppConfig{Runtime: "bun"},
+				Database: DatabaseConfig{Driver: "sqlite"},
+				Cache:    CacheConfig{Driver: "sqlite"},
+				Storage:  StorageConfig{Driver: "s3"},
+			},
+		},
+		{
+			name: "invalid database driver",
+			cfg: Config{
+				App:      AppConfig{Runtime: "bun"},
+				Database: DatabaseConfig{Driver: "mongodb"},
 				Cache:    CacheConfig{Driver: "sqlite"},
 				Storage:  StorageConfig{Driver: "fs"},
 			},
@@ -193,6 +211,16 @@ func TestRequiredPrimitives(t *testing.T) {
 				Cache:    CacheConfig{Driver: "sqlite"},
 			},
 			want: []string{"runtime-deno", "postgres"},
+		},
+		{
+			name: "mysql with redis and s3",
+			cfg: Config{
+				App:      AppConfig{Runtime: "bun"},
+				Database: DatabaseConfig{Driver: "mysql"},
+				Cache:    CacheConfig{Driver: "redis"},
+				Storage:  StorageConfig{Driver: "s3"},
+			},
+			want: []string{"runtime-bun", "mysql", "redis", "s3"},
 		},
 	}
 	for _, c := range cases {
