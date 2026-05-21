@@ -11,23 +11,23 @@ import (
 	"github.com/solcreek/creekd/internal/adminapi"
 )
 
-// CreekdManifest mirrors the JSON shape that @solcreek/adapter-creekd
-// writes to .creek-creekd/manifest.json after `next build`. We only
-// decode the fields the CLI actually consumes; future fields the
-// adapter may add are ignored so an older creekctl keeps working
-// against a newer manifest.
+// CreekdManifest is the process-level manifest shape that creekctl can
+// translate into SpawnRequest / DeployRequest. It is intentionally
+// framework-neutral: Next.js, Astro, Hono, or a hand-written Bun server
+// should all describe the same few process fields here.
 //
-// Schema reference:
-//
-//	https://github.com/solcreek/adapter-creekd/blob/main/src/manifest.ts
+// Future adapter-specific metadata is ignored so an older creekctl keeps
+// working against a newer manifest.
 type CreekdManifest struct {
-	Version    int    `json:"version"`
-	Framework  string `json:"framework"`
-	Target     string `json:"target"`
-	BuildID    string `json:"buildId"`
-	Runtime    string `json:"runtime"`
-	Entrypoint string `json:"entrypoint"`
-	Port       int    `json:"port"`
+	Version         int      `json:"version"`
+	Framework       string   `json:"framework,omitempty"`
+	Target          string   `json:"target"`
+	BuildID         string   `json:"buildId,omitempty"`
+	Runtime         string   `json:"runtime"`
+	Entrypoint      string   `json:"entrypoint"`
+	Port            int      `json:"port"`
+	Env             []string `json:"env,omitempty"`
+	HealthCheckPath string   `json:"health_check_path,omitempty"`
 }
 
 // loadManifest reads and validates a CreekdManifest from path. Returns
@@ -56,15 +56,11 @@ func loadManifest(path string) (*CreekdManifest, string, error) {
 		return nil, "", fmt.Errorf("--from: %s: target=%q is not 'creekd' — this manifest was written for a different deployment target",
 			absPath, m.Target)
 	}
-	if m.Framework != "nextjs" {
-		return nil, "", fmt.Errorf("--from: %s: framework=%q is not 'nextjs' — creekctl currently only understands Next.js manifests",
-			absPath, m.Framework)
-	}
 	switch m.Runtime {
-	case "bun", "node":
+	case "bun", "node", "deno":
 		// ok
 	default:
-		return nil, "", fmt.Errorf("--from: %s: runtime=%q is not 'bun' or 'node'", absPath, m.Runtime)
+		return nil, "", fmt.Errorf("--from: %s: runtime=%q is not 'bun', 'node', or 'deno'", absPath, m.Runtime)
 	}
 	if m.Entrypoint == "" {
 		return nil, "", errors.New("--from: missing entrypoint")
@@ -116,8 +112,8 @@ func validateEntrypoint(ep string) error {
 //
 // The supervisor itself injects PORT=<app.Port> into the child env
 // at spawn time (see internal/supervisor/supervisor.go: startLocked),
-// so the Next.js standalone server.js — which reads process.env.PORT
-// — binds to the right port automatically. We don't add it here.
+// so runtime entrypoints that read process.env.PORT bind to the right
+// port automatically. We don't add it here.
 //
 // projectDir is the manifest's project root, used to resolve the
 // relative `entrypoint` into an absolute path.
@@ -130,6 +126,12 @@ func applyManifestTo(req *adminapi.SpawnRequest, m *CreekdManifest, projectDir s
 	}
 	if req.Port == 0 {
 		req.Port = m.Port
+	}
+	if len(req.Env) == 0 && len(m.Env) > 0 {
+		req.Env = append([]string(nil), m.Env...)
+	}
+	if req.HealthCheckPath == "" {
+		req.HealthCheckPath = m.HealthCheckPath
 	}
 }
 
@@ -150,5 +152,11 @@ func applyManifestToDeploy(req *adminapi.DeployRequest, m *CreekdManifest, proje
 	}
 	if req.Port == 0 {
 		req.Port = m.Port
+	}
+	if len(req.Env) == 0 && len(m.Env) > 0 {
+		req.Env = append([]string(nil), m.Env...)
+	}
+	if req.HealthCheckPath == "" {
+		req.HealthCheckPath = m.HealthCheckPath
 	}
 }

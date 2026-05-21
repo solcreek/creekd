@@ -85,8 +85,25 @@ func TestLoadManifestRejectsBadRuntime(t *testing.T) {
 	body := strings.Replace(goodManifest, `"runtime": "bun"`, `"runtime": "python"`, 1)
 	mp, _ := writeManifest(t, body)
 	_, _, err := loadManifest(mp)
-	if err == nil || !strings.Contains(err.Error(), "not 'bun' or 'node'") {
+	if err == nil || !strings.Contains(err.Error(), "not 'bun', 'node', or 'deno'") {
 		t.Errorf("want bad-runtime error, got %v", err)
+	}
+}
+
+func TestLoadManifestAllowsNonNextFrameworkMetadata(t *testing.T) {
+	body := strings.Replace(goodManifest, `"framework": "nextjs"`, `"framework": "astro"`, 1)
+	body = strings.Replace(body, `"runtime": "bun"`, `"runtime": "deno"`, 1)
+	body = strings.Replace(body, `"entrypoint": ".next/standalone/server.js"`, `"entrypoint": "server.ts"`, 1)
+	mp, _ := writeManifest(t, body)
+	m, _, err := loadManifest(mp)
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	if m.Framework != "astro" {
+		t.Errorf("Framework = %q, want astro", m.Framework)
+	}
+	if m.Runtime != "deno" {
+		t.Errorf("Runtime = %q, want deno", m.Runtime)
 	}
 }
 
@@ -153,12 +170,14 @@ func TestLoadManifestRejectsTraversalEntrypoint(t *testing.T) {
 func TestApplyManifestSeedsEmptyRequest(t *testing.T) {
 	_, projectDir := writeManifest(t, goodManifest)
 	m := &CreekdManifest{
-		Version:    1,
-		Framework:  "nextjs",
-		Target:     "creekd",
-		Runtime:    "bun",
-		Entrypoint: ".next/standalone/server.js",
-		Port:       18900,
+		Version:         1,
+		Framework:       "nextjs",
+		Target:          "creekd",
+		Runtime:         "bun",
+		Entrypoint:      ".next/standalone/server.js",
+		Port:            18900,
+		Env:             []string{"NODE_ENV=production"},
+		HealthCheckPath: "/healthz",
 	}
 	req := adminapi.SpawnRequest{ID: "myapp"}
 	applyManifestTo(&req, m, projectDir)
@@ -173,24 +192,34 @@ func TestApplyManifestSeedsEmptyRequest(t *testing.T) {
 	if req.Port != 18900 {
 		t.Errorf("Port = %d, want 18900", req.Port)
 	}
+	if got := strings.Join(req.Env, ","); got != "NODE_ENV=production" {
+		t.Errorf("Env = %q, want NODE_ENV=production", got)
+	}
+	if req.HealthCheckPath != "/healthz" {
+		t.Errorf("HealthCheckPath = %q, want /healthz", req.HealthCheckPath)
+	}
 }
 
 func TestApplyManifestRespectsCLIOverrides(t *testing.T) {
 	_, projectDir := writeManifest(t, goodManifest)
 	m := &CreekdManifest{
-		Version:    1,
-		Framework:  "nextjs",
-		Target:     "creekd",
-		Runtime:    "bun",
-		Entrypoint: ".next/standalone/server.js",
-		Port:       18900,
+		Version:         1,
+		Framework:       "nextjs",
+		Target:          "creekd",
+		Runtime:         "bun",
+		Entrypoint:      ".next/standalone/server.js",
+		Port:            18900,
+		Env:             []string{"NODE_ENV=production"},
+		HealthCheckPath: "/healthz",
 	}
 	// User passed --port 9999 --runtime node --entry /tmp/other.js.
 	req := adminapi.SpawnRequest{
-		ID:      "myapp",
-		Runtime: "node",
-		Entry:   "/tmp/other.js",
-		Port:    9999,
+		ID:              "myapp",
+		Runtime:         "node",
+		Entry:           "/tmp/other.js",
+		Port:            9999,
+		Env:             []string{"CLI=1"},
+		HealthCheckPath: "/ready",
 	}
 	applyManifestTo(&req, m, projectDir)
 
@@ -202,6 +231,12 @@ func TestApplyManifestRespectsCLIOverrides(t *testing.T) {
 	}
 	if req.Port != 9999 {
 		t.Errorf("Port = %d, want 9999 (CLI override)", req.Port)
+	}
+	if got := strings.Join(req.Env, ","); got != "CLI=1" {
+		t.Errorf("Env = %q, want CLI=1 (CLI override)", got)
+	}
+	if req.HealthCheckPath != "/ready" {
+		t.Errorf("HealthCheckPath = %q, want /ready (CLI override)", req.HealthCheckPath)
 	}
 }
 
