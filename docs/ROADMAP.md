@@ -46,10 +46,32 @@ Once M5 lands, creekd hands off to M6 (self-host packaging), M7 (web dashboard p
 - **M8**: Hosted infrastructure (EU + US regions, multiple creekd hosts)
 - **M9**: Public beta launch with full self-serve
 
+## Sandbox mode (Phase 1)
+
+`creekd sandbox ./app` runs the same daemon locally for development.
+Not a simulator — same process supervisor, same bindings API, same
+health probes. Production-irrelevant features (cgroups, TLS, DNS)
+are skipped; file-watch auto-restart is added.
+
+Primitives auto-provision as local equivalents:
+- `database` → SQLite (`~/.creekd/sandbox/<app>/db.sqlite`)
+- `cache` → SQLite KV
+- `storage` → local filesystem
+
+Designed for AI agent workflows: one command, zero config files,
+no interactive prompts, structured JSON output via `--json` flag.
+
+```
+Agent loop:
+  creekd sandbox ./app    ← full environment, one command
+  edit → auto-restart → verify on localhost
+  creek deploy            ← ship to production
+```
+
 ## Phase 2 (post-launch)
 
-- Nixpacks-based build pipeline
-- BYO Dockerfile (general-PaaS expansion)
+- Unified build pipeline: Dockerfile-first + Nixpacks fallback (both produce OCI image; creekd runs one artifact type regardless of build path)
+- Sandbox: production-faithful primitive provisioning (real Postgres, Redis)
 - `reusePort` cluster mode for Team+ tier
 - Managed Postgres
 - Asia-Pacific region
