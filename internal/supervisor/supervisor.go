@@ -415,6 +415,11 @@ func (a *App) snapshotCmd() *exec.Cmd {
 	return a.cmd
 }
 
+// Env returns a defensive copy of the app's environment variables.
+func (a *App) Env() []string {
+	return append([]string(nil), a.env...)
+}
+
 // RestartCount returns the number of restarts observed within the
 // supervisor's RestartWindow.
 func (a *App) RestartCount() int {

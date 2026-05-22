@@ -738,8 +738,9 @@ func runExec(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 
-	// Build env: inherit current env + inject app-specific vars
+	// Build env: inherit current env + inject app env vars (DATABASE_URL, etc)
 	env := os.Environ()
+	env = append(env, app.Env...)
 	env = append(env, fmt.Sprintf("PORT=%d", app.Port))
 
 	// Execute the command

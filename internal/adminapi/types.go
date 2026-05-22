@@ -192,6 +192,7 @@ type AppView struct {
 	Runtime        string   `json:"runtime,omitempty"`
 	Command        string   `json:"command"`
 	Args           []string `json:"args,omitempty"`
+	Env            []string `json:"env,omitempty"`
 	Port           int      `json:"port"`
 	Status         string   `json:"status"`
 	PID            int      `json:"pid"`
@@ -214,6 +215,7 @@ func viewOf(app *supervisor.App) AppView {
 		Runtime:        string(app.Runtime),
 		Command:        app.Command,
 		Args:           append([]string(nil), app.Args...),
+		Env:            app.Env(),
 		Port:           app.Port,
 		Status:         app.Status().String(),
 		PID:            app.PID(),
