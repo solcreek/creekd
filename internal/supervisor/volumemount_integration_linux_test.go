@@ -24,6 +24,10 @@ func requireBindMountPrivilege(t *testing.T) {
 	if err := unix.Mount("/tmp", probe, "", unix.MS_BIND, ""); err != nil {
 		t.Skipf("bind-mount unavailable in this environment: %v", err)
 	}
+	if err := unix.Mount("", probe, "", unix.MS_PRIVATE, ""); err != nil {
+		_ = unix.Unmount(probe, 0)
+		t.Skipf("MS_PRIVATE unavailable in this environment (mount namespace restriction): %v", err)
+	}
 	_ = unix.Unmount(probe, 0)
 }
 
