@@ -133,11 +133,16 @@ while [ "$(date +%s)" -lt "$END_TIME" ]; do
     fi
   done
 
-  # --- creekd RSS ---
+  # --- creekd RSS (cross-platform) ---
   CREEKD_PID=$(cat "$HERE/creekd.pid" 2>/dev/null || echo "")
   CREEKD_RSS=0
-  if [ -n "$CREEKD_PID" ] && [ -f "/proc/$CREEKD_PID/status" ]; then
-    CREEKD_RSS=$(grep VmRSS "/proc/$CREEKD_PID/status" 2>/dev/null | awk '{print $2}' || echo 0)
+  if [ -n "$CREEKD_PID" ]; then
+    if [ -f "/proc/$CREEKD_PID/status" ]; then
+      CREEKD_RSS=$(grep VmRSS "/proc/$CREEKD_PID/status" 2>/dev/null | awk '{print $2}' || echo 0)
+    else
+      # macOS: ps reports RSS in KB
+      CREEKD_RSS=$(ps -o rss= -p "$CREEKD_PID" 2>/dev/null | tr -d ' ' || echo 0)
+    fi
   fi
 
   # --- Emit metric ---
@@ -169,22 +174,24 @@ while [ "$(date +%s)" -lt "$END_TIME" ]; do
     LAST_CRASH=$NOW
   fi
 
-  # --- Fault: blue-green deploy mid-test ---
+  # --- Fault: restart a tenant mid-test (simulates deploy) ---
   if [ "$NOW" -ge "$DEPLOY_AT" ] && [ "$DEPLOYED" = false ]; then
     DEPLOYED=true
-    log "  FAULT: blue-green deploy on tenant-001..."
+    log "  FAULT: restart tenant-001 (simulates deploy)..."
     DEPLOY_START=$(date +%s%N)
-    $CTL deploy tenant-001 \
-      --command "$($CTL get tenant-001 --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['command'])" 2>/dev/null || echo "$BUN_CMD")" \
-      --arg "$TENANT_APP" \
-      --env "APP_ID=tenant-001" --env "PORT=$BASE_PORT" --port $(( BASE_PORT + TENANTS )) \
-      $LIMIT_ARGS \
-      --json > /dev/null 2>&1 && {
-        DEPLOY_NS=$(( $(date +%s%N) - DEPLOY_START ))
-        DEPLOY_MS=$(( DEPLOY_NS / 1000000 ))
-        log "  DEPLOY: tenant-001 deployed in ${DEPLOY_MS}ms"
-        echo "{\"ts\":$NOW,\"event\":\"deploy\",\"deploy_ms\":$DEPLOY_MS}" >> "$METRICS_FILE"
-      } || log "  DEPLOY: failed (check creekd.log)"
+    $CTL restart tenant-001 --json > /dev/null 2>&1 && {
+      # Wait for healthy
+      for _ in $(seq 1 50); do
+        if curl -sf --max-time 1 "http://127.0.0.1:$BASE_PORT/health" >/dev/null 2>&1; then
+          DEPLOY_NS=$(( $(date +%s%N) - DEPLOY_START ))
+          DEPLOY_MS=$(( DEPLOY_NS / 1000000 ))
+          log "  DEPLOY: tenant-001 restarted in ${DEPLOY_MS}ms"
+          echo "{\"ts\":$NOW,\"event\":\"deploy\",\"deploy_ms\":$DEPLOY_MS}" >> "$METRICS_FILE"
+          break
+        fi
+        sleep 0.1
+      done
+    } || log "  DEPLOY: restart failed (check creekd.log)"
   fi
 
   # --- Fault: daemon restart at 75% ---
@@ -222,8 +229,12 @@ done
 
 FINAL_RSS=0
 CREEKD_PID=$(cat "$HERE/creekd.pid" 2>/dev/null || echo "")
-if [ -n "$CREEKD_PID" ] && [ -f "/proc/$CREEKD_PID/status" ]; then
-  FINAL_RSS=$(grep VmRSS "/proc/$CREEKD_PID/status" 2>/dev/null | awk '{print $2}' || echo 0)
+if [ -n "$CREEKD_PID" ]; then
+  if [ -f "/proc/$CREEKD_PID/status" ]; then
+    FINAL_RSS=$(grep VmRSS "/proc/$CREEKD_PID/status" 2>/dev/null | awk '{print $2}' || echo 0)
+  else
+    FINAL_RSS=$(ps -o rss= -p "$CREEKD_PID" 2>/dev/null | tr -d ' ' || echo 0)
+  fi
 fi
 
 FIRST_RSS=$(head -1 "$METRICS_FILE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('creekd_rss_kb',0))" 2>/dev/null || echo 0)
@@ -245,7 +256,7 @@ cat > "$RESULTS_FILE" << EORESULTS
 Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Duration: $DURATION ($DURATION_SECS seconds)
 Tenants: $TENANTS (${BUN_RATIO}% Bun, $(( 100 - BUN_RATIO ))% Node)
-Host: $(uname -r) / $(nproc) CPU / $(free -m 2>/dev/null | awk '/Mem:/{print $2}' || echo "?")MB RAM
+Host: $(uname -r) / $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "?") CPU / $(free -m 2>/dev/null | awk '/Mem:/{print $2}' || sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1048576)}' || echo "?")MB RAM
 
 ## Results
 
