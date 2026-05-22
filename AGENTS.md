@@ -121,6 +121,18 @@ stream emits a `ready` event with the URL:
 
 Agents should wait for this event instead of sleeping + polling.
 
+## One-off command execution
+
+```bash
+creekctl exec -- rails console
+creekctl exec -- bun run seed.ts
+creekctl exec --app my-app -- psql "$DATABASE_URL"
+```
+
+Runs a command with the app's env vars injected. Equivalent to
+`heroku run` or `railway run`. Inherits DATABASE_URL, REDIS_URL,
+PORT from the running app.
+
 ## Database reset
 
 ```bash

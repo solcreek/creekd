@@ -52,6 +52,9 @@ func init() {
 	subcommands["db-reset"] = &subcommand{
 		Name: "db-reset", Description: "drop and recreate app database (sandbox)", Run: runDBReset,
 	}
+	subcommands["exec"] = &subcommand{
+		Name: "exec", Description: "run a one-off command with app env vars", Run: runExec,
+	}
 }
 
 // commonFlags holds the global knobs every subcommand accepts. They
@@ -694,6 +697,58 @@ func runEvents(ctx context.Context, w io.Writer, argv []string) error {
 		_, err := fmt.Fprintf(w, "%s\n", line)
 		return err
 	})
+}
+
+// --- exec ---------------------------------------------------------
+
+// runExec runs a one-off command with the app's env vars injected.
+// Equivalent to `heroku run` or `railway run`. The command inherits
+// DATABASE_URL, REDIS_URL, etc. from the running sandbox.
+func runExec(ctx context.Context, w io.Writer, argv []string) error {
+	fs := newFlagSet("exec")
+	var cf commonFlags
+	cf.register(fs)
+	appID := fs.String("app", "", "app ID to inherit env vars from (uses first app if empty)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	args := fs.Args()
+	if len(args) == 0 {
+		return fmt.Errorf("exec: missing command (e.g., creekctl exec -- rails console)")
+	}
+
+	// Get the app's env vars from the running supervisor
+	client := cf.client()
+	var app *adminapi.AppView
+	var err error
+
+	if *appID != "" {
+		app, err = client.Get(ctx, *appID)
+	} else {
+		apps, listErr := client.List(ctx)
+		if listErr != nil {
+			return listErr
+		}
+		if len(apps) == 0 {
+			return fmt.Errorf("exec: no apps running")
+		}
+		app = &apps[0]
+	}
+	if err != nil {
+		return err
+	}
+
+	// Build env: inherit current env + inject app-specific vars
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("PORT=%d", app.Port))
+
+	// Execute the command
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Env = env
+	cmd.Stdout = w
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
 }
 
 // --- db-reset -----------------------------------------------------
