@@ -4,7 +4,7 @@ import "testing"
 
 func TestScriptsEmbedded(t *testing.T) {
 	expected := []string{
-		"postgres", "redis", "sqlite",
+		"postgres", "mysql", "redis", "sqlite", "s3", "smtp",
 		"runtime-bun", "runtime-node", "runtime-deno",
 	}
 	for _, name := range expected {
@@ -21,7 +21,7 @@ func TestScriptsEmbedded(t *testing.T) {
 
 func TestAvailablePrimitives(t *testing.T) {
 	prims := AvailablePrimitives()
-	if len(prims) != 6 {
-		t.Errorf("AvailablePrimitives() = %d, want 6", len(prims))
+	if len(prims) != 9 {
+		t.Errorf("AvailablePrimitives() = %d, want 9", len(prims))
 	}
 }

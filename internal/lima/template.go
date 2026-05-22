@@ -32,7 +32,10 @@ func DefaultConfig() VMConfig {
 
 var primitivePorts = map[string]PortForward{
 	"postgres": {Guest: 5432, Host: 15432},
+	"mysql":    {Guest: 3306, Host: 13306},
 	"redis":    {Guest: 6379, Host: 16379},
+	"s3":       {Guest: 8333, Host: 18333},
+	"smtp":     {Guest: 1025, Host: 11025},
 }
 
 func (c *VMConfig) AddPrimitive(name string) {

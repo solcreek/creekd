@@ -222,6 +222,17 @@ func TestRequiredPrimitives(t *testing.T) {
 			},
 			want: []string{"runtime-bun", "mysql", "redis", "s3"},
 		},
+		{
+			name: "full stack with email",
+			cfg: Config{
+				App:      AppConfig{Runtime: "node"},
+				Database: DatabaseConfig{Driver: "postgres"},
+				Cache:    CacheConfig{Driver: "redis"},
+				Storage:  StorageConfig{Driver: "s3"},
+				Email:    EmailConfig{Enabled: true},
+			},
+			want: []string{"runtime-node", "postgres", "redis", "s3", "smtp"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -8,11 +8,20 @@ import (
 //go:embed scripts/postgres.sh
 var scriptPostgres string
 
+//go:embed scripts/mysql.sh
+var scriptMySQL string
+
 //go:embed scripts/redis.sh
 var scriptRedis string
 
 //go:embed scripts/sqlite.sh
 var scriptSQLite string
+
+//go:embed scripts/s3.sh
+var scriptS3 string
+
+//go:embed scripts/smtp.sh
+var scriptSMTP string
 
 //go:embed scripts/runtime-bun.sh
 var scriptBun string
@@ -25,8 +34,11 @@ var scriptDeno string
 
 var scripts = map[string]string{
 	"postgres":     scriptPostgres,
+	"mysql":        scriptMySQL,
 	"redis":        scriptRedis,
 	"sqlite":       scriptSQLite,
+	"s3":           scriptS3,
+	"smtp":         scriptSMTP,
 	"runtime-bun":  scriptBun,
 	"runtime-node": scriptNode,
 	"runtime-deno": scriptDeno,

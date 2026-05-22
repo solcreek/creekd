@@ -16,6 +16,7 @@ type Config struct {
 	Database DatabaseConfig `toml:"database"`
 	Cache    CacheConfig    `toml:"cache"`
 	Storage  StorageConfig  `toml:"storage"`
+	Email    EmailConfig    `toml:"email"`
 }
 
 type AppConfig struct {
@@ -33,6 +34,10 @@ type CacheConfig struct {
 
 type StorageConfig struct {
 	Driver string `toml:"driver"`
+}
+
+type EmailConfig struct {
+	Enabled bool `toml:"enabled"`
 }
 
 var (
@@ -110,6 +115,10 @@ func (c *Config) RequiredPrimitives() []string {
 
 	if c.Storage.Driver == "s3" {
 		prims = append(prims, "s3")
+	}
+
+	if c.Email.Enabled {
+		prims = append(prims, "smtp")
 	}
 
 	return prims
