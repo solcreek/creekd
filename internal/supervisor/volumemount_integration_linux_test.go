@@ -20,15 +20,23 @@ func requireBindMountPrivilege(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("bind-mount integration test requires root (CAP_SYS_ADMIN)")
 	}
+	// Probe the exact code path RegisterVolume uses: create a subdir,
+	// self-bind it, then MS_PRIVATE. This catches Docker/CI environments
+	// where MS_PRIVATE works on real mount points but fails on self-bind
+	// subdirectories due to mount namespace restrictions.
 	probe := t.TempDir()
-	if err := unix.Mount("/tmp", probe, "", unix.MS_BIND, ""); err != nil {
+	subdir := filepath.Join(probe, "vol")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("probe mkdir: %v", err)
+	}
+	if err := unix.Mount(subdir, subdir, "", unix.MS_BIND, ""); err != nil {
 		t.Skipf("bind-mount unavailable in this environment: %v", err)
 	}
-	if err := unix.Mount("", probe, "", unix.MS_PRIVATE, ""); err != nil {
-		_ = unix.Unmount(probe, 0)
-		t.Skipf("MS_PRIVATE unavailable in this environment (mount namespace restriction): %v", err)
+	if err := unix.Mount("", subdir, "", unix.MS_PRIVATE, ""); err != nil {
+		_ = unix.Unmount(subdir, 0)
+		t.Skipf("MS_PRIVATE on self-bind unavailable (Docker mount namespace restriction): %v", err)
 	}
-	_ = unix.Unmount(probe, 0)
+	_ = unix.Unmount(subdir, 0)
 }
 
 // makeVolumeRoot creates a fresh VolumeRoot dir + returns its path
