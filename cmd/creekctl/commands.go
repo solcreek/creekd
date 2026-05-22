@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -47,6 +48,9 @@ var subcommands = map[string]*subcommand{
 func init() {
 	subcommands["describe"] = &subcommand{
 		Name: "describe", Description: "introspect command schema (agent-facing)", Run: runDescribe,
+	}
+	subcommands["db-reset"] = &subcommand{
+		Name: "db-reset", Description: "drop and recreate app database (sandbox)", Run: runDBReset,
 	}
 }
 
@@ -690,6 +694,78 @@ func runEvents(ctx context.Context, w io.Writer, argv []string) error {
 		_, err := fmt.Fprintf(w, "%s\n", line)
 		return err
 	})
+}
+
+// --- db-reset -----------------------------------------------------
+
+func runDBReset(ctx context.Context, w io.Writer, argv []string) error {
+	fs := newFlagSet("db-reset")
+	var cf commonFlags
+	cf.register(fs)
+	dbURL := fs.String("database-url", os.Getenv("DATABASE_URL"), "database connection string (or $DATABASE_URL)")
+	dbName := fs.String("db-name", "", "database name to reset (derived from URL if empty)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	if *dbURL == "" {
+		return fmt.Errorf("db-reset: DATABASE_URL not set and --database-url not provided")
+	}
+
+	cf.resolveJSON()
+
+	name := *dbName
+	if name == "" {
+		// Extract db name from postgresql://.../<dbname>
+		parts := strings.Split(*dbURL, "/")
+		if len(parts) > 0 {
+			name = strings.Split(parts[len(parts)-1], "?")[0]
+		}
+	}
+	if name == "" {
+		return fmt.Errorf("db-reset: cannot determine database name from URL")
+	}
+
+	// Build a connection URL pointing to the default 'postgres' DB for admin ops
+	adminURL := strings.Replace(*dbURL, "/"+name, "/postgres", 1)
+
+	if cf.dryRun {
+		return writeDryRun(w, "db-reset", name, map[string]string{
+			"database": name,
+			"action":   "DROP DATABASE IF EXISTS + CREATE DATABASE",
+		}, cf.json)
+	}
+
+	// Use pg driver via the admin API's exec endpoint, or shell out to psql
+	// For Phase 1: shell out to psql which is available in the sandbox
+	type resetResult struct {
+		Database string `json:"database"`
+		Status   string `json:"status"`
+		Action   string `json:"action"`
+	}
+
+	// Try psql first (available in sandbox VM)
+	dropCmd := fmt.Sprintf("psql '%s' -c 'DROP DATABASE IF EXISTS \"%s\"'", adminURL, name)
+	createCmd := fmt.Sprintf("psql '%s' -c 'CREATE DATABASE \"%s\"'", adminURL, name)
+
+	for _, cmd := range []string{dropCmd, createCmd} {
+		out, err := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("db-reset: %s: %w\n%s", cmd, err, out)
+		}
+	}
+
+	result := resetResult{
+		Database: name,
+		Status:   "ok",
+		Action:   "dropped and recreated",
+	}
+
+	if cf.json {
+		return writeJSON(w, result)
+	}
+	fmt.Fprintf(w, "✓ Database %q reset (dropped + recreated)\n", name)
+	return nil
 }
 
 // --- stats --------------------------------------------------------

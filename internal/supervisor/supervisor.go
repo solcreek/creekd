@@ -1392,6 +1392,7 @@ func (s *Supervisor) probe(app *App, done <-chan struct{}) {
 	defer ticker.Stop()
 
 	var failures int
+	ready := false
 	for {
 		select {
 		case <-done:
@@ -1411,6 +1412,19 @@ func (s *Supervisor) probe(app *App, done <-chan struct{}) {
 		cancel()
 
 		if err == nil {
+			if !ready {
+				ready = true
+				s.emit(Event{
+					Type:      EventReady,
+					AppID:     app.ID,
+					Status:    "ready",
+					PID:       app.PID(),
+					Port:      app.Port,
+					URL:       fmt.Sprintf("http://127.0.0.1:%d", app.Port),
+					Timestamp: time.Now(),
+				})
+				s.logger.Info("app ready", "id", app.ID, "port", app.Port)
+			}
 			if failures > 0 {
 				s.logger.Info("app recovered", "id", app.ID, "previous_failures", failures)
 				if app.Status() == StatusUnhealthy {

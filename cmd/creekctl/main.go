@@ -81,6 +81,7 @@ Commands:
   logs <id>          tail the per-app log (--tail N)
   events <id>        stream app state transitions (SSE)
   stats <id>         show cgroup-tracked resource counters
+  db-reset           drop and recreate app database (sandbox)
   describe [cmd]     introspect command schema as JSON (agent-facing)
   version            print version
   help               this message

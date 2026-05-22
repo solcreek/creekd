@@ -10,6 +10,7 @@ type EventType string
 
 const (
 	EventStatusChanged  EventType = "status_changed"
+	EventReady          EventType = "ready"
 	EventHealthFailure  EventType = "health_failure"
 	EventRestart        EventType = "restart"
 	EventOOMKill        EventType = "oom_kill"
@@ -21,6 +22,8 @@ type Event struct {
 	AppID          string    `json:"app_id"`
 	Status         string    `json:"status,omitempty"`
 	PID            int       `json:"pid,omitempty"`
+	Port           int       `json:"port,omitempty"`
+	URL            string    `json:"url,omitempty"`
 	RestartCount   int       `json:"restart_count,omitempty"`
 	HealthFailures int64     `json:"health_failures,omitempty"`
 	Timestamp      time.Time `json:"ts"`

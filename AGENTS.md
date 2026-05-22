@@ -110,6 +110,26 @@ creekctl get my-app --json --fields id,status,pid
 creekctl stats my-app --json --fields id,memory_current_bytes,oom_kills
 ```
 
+## Health-check ready event
+
+When an app passes its first health probe after spawn, the event
+stream emits a `ready` event with the URL:
+
+```json
+{"type":"ready","app_id":"my-app","status":"ready","pid":1234,"port":3000,"url":"http://127.0.0.1:3000","ts":"..."}
+```
+
+Agents should wait for this event instead of sleeping + polling.
+
+## Database reset
+
+```bash
+creekctl db-reset --database-url "$DATABASE_URL"
+```
+
+Drops and recreates the database. Use between test runs for clean
+state. Supports `--dry-run` and `--json`.
+
 ## Event stream (status monitoring)
 
 ```bash
