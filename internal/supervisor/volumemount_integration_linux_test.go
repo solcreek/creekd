@@ -4,6 +4,7 @@ package supervisor
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,23 +21,29 @@ func requireBindMountPrivilege(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("bind-mount integration test requires root (CAP_SYS_ADMIN)")
 	}
-	// Probe the exact code path RegisterVolume uses: create a subdir,
-	// self-bind it, then MS_PRIVATE. This catches Docker/CI environments
-	// where MS_PRIVATE works on real mount points but fails on self-bind
-	// subdirectories due to mount namespace restrictions.
+	// Probe the exact code path RegisterVolume uses: open a dir fd,
+	// self-bind via /proc/self/fd/N, then MS_PRIVATE on the fd path.
+	// Docker/CI containers often pass direct-path MS_PRIVATE but fail
+	// on the /proc/self/fd path due to mount namespace restrictions.
 	probe := t.TempDir()
 	subdir := filepath.Join(probe, "vol")
 	if err := os.MkdirAll(subdir, 0o755); err != nil {
 		t.Fatalf("probe mkdir: %v", err)
 	}
-	if err := unix.Mount(subdir, subdir, "", unix.MS_BIND, ""); err != nil {
-		t.Skipf("bind-mount unavailable in this environment: %v", err)
+	fd, err := unix.Open(subdir, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Skipf("O_PATH open unavailable: %v", err)
 	}
-	if err := unix.Mount("", subdir, "", unix.MS_PRIVATE, ""); err != nil {
-		_ = unix.Unmount(subdir, 0)
-		t.Skipf("MS_PRIVATE on self-bind unavailable (Docker mount namespace restriction): %v", err)
+	defer unix.Close(fd)
+	fdPath := fmt.Sprintf("/proc/self/fd/%d", fd)
+	if err := unix.Mount(fdPath, fdPath, "", unix.MS_BIND, ""); err != nil {
+		t.Skipf("bind-mount via fd path unavailable: %v", err)
 	}
-	_ = unix.Unmount(subdir, 0)
+	if err := unix.Mount("", fdPath, "", unix.MS_PRIVATE, ""); err != nil {
+		_ = unix.Unmount(fdPath, 0)
+		t.Skipf("MS_PRIVATE via fd path unavailable (Docker mount namespace restriction): %v", err)
+	}
+	_ = unix.Unmount(fdPath, 0)
 }
 
 // makeVolumeRoot creates a fresh VolumeRoot dir + returns its path
