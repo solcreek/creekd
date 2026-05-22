@@ -1,0 +1,30 @@
+# Caddy reverse proxy for creekd.
+#
+# Terminates TLS (auto Let's Encrypt), extracts the app subdomain,
+# and forwards to creekd's dispatch router with X-Creek-App header.
+#
+# Usage:
+#   1. Replace YOUR_DOMAIN with your actual domain
+#   2. Point *.YOUR_DOMAIN DNS → your server IP
+#   3. sudo cp init/Caddyfile /etc/caddy/Caddyfile
+#   4. sudo systemctl restart caddy
+#
+# Caddy handles:
+#   - Let's Encrypt certificate provisioning + renewal
+#   - HTTP → HTTPS redirect
+#   - HTTP/2 + HTTP/3
+
+# Single app (simplest)
+# my-app.example.com {
+#     reverse_proxy 127.0.0.1:9000 {
+#         header_up X-Creek-App my-app
+#     }
+# }
+
+# Multi-app wildcard (production)
+# Requires DNS-01 validation or wildcard DNS
+*.{$CREEK_DOMAIN:localhost} {
+    reverse_proxy 127.0.0.1:9000 {
+        header_up X-Creek-App {labels.3}
+    }
+}

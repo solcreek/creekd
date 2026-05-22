@@ -1,0 +1,33 @@
+[Unit]
+Description=creekd — multi-tenant process supervisor
+Documentation=https://github.com/solcreek/creekd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/creekd
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+# State + logs
+Environment=CREEKD_STATE_DIR=/var/lib/creekd/state
+Environment=CREEKD_LOG_DIR=/var/lib/creekd/logs
+
+# Admin API (loopback only by default)
+Environment=CREEKD_ADMIN_ADDR=127.0.0.1:9080
+
+# Dispatch proxy (public-facing, Caddy terminates TLS in front)
+Environment=CREEKD_DISPATCH_ADDR=127.0.0.1:9000
+
+# cgroup v2 isolation (requires root)
+Environment=CREEKD_CGROUP_PARENT=creekd.slice
+Environment=CREEKD_DEFAULT_MEMORY_HIGH=256M
+Environment=CREEKD_DEFAULT_MEMORY_MAX=1G
+
+# Override via /etc/creekd/env if needed
+EnvironmentFile=-/etc/creekd/env
+
+[Install]
+WantedBy=multi-user.target
