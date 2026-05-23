@@ -185,3 +185,57 @@ func TestLoadRejectsMalformedJSON(t *testing.T) {
 		t.Errorf("want 'parse' in error, got %v", err)
 	}
 }
+
+// TestLoadRejectsUnknownTopLevelField confirms strict decoding —
+// typos in canonical field names (entryPont vs entrypoint) fail at
+// load time with a descriptive error rather than silently producing
+// a manifest with Entrypoint="" that explodes later.
+func TestLoadRejectsUnknownTopLevelField(t *testing.T) {
+	body := strings.Replace(goodManifest,
+		`"entrypoint": ".next/standalone/server.js"`,
+		`"entryPont": ".next/standalone/server.js"`, 1)
+	mp, _ := writeManifest(t, body)
+	_, _, err := Load(mp)
+	if err == nil {
+		t.Fatal("want error for unknown field 'entryPont', got nil")
+	}
+	if !strings.Contains(err.Error(), "entryPont") {
+		t.Errorf("error %q should mention the misspelled field 'entryPont'", err)
+	}
+}
+
+// TestLoadParsesExtensionFields confirms the surface fields beyond
+// the minimum (adapter, hasPrerender, serveDirs, etc.) are actually
+// captured into the struct — previously these were silently dropped
+// under lenient parsing, which is now visible.
+func TestLoadParsesExtensionFields(t *testing.T) {
+	mp, _ := writeManifest(t, goodManifest)
+	m, _, err := Load(mp)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if m.Adapter == nil {
+		t.Fatal("Adapter is nil, want parsed metadata")
+	}
+	if m.Adapter.Name != "@solcreek/adapter-creekd" {
+		t.Errorf("Adapter.Name = %q", m.Adapter.Name)
+	}
+	if m.Adapter.Version != "0.1.0" {
+		t.Errorf("Adapter.Version = %q", m.Adapter.Version)
+	}
+	if !m.HasPrerender {
+		t.Error("HasPrerender = false, want true")
+	}
+	if m.HasMiddleware {
+		t.Error("HasMiddleware = true, want false")
+	}
+	if len(m.ServeDirs) != 1 || m.ServeDirs[0] != ".next/standalone" {
+		t.Errorf("ServeDirs = %v", m.ServeDirs)
+	}
+	if m.NextVersion != "16.2.3" {
+		t.Errorf("NextVersion = %q", m.NextVersion)
+	}
+	if m.BuildID != "test-build" {
+		t.Errorf("BuildID = %q", m.BuildID)
+	}
+}
