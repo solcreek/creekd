@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
@@ -164,7 +165,7 @@ func TestLimitsFlagsToAPI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
-		if got == nil || got.MemoryMaxBytes != 256*1024*1024 {
+		if got == nil || got.MemoryMaxBytes == nil || *got.MemoryMaxBytes != 256*1024*1024 {
 			t.Errorf("got %+v, want MemoryMaxBytes=256MiB", got)
 		}
 	})
@@ -183,11 +184,11 @@ func TestLimitsFlagsToAPI(t *testing.T) {
 		if got == nil {
 			t.Fatal("expected non-nil limits when --memory-high set")
 		}
-		if got.MemoryHighBytes != 128*1024*1024 {
-			t.Errorf("MemoryHighBytes = %d, want %d", got.MemoryHighBytes, 128*1024*1024)
+		if got.MemoryHighBytes == nil || *got.MemoryHighBytes != 128*1024*1024 {
+			t.Errorf("MemoryHighBytes = %v, want %d", got.MemoryHighBytes, 128*1024*1024)
 		}
-		if got.MemoryMaxBytes != 0 {
-			t.Errorf("MemoryMaxBytes = %d, want 0 (not set)", got.MemoryMaxBytes)
+		if got.MemoryMaxBytes == nil || *got.MemoryMaxBytes != 0 {
+			t.Errorf("MemoryMaxBytes = %v, want 0 (not set)", got.MemoryMaxBytes)
 		}
 	})
 	t.Run("both high and max coexist", func(t *testing.T) {
@@ -196,11 +197,11 @@ func TestLimitsFlagsToAPI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
 		}
-		if got.MemoryHighBytes != 256*1024*1024 {
-			t.Errorf("MemoryHighBytes = %d, want 256MiB", got.MemoryHighBytes)
+		if got.MemoryHighBytes == nil || *got.MemoryHighBytes != 256*1024*1024 {
+			t.Errorf("MemoryHighBytes = %v, want 256MiB", got.MemoryHighBytes)
 		}
-		if got.MemoryMaxBytes != 1024*1024*1024 {
-			t.Errorf("MemoryMaxBytes = %d, want 1GiB", got.MemoryMaxBytes)
+		if got.MemoryMaxBytes == nil || *got.MemoryMaxBytes != 1024*1024*1024 {
+			t.Errorf("MemoryMaxBytes = %v, want 1GiB", got.MemoryMaxBytes)
 		}
 	})
 	t.Run("invalid memory-high surfaces error", func(t *testing.T) {
@@ -221,14 +222,14 @@ func TestSandboxFlagsToAPI(t *testing.T) {
 	t.Run("pid only", func(t *testing.T) {
 		sf := sandboxFlags{pid: true}
 		got := sf.toAPI()
-		if got == nil || !got.PIDNamespace {
-			t.Errorf("pid=true should produce PIDNamespace=true, got %+v", got)
+		if got == nil || got.PidNamespace == nil || !*got.PidNamespace {
+			t.Errorf("pid=true should produce PidNamespace=true, got %+v", got)
 		}
 	})
 	t.Run("chroot only", func(t *testing.T) {
 		sf := sandboxFlags{chroot: "/tmp/jail"}
 		got := sf.toAPI()
-		if got == nil || got.Chroot != "/tmp/jail" {
+		if got == nil || got.Chroot == nil || *got.Chroot != "/tmp/jail" {
 			t.Errorf("chroot should propagate, got %+v", got)
 		}
 	})
@@ -241,12 +242,12 @@ func TestSandboxFlagsToAPI(t *testing.T) {
 		if got == nil {
 			t.Fatal("got nil")
 		}
-		if !(got.PIDNamespace && got.UTSNamespace && got.IPCNamespace &&
-			got.MountNamespace && got.UserNamespace && got.NoNewPrivs) {
+		if !(derefBool(got.PidNamespace) && derefBool(got.UtsNamespace) && derefBool(got.IpcNamespace) &&
+			derefBool(got.MountNamespace) && derefBool(got.UserNamespace) && derefBool(got.NoNewPrivs)) {
 			t.Errorf("missing boolean: %+v", got)
 		}
-		if got.Chroot != "/jail" {
-			t.Errorf("chroot = %q, want /jail", got.Chroot)
+		if got.Chroot == nil || *got.Chroot != "/jail" {
+			t.Errorf("chroot = %v, want /jail", got.Chroot)
 		}
 	})
 }
@@ -671,7 +672,7 @@ func TestUpFromManifestMissingFileErrors(t *testing.T) {
 type deployCapture struct {
 	mu      sync.Mutex
 	Called  bool
-	Request adminapi.DeployRequest
+	Request apitypes.DeployRequest
 }
 
 // newDeployCaptureServer returns an httptest server that records
@@ -692,9 +693,9 @@ func newDeployCaptureServer(t *testing.T) (string, *deployCapture) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(adminapi.AppView{
-				ID:     "deploy-from-test",
-				Status: "running",
+			_ = json.NewEncoder(w).Encode(apitypes.AppView{
+				Id:     "deploy-from-test",
+				Status: apitypes.Running,
 				Port:   cap.Request.Port,
 			})
 			return
@@ -735,11 +736,11 @@ func TestDeployFromManifestSeedsPort(t *testing.T) {
 		t.Errorf("DeployRequest.Port = %d, want %d (from manifest)",
 			cap.Request.Port, manifestPort)
 	}
-	if cap.Request.Runtime != "bun" {
-		t.Errorf("DeployRequest.Runtime = %q, want bun (from manifest)", cap.Request.Runtime)
+	if cap.Request.Runtime == nil || string(*cap.Request.Runtime) != "bun" {
+		t.Errorf("DeployRequest.Runtime = %v, want bun (from manifest)", cap.Request.Runtime)
 	}
-	if !strings.HasSuffix(cap.Request.Entry, "server.js") {
-		t.Errorf("DeployRequest.Entry = %q, want suffix server.js", cap.Request.Entry)
+	if cap.Request.Entry == nil || !strings.HasSuffix(*cap.Request.Entry, "server.js") {
+		t.Errorf("DeployRequest.Entry = %v, want suffix server.js", cap.Request.Entry)
 	}
 }
 
@@ -1252,4 +1253,12 @@ func TestRunReleaseTimeout(t *testing.T) {
 	if result.ExitCode != -1 {
 		t.Errorf("ExitCode = %d, want -1 (timeout)", result.ExitCode)
 	}
+}
+
+// derefBool returns the bool behind p, or false if p is nil.
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
 }
