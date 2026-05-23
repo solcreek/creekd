@@ -44,6 +44,24 @@ jobs:
       - name: make test-linux (DISTRO=${{ matrix.distro }})
         run: make test-linux DISTRO=${{ matrix.distro }}
 
+  spec-freshness:
+    name: spec freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: install oapi-codegen
+        run: go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
+      - name: make generate
+        run: make generate
+      - name: check for drift
+        run: git diff --exit-code internal/apitypes/
+        # Fails if generated code differs from committed code.
+        # Fix: run `make generate` locally and commit the result.
+
   bench:
     name: bench (smoke)
     runs-on: ubuntu-latest
