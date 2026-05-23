@@ -130,15 +130,27 @@ type Config struct {
 	// Composes with CgroupLimits in a single clone3: cgroup attach,
 	// CLONE_NEW* flags, and Chroot are applied to the same child.
 	//
-	// Special case: when VolumeMounts is non-empty AND Sandbox is
-	// either nil OR present with all fields at the zero value, the
-	// supervisor automatically defaults MountNamespace, PIDNamespace,
-	// and NoNewPrivs to true at Spawn time. Pentest review identified
-	// "tenant runs as root in host mount NS by default" as the #1
-	// issue — defaults flip from opt-in to opt-out for stateful
-	// workloads. Callers who want host-NS visibility for a stateful
-	// app must explicitly set at least one Sandbox field to take
-	// ownership of the policy.
+	// Auto-defaulting (applyDefaultSandbox in this file) fires when
+	// Sandbox is nil OR all its fields are at the zero value. The
+	// policy depends on the environment:
+	//
+	//   - Linux + CAP_SYS_ADMIN (production root, privileged
+	//     containers): PIDNamespace + NoNewPrivs flip on for every
+	//     spawn; MountNamespace is added when VolumeMounts is
+	//     non-empty.
+	//   - Linux without CAP_SYS_ADMIN + VolumeMounts non-empty:
+	//     legacy stateful default — Mount + PID + NoNewPrivs all
+	//     on. The downstream clone() will EPERM at spawn time;
+	//     that's the honest failure for a stateful app on a host
+	//     that can't enforce isolation.
+	//   - Everywhere else (non-Linux, or Linux unprivileged
+	//     stateless): no defaults; Sandbox stays nil or all-zero.
+	//
+	// To bypass auto-defaulting, set at least one Sandbox field to a
+	// non-zero value (any true bool, or non-empty Chroot). Because
+	// Go's bool can't distinguish "explicit false" from "unset", a
+	// literal &Spec{} is treated as "use defaults" — pass e.g.
+	// &Spec{NoNewPrivs: true} to take explicit ownership.
 	Sandbox *sandbox.Spec
 
 	// NetIsolation opts into per-app network namespace + veth wiring.
