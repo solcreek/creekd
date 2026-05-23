@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
@@ -96,10 +97,10 @@ func TestAuthRequiredWhenTokenSet(t *testing.T) {
 	if status != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", status)
 	}
-	var er ErrorResponse
+	var er apitypes.ErrorResponse
 	mustJSON(t, body, &er)
-	if er.Code != CodeUnauthorized {
-		t.Errorf("code = %q, want %q", er.Code, CodeUnauthorized)
+	if string(er.Code) != string(apitypes.ErrorCodeUnauthorized) {
+		t.Errorf("code = %q, want %q", er.Code, apitypes.ErrorCodeUnauthorized)
 	}
 }
 
@@ -122,25 +123,25 @@ func TestAuthDisabledWhenTokenEmpty(t *testing.T) {
 func TestSpawnHappyPath(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
-	req := SpawnRequest{
-		ID:      "spawn-1",
-		Command: "sleep",
-		Args:    []string{"30"},
+	req := apitypes.SpawnRequest{
+		Id:      "spawn-1",
+		Command: ptr("sleep"),
+		Args:    &[]string{"30"},
 		Port:    port,
 	}
 	status, body := ts.do(t, "POST", "/v1/apps", req, "")
 	if status != http.StatusCreated {
 		t.Fatalf("status = %d body = %s", status, body)
 	}
-	var view AppView
+	var view apitypes.AppView
 	mustJSON(t, body, &view)
-	if view.ID != "spawn-1" || view.Port != port {
+	if view.Id != "spawn-1" || view.Port != port {
 		t.Errorf("view = %+v", view)
 	}
-	if view.PID <= 0 {
-		t.Errorf("PID = %d, want > 0", view.PID)
+	if view.Pid <= 0 {
+		t.Errorf("PID = %d, want > 0", view.Pid)
 	}
-	if view.Status != "running" {
+	if string(view.Status) != "running" {
 		t.Errorf("Status = %q, want running", view.Status)
 	}
 	// Router registered.
@@ -153,7 +154,7 @@ func TestSpawnHappyPath(t *testing.T) {
 func TestSpawnDuplicateReturns409(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
-	req := SpawnRequest{ID: "dup", Command: "sleep", Args: []string{"30"}, Port: port}
+	req := apitypes.SpawnRequest{Id: "dup", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}
 	if s, _ := ts.do(t, "POST", "/v1/apps", req, ""); s != http.StatusCreated {
 		t.Fatalf("first spawn: %d", s)
 	}
@@ -163,18 +164,18 @@ func TestSpawnDuplicateReturns409(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Errorf("status = %d body = %s, want 409", status, body)
 	}
-	var er ErrorResponse
+	var er apitypes.ErrorResponse
 	mustJSON(t, body, &er)
-	if er.Code != CodeAlreadyRunning {
-		t.Errorf("code = %q, want %q", er.Code, CodeAlreadyRunning)
+	if string(er.Code) != string(apitypes.ErrorCodeAlreadyRunning) {
+		t.Errorf("code = %q, want %q", er.Code, apitypes.ErrorCodeAlreadyRunning)
 	}
 }
 
 func TestSpawnValidatesRequired(t *testing.T) {
 	ts := newTestServer(t, "")
-	cases := []SpawnRequest{
-		{Command: "sleep", Args: []string{"30"}, Port: 9000}, // no ID
-		{ID: "x", Command: "sleep", Args: []string{"30"}},    // no port
+	cases := []apitypes.SpawnRequest{
+		{Command: ptr("sleep"), Args: &[]string{"30"}, Port: 9000}, // no ID
+		{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}},    // no port
 	}
 	for i, req := range cases {
 		status, _ := ts.do(t, "POST", "/v1/apps", req, "")
@@ -202,7 +203,7 @@ func TestSpawnRejectsInvalidID(t *testing.T) {
 		"$(rm -rf /)", // shell metachar
 	}
 	for _, id := range invalid {
-		req := SpawnRequest{ID: id, Command: "sleep", Args: []string{"30"}, Port: 9000}
+		req := apitypes.SpawnRequest{Id: id, Command: ptr("sleep"), Args: &[]string{"30"}, Port: 9000}
 		status, body := ts.do(t, "POST", "/v1/apps", req, "")
 		if status != http.StatusBadRequest {
 			t.Errorf("id=%q: status = %d, want 400; body=%s", id, status, string(body))
@@ -226,9 +227,9 @@ func TestListAndGet(t *testing.T) {
 	ts := newTestServer(t, "")
 	p1, p2 := freeTCPPort(t), freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "a", Command: "sleep", Args: []string{"30"}, Port: p1}, "")
+		apitypes.SpawnRequest{Id: "a", Command: ptr("sleep"), Args: &[]string{"30"}, Port: p1}, "")
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "b", Command: "sleep", Args: []string{"30"}, Port: p2}, "")
+		apitypes.SpawnRequest{Id: "b", Command: ptr("sleep"), Args: &[]string{"30"}, Port: p2}, "")
 	t.Cleanup(func() {
 		_ = ts.sup.Stop("a")
 		_ = ts.sup.Stop("b")
@@ -239,7 +240,7 @@ func TestListAndGet(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("list status = %d", status)
 	}
-	var list ListResponse
+	var list apitypes.ListAppsResponse
 	mustJSON(t, body, &list)
 	if len(list.Apps) != 2 {
 		t.Errorf("apps len = %d, want 2", len(list.Apps))
@@ -250,9 +251,9 @@ func TestListAndGet(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("get status = %d", status)
 	}
-	var view AppView
+	var view apitypes.AppView
 	mustJSON(t, body, &view)
-	if view.ID != "a" || view.Port != p1 {
+	if view.Id != "a" || view.Port != p1 {
 		t.Errorf("view = %+v", view)
 	}
 }
@@ -269,7 +270,7 @@ func TestStopRemovesFromRegistryAndRouter(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "x", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 
 	if ts.router.Get("x") == nil {
 		t.Fatal("router missing app pre-stop")
@@ -299,7 +300,7 @@ func TestResetWhenNotCrashLoopingReturns409(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "h", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "h", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("h") })
 
 	status, body := ts.do(t, "POST", "/v1/apps/h/reset", struct{}{}, "")
@@ -318,7 +319,7 @@ func TestResetUnknownReturns404(t *testing.T) {
 
 func TestDeployUnknownReturns404(t *testing.T) {
 	ts := newTestServer(t, "")
-	req := DeployRequest{Port: 9999, Command: "sleep", Args: []string{"30"}}
+	req := apitypes.DeployRequest{Port: 9999, Command: ptr("sleep"), Args: &[]string{"30"}}
 	status, _ := ts.do(t, "POST", "/v1/apps/ghost/deploy", req, "")
 	if status != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", status)
@@ -329,10 +330,10 @@ func TestDeployRequiresPort(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "x", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("x") })
 
-	req := DeployRequest{Command: "sleep", Args: []string{"30"}}
+	req := apitypes.DeployRequest{Command: ptr("sleep"), Args: &[]string{"30"}}
 	status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
 	if status != http.StatusBadRequest {
 		t.Errorf("status = %d body = %s, want 400", status, body)
@@ -345,18 +346,18 @@ func TestDeploySamePortReturnsBadRequest(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "x", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("x") })
 
-	req := DeployRequest{Port: port, Command: "sleep", Args: []string{"30"}}
+	req := apitypes.DeployRequest{Port: port, Command: ptr("sleep"), Args: &[]string{"30"}}
 	status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
 	if status != http.StatusConflict {
 		t.Errorf("status = %d body = %s, want 409", status, body)
 	}
-	var er ErrorResponse
+	var er apitypes.ErrorResponse
 	mustJSON(t, body, &er)
-	if er.Code != CodePortConflict {
-		t.Errorf("code = %q, want %q", er.Code, CodePortConflict)
+	if string(er.Code) != string(apitypes.ErrorCodePortConflict) {
+		t.Errorf("code = %q, want %q", er.Code, apitypes.ErrorCodePortConflict)
 	}
 }
 
@@ -366,9 +367,9 @@ func TestDeploySamePortReturnsBadRequest(t *testing.T) {
 func TestLimitsZeroFieldsTreatedAsNil(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
-	req := SpawnRequest{
-		ID: "z", Command: "sleep", Args: []string{"30"}, Port: port,
-		Limits: &Limits{}, // all zeros
+	req := apitypes.SpawnRequest{
+		Id: "z", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
+		Limits: &apitypes.Limits{}, // all nil pointers
 	}
 	status, body := ts.do(t, "POST", "/v1/apps", req, "")
 	if status != http.StatusCreated {
@@ -383,9 +384,9 @@ func TestLimitsZeroFieldsTreatedAsNil(t *testing.T) {
 func TestCgroupLimitsWithoutParentRejected(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
-	req := SpawnRequest{
-		ID: "cg", Command: "sleep", Args: []string{"30"}, Port: port,
-		Limits: &Limits{MemoryMaxBytes: 16 * 1024 * 1024},
+	req := apitypes.SpawnRequest{
+		Id: "cg", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
+		Limits: &apitypes.Limits{MemoryMaxBytes: ptr(int64(16 * 1024 * 1024))},
 	}
 	status, _ := ts.do(t, "POST", "/v1/apps", req, "")
 	if status != http.StatusBadRequest {
@@ -402,29 +403,29 @@ func TestRestartHappyPath(t *testing.T) {
 
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "rs", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "rs", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("rs") })
 
 	oldPID := ts.sup.Get("rs").PID()
 
 	status, body := ts.do(t, "POST", "/v1/apps/rs/restart",
-		RestartRequest{TimeoutMS: 3000}, "")
+		apitypes.RestartRequest{TimeoutMs: ptr(int64(3000))}, "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d body = %s", status, body)
 	}
-	var view AppView
+	var view apitypes.AppView
 	mustJSON(t, body, &view)
-	if view.PID == 0 || view.PID == oldPID {
-		t.Errorf("PID = %d, want a new non-zero PID (was %d)", view.PID, oldPID)
+	if view.Pid == 0 || view.Pid == oldPID {
+		t.Errorf("PID = %d, want a new non-zero PID (was %d)", view.Pid, oldPID)
 	}
-	if view.Status != "running" {
+	if string(view.Status) != "running" {
 		t.Errorf("Status = %q, want running", view.Status)
 	}
 }
 
 func TestRestartUnknownReturns404(t *testing.T) {
 	ts := newTestServer(t, "")
-	status, _ := ts.do(t, "POST", "/v1/apps/ghost/restart", RestartRequest{}, "")
+	status, _ := ts.do(t, "POST", "/v1/apps/ghost/restart", apitypes.RestartRequest{}, "")
 	if status != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", status)
 	}
@@ -437,7 +438,7 @@ func TestRestartAcceptsEmptyBody(t *testing.T) {
 
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "noargs", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "noargs", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("noargs") })
 
 	// Send POST with no body at all (nil body in the request).
@@ -461,8 +462,8 @@ func TestSpawnPersistsToStore(t *testing.T) {
 	ts.srv.SetStore(store)
 
 	port := freeTCPPort(t)
-	req := SpawnRequest{
-		ID: "persist", Command: "sleep", Args: []string{"30"}, Port: port,
+	req := apitypes.SpawnRequest{
+		Id: "persist", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	}
 	if status, body := ts.do(t, "POST", "/v1/apps", req, ""); status != 201 {
 		t.Fatalf("spawn: status=%d body=%s", status, body)
@@ -483,7 +484,7 @@ func TestStopRemovesFromStore(t *testing.T) {
 
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "rm", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "rm", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 
 	if status, _ := ts.do(t, "DELETE", "/v1/apps/rm", nil, ""); status != 204 {
 		t.Fatalf("delete: status=%d", status)
@@ -501,7 +502,7 @@ func TestPersistenceSurvivesNewStore(t *testing.T) {
 	ts.srv.SetStore(store1)
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "alive", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "alive", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("alive") })
 
 	// Independent NewStore at the same path observes the entry.
@@ -595,23 +596,23 @@ func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "nocg", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "nocg", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("nocg") })
 
 	status, body := ts.do(t, "GET", "/v1/apps/nocg/stats", nil, "")
 	if status != http.StatusOK {
 		t.Fatalf("status = %d body = %s", status, body)
 	}
-	var v StatsView
+	var v apitypes.StatsView
 	mustJSON(t, body, &v)
-	if v.ID != "nocg" {
-		t.Errorf("id = %q", v.ID)
+	if v.Id != "nocg" {
+		t.Errorf("id = %q", v.Id)
 	}
 	if v.CgroupEnabled {
 		t.Errorf("CgroupEnabled = true, want false (spawned without limits)")
 	}
-	if v.MemoryCurrentBytes != 0 || v.PidsCurrent != 0 {
-		t.Errorf("counters should be zero, got %+v", v)
+	if v.MemoryCurrentBytes != nil || v.PidsCurrent != nil {
+		t.Errorf("counters should be nil, got %+v", v)
 	}
 }
 
@@ -694,7 +695,7 @@ func TestVolumeListEmpty(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", status, body)
 	}
-	var resp VolumesListResponse
+	var resp apitypes.ListVolumesResponse
 	mustJSON(t, body, &resp)
 	if len(resp.Volumes) != 0 {
 		t.Errorf("expected empty list, got %+v", resp.Volumes)
@@ -720,7 +721,7 @@ func TestVolumeDeleteUnknownReturns404(t *testing.T) {
 func TestVolumeRegisterRequiresVolumeRoot(t *testing.T) {
 	ts := newTestServer(t, "")
 	// VolumeRoot deliberately NOT set on supervisor.
-	req := VolumeRequest{ID: "vol-a", BackingPath: "tenant-a/data"}
+	req := apitypes.VolumeRequest{Id: "vol-a", BackingPath: "tenant-a/data"}
 	status, body := ts.do(t, "POST", "/v1/volumes", req, "")
 	if status != http.StatusBadRequest {
 		t.Errorf("status = %d, body = %s, want 400", status, body)
@@ -729,7 +730,7 @@ func TestVolumeRegisterRequiresVolumeRoot(t *testing.T) {
 
 func TestVolumeRegisterRejectsAbsoluteBackingPath(t *testing.T) {
 	vts := newVolumeTestServer(t)
-	req := VolumeRequest{ID: "vol-a", BackingPath: "/etc/passwd"}
+	req := apitypes.VolumeRequest{Id: "vol-a", BackingPath: "/etc/passwd"}
 	status, body := vts.do(t, "POST", "/v1/volumes", req, "")
 	if status != http.StatusBadRequest {
 		t.Errorf("status = %d, body = %s, want 400", status, body)
@@ -738,7 +739,7 @@ func TestVolumeRegisterRejectsAbsoluteBackingPath(t *testing.T) {
 
 func TestVolumeRegisterRejectsTraversal(t *testing.T) {
 	vts := newVolumeTestServer(t)
-	req := VolumeRequest{ID: "vol-a", BackingPath: "../escape"}
+	req := apitypes.VolumeRequest{Id: "vol-a", BackingPath: "../escape"}
 	status, body := vts.do(t, "POST", "/v1/volumes", req, "")
 	if status != http.StatusBadRequest {
 		t.Errorf("status = %d, body = %s, want 400", status, body)
@@ -760,13 +761,13 @@ func TestVolumeToViewMapsAllFields(t *testing.T) {
 func TestSpawnWithUnknownVolumeIDReturns400(t *testing.T) {
 	ts := newTestServer(t, "")
 	port := freeTCPPort(t)
-	req := SpawnRequest{
-		ID:      "needs-vol",
-		Command: "sleep",
-		Args:    []string{"30"},
+	req := apitypes.SpawnRequest{
+		Id:      "needs-vol",
+		Command: ptr("sleep"),
+		Args:    &[]string{"30"},
 		Port:    port,
-		VolumeMounts: []VolumeMount{
-			{VolumeID: "missing", Target: "/data"},
+		VolumeMounts: &[]apitypes.VolumeMount{
+			{VolumeId: "missing", Target: "/data"},
 		},
 	}
 	status, body := ts.do(t, "POST", "/v1/apps", req, "")
