@@ -17,6 +17,7 @@ type Config struct {
 	Cache    CacheConfig    `toml:"cache"`
 	Storage  StorageConfig  `toml:"storage"`
 	Email    EmailConfig    `toml:"email"`
+	Release  ReleaseConfig  `toml:"release"`
 }
 
 type AppConfig struct {
@@ -39,6 +40,13 @@ type StorageConfig struct {
 type EmailConfig struct {
 	Enabled bool `toml:"enabled"`
 }
+
+type ReleaseConfig struct {
+	Command string `toml:"command"`
+	Timeout int    `toml:"timeout"`
+}
+
+const DefaultReleaseTimeout = 60
 
 var (
 	validRuntimes       = []string{"bun", "node", "deno"}
@@ -77,6 +85,9 @@ func (c *Config) applyDefaults() {
 	if c.Storage.Driver == "" {
 		c.Storage.Driver = "fs"
 	}
+	if c.Release.Timeout == 0 {
+		c.Release.Timeout = DefaultReleaseTimeout
+	}
 }
 
 func (c *Config) Validate() error {
@@ -93,6 +104,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("creektoml: invalid storage.driver %q (valid: %v)", c.Storage.Driver, validStorageDriver)
 	}
 	return nil
+}
+
+// HasRelease reports whether a release command is configured.
+func (c *Config) HasRelease() bool {
+	return c.Release.Command != ""
 }
 
 func (c *Config) RequiredPrimitives() []string {

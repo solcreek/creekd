@@ -257,6 +257,71 @@ func TestLoadInvalidTOML(t *testing.T) {
 	}
 }
 
+func TestReleaseCommand(t *testing.T) {
+	toml := `
+[app]
+name = "release-app"
+runtime = "bun"
+
+[database]
+driver = "postgres"
+
+[release]
+command = "bun run db:migrate"
+timeout = 90
+`
+	path := writeTempFile(t, "creek.toml", toml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.HasRelease() {
+		t.Error("HasRelease() = false, want true")
+	}
+	if cfg.Release.Command != "bun run db:migrate" {
+		t.Errorf("Release.Command = %q, want %q", cfg.Release.Command, "bun run db:migrate")
+	}
+	if cfg.Release.Timeout != 90 {
+		t.Errorf("Release.Timeout = %d, want 90", cfg.Release.Timeout)
+	}
+}
+
+func TestReleaseDefaultTimeout(t *testing.T) {
+	toml := `
+[app]
+name = "default-timeout"
+
+[release]
+command = "npx prisma migrate deploy"
+`
+	path := writeTempFile(t, "creek.toml", toml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Release.Timeout != DefaultReleaseTimeout {
+		t.Errorf("Release.Timeout = %d, want %d (default)", cfg.Release.Timeout, DefaultReleaseTimeout)
+	}
+}
+
+func TestReleaseOptional(t *testing.T) {
+	toml := `
+[app]
+name = "no-release"
+`
+	path := writeTempFile(t, "creek.toml", toml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.HasRelease() {
+		t.Error("HasRelease() = true, want false (no release section)")
+	}
+	if cfg.Release.Command != "" {
+		t.Errorf("Release.Command = %q, want empty", cfg.Release.Command)
+	}
+}
+
 func writeTempFile(t *testing.T, name, content string) string {
 	t.Helper()
 	dir := t.TempDir()
