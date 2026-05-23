@@ -27,7 +27,7 @@ import (
 // relative `entrypoint` into an absolute path.
 func applyManifestTo(req *adminapi.SpawnRequest, m *manifest.Manifest, projectDir string) {
 	if req.Runtime == "" {
-		req.Runtime = m.Runtime
+		req.Runtime = string(m.Runtime)
 	}
 	if req.Entry == "" {
 		req.Entry = filepath.Join(projectDir, m.Entrypoint)
@@ -52,7 +52,7 @@ func applyManifestTo(req *adminapi.SpawnRequest, m *manifest.Manifest, projectDi
 // interface or a wrapper that obscures the CLI flag precedence rule.
 func applyManifestToDeploy(req *adminapi.DeployRequest, m *manifest.Manifest, projectDir string) {
 	if req.Runtime == "" {
-		req.Runtime = m.Runtime
+		req.Runtime = string(m.Runtime)
 	}
 	if req.Entry == "" {
 		req.Entry = filepath.Join(projectDir, m.Entrypoint)

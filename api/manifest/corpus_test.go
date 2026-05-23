@@ -4,8 +4,6 @@ import (
 	"embed"
 	"encoding/json"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -46,37 +44,27 @@ func loadCorpus(t *testing.T, dir string) []string {
 	return names
 }
 
-// writeCorpusFixture stages the embedded JSON as a real file in the
-// expected .creek-creekd/ layout so Load() — which goes through
-// os.ReadFile — sees a normal manifest on disk.
-func writeCorpusFixture(t *testing.T, dir, name string) (mp, projectDir string) {
+// readFixture reads the embedded bytes for a corpus file. Tests call
+// Decode directly on the bytes rather than round-tripping through a
+// tempfile — Load's path-handling is covered by the unit tests.
+func readFixture(t *testing.T, dir, name string) []byte {
 	t.Helper()
 	body, err := corpusFS.ReadFile("testdata/" + dir + "/" + name)
 	if err != nil {
 		t.Fatalf("embed read %s/%s: %v", dir, name, err)
 	}
-	projectDir = t.TempDir()
-	manifestDir := filepath.Join(projectDir, ".creek-creekd")
-	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	mp = filepath.Join(manifestDir, "manifest.json")
-	if err := os.WriteFile(mp, body, 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	return mp, projectDir
+	return body
 }
 
 func TestCorpusValidAccept(t *testing.T) {
 	for _, name := range loadCorpus(t, "valid") {
 		t.Run(name, func(t *testing.T) {
-			mp, _ := writeCorpusFixture(t, "valid", name)
-			m, _, err := Load(mp)
+			m, err := Decode(readFixture(t, "valid", name))
 			if err != nil {
-				t.Fatalf("Load: %v", err)
+				t.Fatalf("Decode: %v", err)
 			}
 			if m == nil {
-				t.Fatal("Load returned nil manifest with no error")
+				t.Fatal("Decode returned nil manifest with no error")
 			}
 		})
 	}
@@ -85,10 +73,9 @@ func TestCorpusValidAccept(t *testing.T) {
 func TestCorpusInvalidReject(t *testing.T) {
 	for _, name := range loadCorpus(t, "invalid") {
 		t.Run(name, func(t *testing.T) {
-			mp, _ := writeCorpusFixture(t, "invalid", name)
-			_, _, err := Load(mp)
+			_, err := Decode(readFixture(t, "invalid", name))
 			if err == nil {
-				t.Fatalf("Load accepted invalid fixture %s — both Go and TS validators must reject this", name)
+				t.Fatalf("Decode accepted invalid fixture %s — both Go and TS validators must reject this", name)
 			}
 		})
 	}

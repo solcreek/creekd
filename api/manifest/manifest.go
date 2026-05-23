@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/solcreek/creekd/internal/runtime"
 )
 
 // Manifest is the process-level manifest shape that creekctl can
@@ -30,8 +32,8 @@ import (
 // validated** — unknown top-level keys are rejected to catch typos
 // like "entryPont" before they cause cryptic spawn-time failures.
 // Adapters that need to carry extra metadata should put it inside
-// the `adapter` object (Adapter is `map[string]any` precisely so
-// adapter-private extensions don't require a creekd release).
+// the `adapter` object; creekd-side extension space (a future
+// top-level `metadata map[string]any`) is reserved.
 //
 // Future *canonical* fields can be added here as optional `omitempty`
 // without breaking older adapters (they simply won't write them); a
@@ -42,7 +44,7 @@ type Manifest struct {
 	Target          string           `json:"target"`
 	BuildID         string           `json:"buildId,omitempty"`
 	NextVersion     string           `json:"nextVersion,omitempty"`
-	Runtime         string           `json:"runtime"`
+	Runtime         runtime.Runtime  `json:"runtime"`
 	Entrypoint      string           `json:"entrypoint"`
 	Port            int              `json:"port"`
 	Env             []string         `json:"env,omitempty"`
@@ -55,11 +57,10 @@ type Manifest struct {
 
 // AdapterMetadata identifies which adapter wrote the manifest. Useful
 // for support / debugging — creekd does not act on these values.
-//
-// Strict-validated like the top level (name + version are the only
-// allowed fields). If an adapter needs to carry extra information,
-// we can add a top-level `metadata map[string]any` extension slot in
-// a future minor release without breaking anything that exists.
+// Strict-validated: only `name` and `version` are accepted. If an
+// adapter needs to carry extra information, a top-level
+// `metadata map[string]any` extension slot is the planned escape
+// hatch (not added pre-emptively — YAGNI).
 type AdapterMetadata struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
@@ -78,6 +79,28 @@ func Load(path string) (*Manifest, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("--from: read %s: %w", absPath, err)
 	}
+	m, err := Decode(data)
+	if err != nil {
+		return nil, "", fmt.Errorf("--from: %s: %w", absPath, err)
+	}
+
+	// projectDir = dirname(dirname(manifestPath))
+	manifestDir := filepath.Dir(absPath)
+	projectDir := filepath.Dir(manifestDir)
+
+	return m, projectDir, nil
+}
+
+// Decode validates a manifest from in-memory bytes. It is the same
+// validator Load uses internally — exposed so callers that already
+// have the bytes (corpus tests, future HTTP control-plane endpoints,
+// adapter-side dry runs) don't have to round-trip through the
+// filesystem.
+//
+// Errors are intentionally not prefixed with the source path; Load
+// adds that context when called from a file. Direct callers can
+// wrap with their own context.
+func Decode(data []byte) (*Manifest, error) {
 	// Strict decode: unknown top-level fields are rejected so a typo
 	// like "entryPont" doesn't silently produce an empty Entrypoint
 	// that fails downstream with a cryptic error. Adapter extensions
@@ -86,38 +109,28 @@ func Load(path string) (*Manifest, string, error) {
 	dec.DisallowUnknownFields()
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
-		return nil, "", fmt.Errorf("--from: parse %s: %w", absPath, err)
+		return nil, fmt.Errorf("parse: %w", err)
 	}
 
 	if m.Version != 1 {
-		return nil, "", fmt.Errorf("--from: %s: unsupported manifest version %d (only v1 is supported by this creekctl)",
-			absPath, m.Version)
+		return nil, fmt.Errorf("unsupported manifest version %d (only v1 is supported by this creekctl)", m.Version)
 	}
 	if m.Target != "creekd" {
-		return nil, "", fmt.Errorf("--from: %s: target=%q is not 'creekd' — this manifest was written for a different deployment target",
-			absPath, m.Target)
+		return nil, fmt.Errorf("target=%q is not 'creekd' — this manifest was written for a different deployment target", m.Target)
 	}
-	switch m.Runtime {
-	case "bun", "node", "deno":
-		// ok
-	default:
-		return nil, "", fmt.Errorf("--from: %s: runtime=%q is not 'bun', 'node', or 'deno'", absPath, m.Runtime)
+	if !m.Runtime.Valid() {
+		return nil, fmt.Errorf("runtime=%q is not 'bun', 'node', or 'deno'", m.Runtime)
 	}
 	if m.Entrypoint == "" {
-		return nil, "", errors.New("--from: missing entrypoint")
+		return nil, errors.New("missing entrypoint")
 	}
 	if err := validateEntrypoint(m.Entrypoint); err != nil {
-		return nil, "", fmt.Errorf("--from: %s: %w", absPath, err)
+		return nil, err
 	}
 	if m.Port <= 0 || m.Port > 65535 {
-		return nil, "", fmt.Errorf("--from: port=%d out of range (1..65535)", m.Port)
+		return nil, fmt.Errorf("port=%d out of range (1..65535)", m.Port)
 	}
-
-	// projectDir = dirname(dirname(manifestPath))
-	manifestDir := filepath.Dir(absPath)
-	projectDir := filepath.Dir(manifestDir)
-
-	return &m, projectDir, nil
+	return &m, nil
 }
 
 // validateEntrypoint rejects entrypoints that could resolve outside
