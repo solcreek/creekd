@@ -49,6 +49,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -895,6 +896,15 @@ func New(logger *slog.Logger) *Supervisor {
 // computeBackoff returns the delay before the (count+1)-th restart.
 // count is the number of restarts already in this window.
 // Sequence (with default settings): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+// runtimeIsLinux reports whether we're on Linux (where namespace
+// isolation actually works). On macOS/Windows, sandbox.Apply returns
+// ErrUnsupported, so we skip default isolation to avoid breaking dev.
+func runtimeIsLinux() bool {
+	return goos == "linux"
+}
+
+var goos = goruntime.GOOS
+
 // filterSupervisorEnv removes CREEKD_* and CREEKCTL_* env vars from
 // the parent's environment before passing to child processes. Prevents
 // admin tokens and internal config from leaking to tenant apps.
@@ -995,24 +1005,37 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 	// Callers who really want host-NS visibility for a stateful app
 	// (e.g. a debug shell) must pass an explicit Sandbox with the
 	// fields set false — silence used to be opt-in, now it's opt-out.
-	if len(cfg.VolumeMounts) > 0 {
+	// Default sandbox isolation on Linux: PID + NoNewPrivs for ALL apps.
+	// MountNamespace added when VolumeMounts are present.
+	// This prevents cross-tenant /proc visibility and setuid escalation.
+	// Callers can opt out by setting explicit Sandbox fields.
+	// On non-Linux (macOS dev), sandboxing is a no-op (ErrUnsupported),
+	// so we only apply defaults when the platform supports it.
+	if runtimeIsLinux() {
+		if cfg.Sandbox == nil {
+			cfg.Sandbox = &sandbox.Spec{
+				PIDNamespace: true,
+				NoNewPrivs:   true,
+			}
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		} else if !cfg.Sandbox.Any() {
+			cfg.Sandbox.PIDNamespace = true
+			cfg.Sandbox.NoNewPrivs = true
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		}
+	} else if len(cfg.VolumeMounts) > 0 {
+		// Non-Linux: only apply defaults for stateful apps (original behavior)
 		if cfg.Sandbox == nil {
 			cfg.Sandbox = &sandbox.Spec{
 				MountNamespace: true,
 				PIDNamespace:   true,
 				NoNewPrivs:     true,
 			}
-		}
-		// If Sandbox is non-nil, only flip fields that were left at
-		// their zero value. Explicit-false stays explicit-false.
-		// Detecting "explicit false vs zero" is impossible on a plain
-		// bool, so we use a pragmatic rule: when ANY field on the
-		// Sandbox is already true, the caller has thought about it
-		// and we leave their config alone. When the Sandbox is
-		// all-zeros (allocated but blank), we treat it as "defaults
-		// please" and flip the three fields on. Same heuristic the
-		// Go stdlib uses for opt-in defaults on Cmd flags.
-		if !cfg.Sandbox.Any() {
+		} else if !cfg.Sandbox.Any() {
 			cfg.Sandbox.MountNamespace = true
 			cfg.Sandbox.PIDNamespace = true
 			cfg.Sandbox.NoNewPrivs = true

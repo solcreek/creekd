@@ -71,7 +71,7 @@ func NewRotator(dir, appID string, opts Options) (*Rotator, error) {
 	}
 
 	appDir := filepath.Join(dir, appID)
-	if err := os.MkdirAll(appDir, 0o755); err != nil {
+	if err := os.MkdirAll(appDir, 0o750); err != nil {
 		return nil, fmt.Errorf("logs: mkdir %s: %w", appDir, err)
 	}
 
@@ -124,7 +124,7 @@ func (r *Rotator) backupPath(n int) string {
 // Caller must hold r.mu OR be inside a constructor.
 func (r *Rotator) openCurrent() error {
 	path := r.currentPath()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		return fmt.Errorf("logs: open %s: %w", path, err)
 	}
