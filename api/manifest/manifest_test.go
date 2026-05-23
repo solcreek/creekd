@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,110 @@ func TestLoadRejectsUnknownTopLevelField(t *testing.T) {
 	if !strings.Contains(err.Error(), "entryPont") {
 		t.Errorf("error %q should mention the misspelled field 'entryPont'", err)
 	}
+}
+
+// TestLoadRejectsAdapterMissingName / Version cover the gap
+// where Go's json.Unmarshal silently zero-values missing fields
+// inside a nested struct, which without an explicit check would
+// accept `"adapter": {}` while TS rejects it.
+// adapterBlock matches the multi-line "adapter": { … } block in
+// testdata/valid/nextjs-full.json so strings.Replace can substitute
+// it wholesale. Hand-maintained alongside the fixture; CI catches
+// divergence via the corpus tests if the fixture is reformatted.
+const adapterBlock = "\"adapter\": {\n    \"name\": \"@solcreek/adapter-creekd\",\n    \"version\": \"0.1.0\"\n  }"
+
+func TestLoadRejectsAdapterMissingName(t *testing.T) {
+	body := strings.Replace(goodManifest, adapterBlock, `"adapter": {}`, 1)
+	mp, _ := writeManifest(t, body)
+	_, _, err := Load(mp)
+	if err == nil || !strings.Contains(err.Error(), "adapter.name") {
+		t.Errorf("want adapter.name error, got %v", err)
+	}
+}
+
+func TestLoadRejectsAdapterMissingVersion(t *testing.T) {
+	body := strings.Replace(goodManifest, adapterBlock, `"adapter": {"name": "x"}`, 1)
+	mp, _ := writeManifest(t, body)
+	_, _, err := Load(mp)
+	if err == nil || !strings.Contains(err.Error(), "adapter.version") {
+		t.Errorf("want adapter.version error, got %v", err)
+	}
+}
+
+// TestLoadRejectsTrailingContent guards against the Decoder.Decode
+// quirk of reading one value and stopping. Without the explicit
+// follow-up EOF check, `{"valid":...}{"trailing":1}` would be
+// silently accepted while TS JSON.parse refuses it outright.
+func TestLoadRejectsTrailingContent(t *testing.T) {
+	body := goodManifest + "\n{\"trailing\": \"garbage\"}"
+	mp, _ := writeManifest(t, body)
+	_, _, err := Load(mp)
+	if err == nil {
+		t.Fatal("want error for trailing content, got nil")
+	}
+	if !strings.Contains(err.Error(), "trailing") {
+		t.Errorf("error %q should mention 'trailing'", err)
+	}
+}
+
+// TestLoadRejectsWindowsAbsoluteEntrypoint covers the case
+// filepath.IsAbs misses on non-Windows hosts. validateEntrypoint
+// now detects drive-letter absolute and UNC by hand.
+func TestLoadRejectsWindowsAbsoluteEntrypoint(t *testing.T) {
+	for _, ep := range []string{
+		`C:\windows\system32\cmd.exe`,
+		`c:/Users/x/app.js`,
+		`\\server\share\file.js`,
+	} {
+		body := strings.Replace(goodManifest,
+			`"entrypoint": ".next/standalone/server.js"`,
+			`"entrypoint": `+jsonString(ep), 1)
+		mp, _ := writeManifest(t, body)
+		_, _, err := Load(mp)
+		if err == nil {
+			t.Errorf("entrypoint %q: want absolute-path error, got nil", ep)
+			continue
+		}
+		if !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("entrypoint %q: error %q should mention 'absolute'", ep, err)
+		}
+	}
+}
+
+// TestLoadRejectsBackslashTraversal covers traversal sequences that
+// use the Windows separator. filepath.Clean on Linux/macOS leaves
+// `\` untouched, so segment-walking on both separators is required.
+func TestLoadRejectsBackslashTraversal(t *testing.T) {
+	for _, ep := range []string{
+		`..\escape.js`,
+		`.next\..\..\escape.js`,
+		`a\..\..\b`,
+	} {
+		body := strings.Replace(goodManifest,
+			`"entrypoint": ".next/standalone/server.js"`,
+			`"entrypoint": `+jsonString(ep), 1)
+		mp, _ := writeManifest(t, body)
+		_, _, err := Load(mp)
+		if err == nil {
+			t.Errorf("entrypoint %q: want traversal error, got nil", ep)
+			continue
+		}
+		if !strings.Contains(err.Error(), "escape") {
+			t.Errorf("entrypoint %q: error %q should mention 'escape'", ep, err)
+		}
+	}
+}
+
+// jsonString returns a JSON-encoded string literal — including the
+// surrounding quotes — for the value. Used by the entrypoint
+// substitution tests so backslashes inside the inserted path are
+// escaped correctly without us hand-doubling them in every case.
+func jsonString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
 
 // TestLoadParsesExtensionFields asserts that the surface fields

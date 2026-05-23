@@ -196,11 +196,11 @@ export function validateCreekdDeployManifest(value: unknown): ManifestValidation
         return { ok: false, reason: `unknown field ${JSON.stringify(key)} in adapter metadata` };
       }
     }
-    if (typeof ad.name !== "string") {
-      return { ok: false, reason: "adapter.name must be a string" };
+    if (typeof ad.name !== "string" || ad.name.length === 0) {
+      return { ok: false, reason: "adapter.name must be a non-empty string" };
     }
-    if (typeof ad.version !== "string") {
-      return { ok: false, reason: "adapter.version must be a string" };
+    if (typeof ad.version !== "string" || ad.version.length === 0) {
+      return { ok: false, reason: "adapter.version must be a non-empty string" };
     }
   }
 

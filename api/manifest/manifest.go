@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,13 +32,18 @@ import (
 // Top-level field set is considered stable and is **strictly
 // validated** — unknown top-level keys are rejected to catch typos
 // like "entryPont" before they cause cryptic spawn-time failures.
-// Adapters that need to carry extra metadata should put it inside
-// the `adapter` object; creekd-side extension space (a future
-// top-level `metadata map[string]any`) is reserved.
+// The nested `adapter` object is strict too; only `name` and
+// `version` are allowed and both must be non-empty when present.
+// Adapter-private extension space is deliberately NOT in the
+// `adapter` object — a future top-level `metadata map[string]any`
+// is the planned slot for that, added when concrete demand appears.
 //
-// Future *canonical* fields can be added here as optional `omitempty`
-// without breaking older adapters (they simply won't write them); a
-// newer creekd reading an older manifest still works.
+// Future *canonical* fields can be added here as optional
+// `omitempty` without breaking newer-creekd-reads-older-manifest;
+// the other direction — older creekd reading a manifest that
+// carries a new field — requires a coordinated rollout (bump
+// creekd first, then adapters) because strict mode rejects
+// unknown keys.
 type Manifest struct {
 	Version         int              `json:"version"`
 	Framework       string           `json:"framework,omitempty"`
@@ -103,13 +109,22 @@ func Load(path string) (*Manifest, string, error) {
 func Decode(data []byte) (*Manifest, error) {
 	// Strict decode: unknown top-level fields are rejected so a typo
 	// like "entryPont" doesn't silently produce an empty Entrypoint
-	// that fails downstream with a cryptic error. Adapter extensions
-	// live inside the `adapter` object, not at the top level.
+	// that fails downstream with a cryptic error.
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
+	}
+	// json.Decoder.Decode reads one value and stops. Without this
+	// follow-up check, a payload like `{"valid":...}{"trailing":1}`
+	// would be silently accepted on the Go side while TS's JSON.parse
+	// rejects it.
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		if err == nil {
+			return nil, errors.New("unexpected trailing content after manifest object")
+		}
+		return nil, fmt.Errorf("trailing content after manifest: %w", err)
 	}
 
 	if m.Version != 1 {
@@ -130,6 +145,14 @@ func Decode(data []byte) (*Manifest, error) {
 	if m.Port <= 0 || m.Port > 65535 {
 		return nil, fmt.Errorf("port=%d out of range (1..65535)", m.Port)
 	}
+	if m.Adapter != nil {
+		if m.Adapter.Name == "" {
+			return nil, errors.New("adapter.name must be a non-empty string")
+		}
+		if m.Adapter.Version == "" {
+			return nil, errors.New("adapter.version must be a non-empty string")
+		}
+	}
 	return &m, nil
 }
 
@@ -140,21 +163,46 @@ func Decode(data []byte) (*Manifest, error) {
 // a corrupted manifest, a supply-chain compromise of the adapter, or
 // a hand-edited file pointing somewhere unsafe.
 //
-// Even under creekctl's local trust model (the user runs it on their
-// own dev machine against their own manifest), guarding here means
-// that a future use case where manifests cross trust boundaries —
-// e.g. a hosted control plane consuming customer-provided manifests
-// — doesn't need a second layer of defence to be added later.
+// Platform-independent on purpose: filepath.IsAbs / filepath.Clean
+// only treat the host OS's separator as meaningful, so they miss
+// Windows drive paths on Linux/macOS and backslash traversal on any
+// OS. We walk segments split on both `/` and `\` and detect the
+// known absolute-path forms by hand so the Go and TS validators
+// agree regardless of where they run.
 func validateEntrypoint(ep string) error {
-	if filepath.IsAbs(ep) {
+	// Posix-absolute.
+	if strings.HasPrefix(ep, "/") {
 		return fmt.Errorf("entrypoint %q must be relative to the project root, not absolute", ep)
 	}
-	clean := filepath.Clean(ep)
-	// Clean turns "./a/../../b" into "../b"; any leading ".." (or the
-	// literal "..") in the cleaned form means the path escapes
-	// projectDir once joined.
-	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, `..\`) {
-		return fmt.Errorf("entrypoint %q escapes the project directory via ..", ep)
+	// Windows UNC ("\\server\share" or, less common, "//server/share").
+	if strings.HasPrefix(ep, `\\`) || strings.HasPrefix(ep, "//") {
+		return fmt.Errorf("entrypoint %q must be relative to the project root, not absolute", ep)
+	}
+	// Windows drive-letter absolute: C:\, c:/, etc.
+	if len(ep) >= 3 && ep[1] == ':' && (ep[2] == '/' || ep[2] == '\\') {
+		c := ep[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return fmt.Errorf("entrypoint %q must be relative to the project root, not absolute", ep)
+		}
+	}
+	// Segment-walk with depth counter. Reject as soon as we'd
+	// resolve above the project root.
+	segments := strings.FieldsFunc(ep, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	depth := 0
+	for _, seg := range segments {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			depth--
+			if depth < 0 {
+				return fmt.Errorf("entrypoint %q escapes the project directory via ..", ep)
+			}
+			continue
+		}
+		depth++
 	}
 	return nil
 }

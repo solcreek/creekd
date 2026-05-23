@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "node",
+  "entrypoint": ".next\\..\\..\\escape.js",
+  "port": 3000
+}
