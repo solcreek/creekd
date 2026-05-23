@@ -1,0 +1,51 @@
+{
+  "name": "@solcreek/creekd-manifest",
+  "version": "0.1.0",
+  "description": "TypeScript types and validator for the creekd deployment manifest contract.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.map"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "creek",
+    "creekd",
+    "manifest",
+    "deployment",
+    "contract"
+  ],
+  "author": "SolCreek",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/solcreek/creekd/tree/main/packages/creekd-manifest",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/solcreek/creekd.git",
+    "directory": "packages/creekd-manifest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^4.1.2"
+  },
+  "packageManager": "pnpm@10.33.0"
+}
