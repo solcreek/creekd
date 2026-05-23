@@ -1,0 +1,74 @@
+name: Publish @solcreek/creekd-manifest
+
+# Tag pattern: creekd-manifest-v<semver>. Picked deliberately so this
+# workflow stays orthogonal to the creekd binary's own v* release
+# tags — bumping a creekd binary release should never accidentally
+# republish the npm package, and vice versa.
+
+on:
+  push:
+    tags:
+      - 'creekd-manifest-v*'
+  # Manual trigger for verification — install / build / test run, but
+  # the npm publish step is gated on tag pushes so a manual dispatch
+  # never cuts a release.
+  workflow_dispatch:
+
+permissions:
+  id-token: write    # required for npm OIDC trusted publishing + provenance
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/creekd-manifest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          # creekd repo root has no package.json (it's a Go repo);
+          # point the action at the npm package so packageManager
+          # resolution works.
+          package_json_file: packages/creekd-manifest/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          # No cache: release builds must not reuse a stale dep tree.
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Verify package version matches tag
+        if: github.event_name == 'push'
+        run: |
+          # Tag: refs/tags/creekd-manifest-v0.1.0 → 0.1.0
+          tag_version="${GITHUB_REF#refs/tags/creekd-manifest-v}"
+          pkg_version=$(node -p "require('./package.json').version")
+          if [[ "$tag_version" != "$pkg_version" ]]; then
+            echo "::error::tag $GITHUB_REF declares version $tag_version but package.json says $pkg_version"
+            echo "::error::bump package.json or push a corrected tag — npm publish would publish the package.json version and the tag would silently lie."
+            exit 1
+          fi
+          echo "✓ package.json version $pkg_version matches tag"
+
+      - run: pnpm typecheck
+
+      - run: pnpm build
+
+      # The shared contract corpus tests live in this package — run
+      # them on every publish so we never ship a release where the
+      # TS validator disagrees with the Go side that was merged to
+      # main.
+      - run: pnpm test
+
+      # OIDC trusted publishing exchanges the GitHub Actions identity
+      # for an npm publish token. Requires the package's Trusted
+      # Publisher to be configured at npmjs.com → package access.
+      # Skipped on workflow_dispatch so manual verifications never
+      # accidentally cut a release.
+      - run: npm publish --provenance --access public
+        if: github.event_name == 'push'
