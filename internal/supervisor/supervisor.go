@@ -50,6 +50,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -129,15 +130,27 @@ type Config struct {
 	// Composes with CgroupLimits in a single clone3: cgroup attach,
 	// CLONE_NEW* flags, and Chroot are applied to the same child.
 	//
-	// Special case: when VolumeMounts is non-empty AND Sandbox is
-	// either nil OR present with all fields at the zero value, the
-	// supervisor automatically defaults MountNamespace, PIDNamespace,
-	// and NoNewPrivs to true at Spawn time. Pentest review identified
-	// "tenant runs as root in host mount NS by default" as the #1
-	// issue — defaults flip from opt-in to opt-out for stateful
-	// workloads. Callers who want host-NS visibility for a stateful
-	// app must explicitly set at least one Sandbox field to take
-	// ownership of the policy.
+	// Auto-defaulting (applyDefaultSandbox in this file) fires when
+	// Sandbox is nil OR all its fields are at the zero value. The
+	// policy depends on the environment:
+	//
+	//   - Linux + CAP_SYS_ADMIN (production root, privileged
+	//     containers): PIDNamespace + NoNewPrivs flip on for every
+	//     spawn; MountNamespace is added when VolumeMounts is
+	//     non-empty.
+	//   - Linux without CAP_SYS_ADMIN + VolumeMounts non-empty:
+	//     legacy stateful default — Mount + PID + NoNewPrivs all
+	//     on. The downstream clone() will EPERM at spawn time;
+	//     that's the honest failure for a stateful app on a host
+	//     that can't enforce isolation.
+	//   - Everywhere else (non-Linux, or Linux unprivileged
+	//     stateless): no defaults; Sandbox stays nil or all-zero.
+	//
+	// To bypass auto-defaulting, set at least one Sandbox field to a
+	// non-zero value (any true bool, or non-empty Chroot). Because
+	// Go's bool can't distinguish "explicit false" from "unset", a
+	// literal &Spec{} is treated as "use defaults" — pass e.g.
+	// &Spec{NoNewPrivs: true} to take explicit ownership.
 	Sandbox *sandbox.Spec
 
 	// NetIsolation opts into per-app network namespace + veth wiring.
@@ -492,6 +505,15 @@ type Supervisor struct {
 	// Graceful shutdown (M5.3a). How long Stop waits between SIGTERM and
 	// SIGKILL escalation. Default 30s for production; tests use shorter.
 	GracefulShutdownTimeout time.Duration
+
+	// DisableDefaultSandbox suppresses applyDefaultSandbox's auto-flip.
+	// Production never sets this; test harnesses do, because their
+	// spawned commands (sleep, true, hand-rolled HTTP servers) aren't
+	// init-aware and become unkillable as PID 1 in a fresh PID
+	// namespace. Callers that want sandboxing in tests pass an
+	// explicit Sandbox per-Config; this flag only short-circuits the
+	// secure-by-default policy.
+	DisableDefaultSandbox bool
 
 	// LogDir is the root directory for per-app log files (M5.6). When
 	// set, each app's stdout/stderr is captured through a logs.Rotator
@@ -893,9 +915,6 @@ func New(logger *slog.Logger) *Supervisor {
 	}
 }
 
-// computeBackoff returns the delay before the (count+1)-th restart.
-// count is the number of restarts already in this window.
-// Sequence (with default settings): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
 // runtimeIsLinux reports whether we're on Linux (where namespace
 // isolation actually works). On macOS/Windows, sandbox.Apply returns
 // ErrUnsupported, so we skip default isolation to avoid breaking dev.
@@ -903,7 +922,141 @@ func runtimeIsLinux() bool {
 	return goos == "linux"
 }
 
+// applyDefaultSandbox mutates cfg.Sandbox in place to apply the
+// secure-by-default isolation policy. Two paths:
+//
+//  1. Privileged Linux (canApplyDefaultSandbox): default PID +
+//     NoNewPrivs for every app, plus Mount namespace when VolumeMounts
+//     are present. Pentest review flagged cross-tenant /proc
+//     visibility and setuid escalation as the things this guards
+//     against.
+//  2. Anywhere else (macOS dev, non-root CI, unprivileged hosts):
+//     only apply the legacy "stateful apps get full isolation"
+//     default when VolumeMounts is non-empty. Stateless apps stay
+//     unsandboxed because applying CLONE_NEWPID without
+//     CAP_SYS_ADMIN fails at clone() with EPERM and surfaces as a
+//     misleading setpriv error.
+//
+// Callers can opt out of any defaulting by passing an explicit
+// non-zero Sandbox (any field true wins — the auto-flip only fires
+// when Sandbox is nil or has every field at zero value).
+func applyDefaultSandbox(cfg *Config) {
+	if canApplyDefaultSandbox() {
+		if cfg.Sandbox == nil {
+			cfg.Sandbox = &sandbox.Spec{
+				PIDNamespace: true,
+				NoNewPrivs:   true,
+			}
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		} else if !cfg.Sandbox.Any() {
+			cfg.Sandbox.PIDNamespace = true
+			cfg.Sandbox.NoNewPrivs = true
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		}
+		return
+	}
+	// Unprivileged path: legacy stateful-only default. Gated on Linux
+	// because sandbox.Apply returns ErrUnsupported on non-Linux for a
+	// non-empty Spec — applying defaults there would just guarantee a
+	// spawn-time error. macOS dev with VolumeMounts spawns without
+	// isolation, which is consistent with the rest of the non-Linux
+	// matrix (no auto-flip).
+	if !runtimeIsLinux() {
+		return
+	}
+	if len(cfg.VolumeMounts) == 0 {
+		return
+	}
+	if cfg.Sandbox == nil {
+		cfg.Sandbox = &sandbox.Spec{
+			MountNamespace: true,
+			PIDNamespace:   true,
+			NoNewPrivs:     true,
+		}
+		return
+	}
+	if !cfg.Sandbox.Any() {
+		cfg.Sandbox.MountNamespace = true
+		cfg.Sandbox.PIDNamespace = true
+		cfg.Sandbox.NoNewPrivs = true
+	}
+}
+
+// canApplyDefaultSandbox reports whether the supervisor is running
+// with the privilege actually required to enforce the secure-by-
+// default sandbox (PID namespace via CLONE_NEWPID, NoNewPrivs via
+// the setpriv wrapper which itself runs under our clone).
+//
+// We test for CAP_SYS_ADMIN in the effective set rather than
+// euid == 0 because the relationship between root and capabilities
+// has diverged on modern Linux:
+//
+//   - Root in an unprivileged Docker container has a bounded
+//     capability set; clone(CLONE_NEWPID) still EPERMs.
+//   - A systemd unit can drop caps via CapabilityBoundingSet=
+//     while keeping User=root, with the same failure mode.
+//   - A non-root process with file caps granting CAP_SYS_ADMIN
+//     could (rare but valid) run the sandbox successfully.
+//
+// /proc/self/status's CapEff line gives us the actual effective
+// set the kernel will check at clone() time. Falling back to
+// "no defaults" when we can't read the cap set is the safe
+// behaviour: spawn proceeds without isolation rather than failing
+// with a confusing setpriv error.
+func canApplyDefaultSandbox() bool {
+	if !runtimeIsLinux() {
+		return false
+	}
+	return hasSysAdminCap()
+}
+
 var goos = goruntime.GOOS
+
+// hasSysAdminCap reports whether the current process has CAP_SYS_ADMIN
+// in its effective capability set. Overridable for tests.
+var hasSysAdminCap = readSysAdminCapFromProc
+
+// capSysAdminBit is bit 21 of the capability bitmask, per
+// <linux/capability.h>'s CAP_SYS_ADMIN = 21. Stable across kernel
+// versions since the cap was defined.
+const capSysAdminBit = 21
+
+// readSysAdminCapFromProc reads /proc/self/status and delegates to
+// parseSysAdminCap. A read failure returns false — refusing to apply
+// default isolation is always safer than applying it where it won't
+// work. Linux-only path; non-Linux callers shouldn't reach here
+// (canApplyDefaultSandbox gates on runtimeIsLinux first).
+func readSysAdminCapFromProc() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseSysAdminCap(data)
+}
+
+// parseSysAdminCap is the platform-independent core: scan the
+// /proc/self/status text for a CapEff line and check bit 21 of the
+// hex bitmask. Malformed or missing CapEff returns false. Extracted
+// so the parser can be table-tested on any OS without needing the
+// real /proc filesystem.
+func parseSysAdminCap(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		caps, err := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+		if err != nil {
+			return false
+		}
+		return caps&(1<<capSysAdminBit) != 0
+	}
+	return false
+}
 
 // filterSupervisorEnv removes CREEKD_* and CREEKCTL_* env vars from
 // the parent's environment before passing to child processes. Prevents
@@ -923,6 +1076,9 @@ func filterSupervisorEnv(env []string) []string {
 	return filtered
 }
 
+// computeBackoff returns the delay before the (count+1)-th restart.
+// count is the number of restarts already in this window. Sequence
+// with default settings: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
 func (s *Supervisor) computeBackoff(count int) time.Duration {
 	if count <= 0 {
 		return s.InitialBackoff
@@ -992,54 +1148,8 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		volumeRefs:      volumeIDs(cfg.VolumeMounts),
 		sup:             s,
 	}
-	// Hardening default for stateful workloads: when VolumeMounts is
-	// non-empty, the tenant runs as root in the host mount namespace
-	// by default — pentest review flagged this as the #1 issue
-	// because MS_NOSUID on the bind is hygiene, not isolation
-	// (tenant root can still exec /usr/bin/sudo across mounts, can
-	// chmod / hardlink, etc.). Default MountNamespace, PIDNamespace,
-	// and NoNewPrivs to ON when VolumeMounts is non-empty unless
-	// the caller explicitly opted any of them out via a non-nil
-	// Sandbox with that field set false.
-	//
-	// Callers who really want host-NS visibility for a stateful app
-	// (e.g. a debug shell) must pass an explicit Sandbox with the
-	// fields set false — silence used to be opt-in, now it's opt-out.
-	// Default sandbox isolation on Linux: PID + NoNewPrivs for ALL apps.
-	// MountNamespace added when VolumeMounts are present.
-	// This prevents cross-tenant /proc visibility and setuid escalation.
-	// Callers can opt out by setting explicit Sandbox fields.
-	// On non-Linux (macOS dev), sandboxing is a no-op (ErrUnsupported),
-	// so we only apply defaults when the platform supports it.
-	if runtimeIsLinux() {
-		if cfg.Sandbox == nil {
-			cfg.Sandbox = &sandbox.Spec{
-				PIDNamespace: true,
-				NoNewPrivs:   true,
-			}
-			if len(cfg.VolumeMounts) > 0 {
-				cfg.Sandbox.MountNamespace = true
-			}
-		} else if !cfg.Sandbox.Any() {
-			cfg.Sandbox.PIDNamespace = true
-			cfg.Sandbox.NoNewPrivs = true
-			if len(cfg.VolumeMounts) > 0 {
-				cfg.Sandbox.MountNamespace = true
-			}
-		}
-	} else if len(cfg.VolumeMounts) > 0 {
-		// Non-Linux: only apply defaults for stateful apps (original behavior)
-		if cfg.Sandbox == nil {
-			cfg.Sandbox = &sandbox.Spec{
-				MountNamespace: true,
-				PIDNamespace:   true,
-				NoNewPrivs:     true,
-			}
-		} else if !cfg.Sandbox.Any() {
-			cfg.Sandbox.MountNamespace = true
-			cfg.Sandbox.PIDNamespace = true
-			cfg.Sandbox.NoNewPrivs = true
-		}
+	if !s.DisableDefaultSandbox {
+		applyDefaultSandbox(&cfg)
 	}
 
 	if cfg.Sandbox != nil {

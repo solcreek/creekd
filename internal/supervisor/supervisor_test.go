@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/solcreek/creekd/internal/sandbox"
+
 	"github.com/solcreek/creekd/internal/cgroup"
 	runtimePkg "github.com/solcreek/creekd/internal/runtime"
 )
@@ -38,6 +40,19 @@ func newTestSupervisor() *Supervisor {
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0
+	// Short graceful-shutdown window so tests aren't held up by the
+	// production-default 30s SIGTERM→SIGKILL escalation. Matters most
+	// for processes that end up as PID 1 in a fresh PID namespace —
+	// PID 1 has no default signal handlers, so SIGTERM is silently
+	// dropped until SIGKILL fires. Individual tests that need a
+	// longer window override this after the helper returns.
+	sup.GracefulShutdownTimeout = 500 * time.Millisecond
+	// Test commands (sleep, true, ad-hoc HTTP servers) aren't
+	// init-aware and become unkillable as PID 1 in a fresh PID
+	// namespace. Suppress the secure-by-default auto-flip; tests
+	// that actually verify sandbox behaviour pass an explicit
+	// Sandbox per-Config.
+	sup.DisableDefaultSandbox = true
 	return sup
 }
 
@@ -52,6 +67,208 @@ func eventuallyTrue(timeout time.Duration, f func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return f()
+}
+
+// TestApplyDefaultSandbox guards the privilege-gated default policy.
+// On a non-root caller the supervisor must NOT auto-default
+// PIDNamespace/NoNewPrivs — the resulting clone(CLONE_NEWPID) would
+// fail with EPERM at run time (no CAP_SYS_ADMIN). On a root caller
+// the defaults still apply, so production deployments keep the
+// hardening that fcb5def introduced.
+//
+// applyDefaultSandbox is tested directly rather than through Spawn:
+// on macOS dev hosts, sandbox.Apply returns ErrUnsupported when given
+// a non-empty Spec; the test purpose is the policy decision, not the
+// platform plumbing that follows.
+func TestApplyDefaultSandbox(t *testing.T) {
+	origGOOS := goos
+	origHasCap := hasSysAdminCap
+	t.Cleanup(func() {
+		goos = origGOOS
+		hasSysAdminCap = origHasCap
+	})
+
+	t.Run("Linux without CAP_SYS_ADMIN: no Sandbox stays nil", func(t *testing.T) {
+		goos = "linux"
+		hasSysAdminCap = func() bool { return false }
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux without CAP_SYS_ADMIN: zero Sandbox stays empty", func(t *testing.T) {
+		goos = "linux"
+		hasSysAdminCap = func() bool { return false }
+		cfg := Config{ID: "x", Command: "sleep", Sandbox: &sandbox.Spec{}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil || cfg.Sandbox.Any() {
+			t.Errorf("Sandbox = %+v, want non-nil with all fields false", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux without CAP_SYS_ADMIN + VolumeMounts: legacy stateful default applies", func(t *testing.T) {
+		// Preserves pre-fcb5def behaviour: a stateful spawn without
+		// the capability to enforce isolation still gets the defaults
+		// flipped on. The clone(CLONE_NEWPID) downstream will EPERM
+		// at spawn time, which is the honest failure — better than
+		// silently spawning a stateful app with host /proc visibility.
+		goos = "linux"
+		hasSysAdminCap = func() bool { return false }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil {
+			t.Fatal("Sandbox = nil, want stateful default")
+		}
+		if !cfg.Sandbox.MountNamespace || !cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want all three flags true", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux with CAP_SYS_ADMIN: PID + NoNewPrivs for stateless app", func(t *testing.T) {
+		goos = "linux"
+		hasSysAdminCap = func() bool { return true }
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil {
+			t.Fatal("Sandbox = nil, want defaults")
+		}
+		if !cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want PIDNamespace + NoNewPrivs", cfg.Sandbox)
+		}
+		if cfg.Sandbox.MountNamespace {
+			t.Errorf("MountNamespace = true, want false (stateless app)")
+		}
+	})
+
+	t.Run("Linux with CAP_SYS_ADMIN + VolumeMounts: full isolation default", func(t *testing.T) {
+		goos = "linux"
+		hasSysAdminCap = func() bool { return true }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil ||
+			!cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs || !cfg.Sandbox.MountNamespace {
+			t.Errorf("Sandbox = %+v, want all three flags true", cfg.Sandbox)
+		}
+	})
+
+	t.Run("explicit Sandbox with any field true skips auto-flip", func(t *testing.T) {
+		goos = "linux"
+		hasSysAdminCap = func() bool { return true }
+		cfg := Config{
+			ID:      "x",
+			Command: "sleep",
+			Sandbox: &sandbox.Spec{Chroot: "/jail"},
+		}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox.PIDNamespace || cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want only Chroot set (no auto-flip)", cfg.Sandbox)
+		}
+		if cfg.Sandbox.Chroot != "/jail" {
+			t.Errorf("Chroot = %q, want \"/jail\"", cfg.Sandbox.Chroot)
+		}
+	})
+
+	t.Run("non-Linux: stateless apps never get defaults", func(t *testing.T) {
+		goos = "darwin"
+		hasSysAdminCap = func() bool { return true } // shouldn't be consulted
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil on non-Linux", cfg.Sandbox)
+		}
+	})
+
+	t.Run("non-Linux + VolumeMounts: still no defaults (legacy gate)", func(t *testing.T) {
+		// Pre-fix the legacy stateful path applied unconditionally,
+		// producing a Spec that sandbox.Apply would reject at spawn
+		// time on non-Linux with ErrUnsupported. The fix gates the
+		// legacy branch on Linux too so macOS dev with VolumeMounts
+		// spawns without isolation, consistent with the rest of the
+		// non-Linux matrix.
+		goos = "darwin"
+		hasSysAdminCap = func() bool { return true }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil on non-Linux even with VolumeMounts", cfg.Sandbox)
+		}
+	})
+}
+
+// TestParseSysAdminCap covers the pure /proc/self/status parser
+// directly. CAP_SYS_ADMIN is the security gate for default sandbox
+// application, so the table runs on any OS without depending on
+// the test runner's actual privileges.
+func TestParseSysAdminCap(t *testing.T) {
+	const header = "Name:\tsupervisor\nState:\tR (running)\n"
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "all caps cleared",
+			body: header + "CapEff:\t0000000000000000\n",
+			want: false,
+		},
+		{
+			name: "only CAP_SYS_ADMIN set (bit 21)",
+			body: header + "CapEff:\t0000000000200000\n",
+			want: true,
+		},
+		{
+			name: "full cap set (root in privileged container)",
+			body: header + "CapEff:\t000001ffffffffff\n",
+			want: true,
+		},
+		{
+			name: "CapEff present but CAP_SYS_ADMIN cleared (CAP_NET_ADMIN bit 12 only)",
+			body: header + "CapEff:\t0000000000001000\n",
+			want: false,
+		},
+		{
+			name: "leading/trailing whitespace tolerated",
+			body: header + "CapEff:   \t  0000000000200000  \n",
+			want: true,
+		},
+		{
+			name: "no CapEff line",
+			body: header + "Uid:\t1000\n",
+			want: false,
+		},
+		{
+			name: "malformed hex",
+			body: header + "CapEff:\tnot-a-number\n",
+			want: false,
+		},
+		{
+			name: "empty input",
+			body: "",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseSysAdminCap([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("parseSysAdminCap = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadSysAdminCapFromProc is a smoke test against the real
+// /proc/self/status (where it exists). Asserts only that the
+// function returns without panicking — true vs false depends on
+// the test runner's privilege, which the table-test above covers
+// in isolation.
+func TestReadSysAdminCapFromProc(t *testing.T) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("/proc/self/status not available")
+	}
+	_ = readSysAdminCapFromProc()
 }
 
 func TestSpawnLongRunning(t *testing.T) {

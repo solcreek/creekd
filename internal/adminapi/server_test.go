@@ -36,6 +36,12 @@ func newTestServer(t *testing.T, token string) *testServer {
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0 // disable probe noise in API tests
+	// Same rationale as supervisor_test.go's newTestSupervisor:
+	// production-default 30s holds rm/stop tests through the full
+	// SIGTERM→SIGKILL escalation whenever fcb5def's auto-default
+	// puts the spawn under a fresh PID namespace.
+	sup.GracefulShutdownTimeout = 500 * time.Millisecond
+	sup.DisableDefaultSandbox = true
 	r := dispatch.NewRouter()
 	return &testServer{
 		srv:    New(sup, r, token),

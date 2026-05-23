@@ -28,6 +28,11 @@ func newTestStack(t *testing.T, token string) (*Client, *supervisor.Supervisor, 
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0
+	// See newTestSupervisor / newTestBackend for rationale: PID-1
+	// init quirk under fcb5def's default sandbox makes 30s SIGTERM
+	// waits the dominant cost of Stop in tests. 500ms is plenty.
+	sup.GracefulShutdownTimeout = 500 * time.Millisecond
+	sup.DisableDefaultSandbox = true
 
 	server := adminapi.New(sup, dispatch.NewRouter(), token)
 	httpSrv := httptest.NewServer(server.Handler())
