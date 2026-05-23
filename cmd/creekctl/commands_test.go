@@ -35,6 +35,12 @@ func newTestBackend(t *testing.T) (url string, sup *supervisor.Supervisor) {
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0
+	// Production default is 30s. Tests can't afford to wait that
+	// long for SIGTERM→SIGKILL when a spawned process ends up as
+	// PID 1 in its own PID namespace and silently drops SIGTERM —
+	// that happens whenever fcb5def's auto-default kicks in
+	// (Linux + root, e.g. the privileged Docker matrix in CI).
+	sup.GracefulShutdownTimeout = 500 * time.Millisecond
 
 	srv := adminapi.New(sup, dispatch.NewRouter(), "")
 	hs := httptest.NewServer(srv.Handler())

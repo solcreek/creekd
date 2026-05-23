@@ -40,6 +40,13 @@ func newTestSupervisor() *Supervisor {
 	sup.Stderr = io.Discard
 	sup.WaitDelay = 500 * time.Millisecond
 	sup.HealthCheckInterval = 0
+	// Short graceful-shutdown window so tests aren't held up by the
+	// production-default 30s SIGTERM→SIGKILL escalation. Matters most
+	// for processes that end up as PID 1 in a fresh PID namespace —
+	// PID 1 has no default signal handlers, so SIGTERM is silently
+	// dropped until SIGKILL fires. Individual tests that need a
+	// longer window override this after the helper returns.
+	sup.GracefulShutdownTimeout = 500 * time.Millisecond
 	return sup
 }
 
