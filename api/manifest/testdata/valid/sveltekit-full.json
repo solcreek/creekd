@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "framework": "sveltekit",
+  "target": "creekd",
+  "buildId": "2026-05-22T19-15-25-237Z",
+  "adapter": {
+    "name": "@solcreek/svelte-adapter",
+    "version": "0.3.0"
+  },
+  "hasPrerender": true,
+  "runtime": "node",
+  "entrypoint": "build/index.js",
+  "port": 3000,
+  "env": [
+    "NODE_ENV=production"
+  ],
+  "health_check_path": "/_creek/health",
+  "serveDirs": [
+    "build/client",
+    "build/prerendered"
+  ]
+}

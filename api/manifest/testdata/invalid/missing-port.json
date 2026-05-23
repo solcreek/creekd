@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "node",
+  "entrypoint": "server.js"
+}

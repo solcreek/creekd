@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "node",
+  "entrypoint": "/etc/passwd",
+  "port": 3000
+}

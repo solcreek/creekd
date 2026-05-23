@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "framework": "nextjs",
+  "target": "creekd",
+  "buildId": "test-build-id",
+  "nextVersion": "16.2.3",
+  "adapter": {
+    "name": "@solcreek/adapter-creekd",
+    "version": "0.1.0"
+  },
+  "hasMiddleware": false,
+  "hasPrerender": true,
+  "runtime": "bun",
+  "entrypoint": ".next/standalone/server.js",
+  "port": 3000,
+  "env": [
+    "NODE_ENV=production"
+  ],
+  "health_check_path": "/_creek/health",
+  "serveDirs": [
+    ".next/standalone"
+  ]
+}

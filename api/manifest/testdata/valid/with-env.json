@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "bun",
+  "entrypoint": "build/index.js",
+  "port": 3000,
+  "env": [
+    "NODE_ENV=production",
+    "FOO=bar"
+  ],
+  "health_check_path": "/_creek/health"
+}
