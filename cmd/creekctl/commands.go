@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/solcreek/creekd/api/manifest"
 	"github.com/solcreek/creekd/internal/adminapi"
 	"github.com/solcreek/creekd/internal/adminclient"
 )
@@ -379,11 +380,11 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 			HealthCheckPath: *healthPath,
 		}
 		if *fromPath != "" {
-			manifest, projectDir, err := loadManifest(*fromPath)
+			m, projectDir, err := manifest.Load(*fromPath)
 			if err != nil {
 				return err
 			}
-			applyManifestTo(&req, manifest, projectDir)
+			applyManifestTo(&req, m, projectDir)
 		}
 	}
 	if err := validateStringInputs(
@@ -467,11 +468,11 @@ func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
 			HealthCheckPath: *healthPath,
 		}
 		if *fromPath != "" {
-			manifest, projectDir, err := loadManifest(*fromPath)
+			m, projectDir, err := manifest.Load(*fromPath)
 			if err != nil {
 				return err
 			}
-			applyManifestTo(&req, manifest, projectDir)
+			applyManifestTo(&req, m, projectDir)
 		}
 	}
 	if err := validateStringInputs(
@@ -629,11 +630,11 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 			HealthCheckPath: *healthPath,
 		}
 		if *fromPath != "" {
-			manifest, projectDir, err := loadManifest(*fromPath)
+			m, projectDir, err := manifest.Load(*fromPath)
 			if err != nil {
 				return err
 			}
-			applyManifestToDeploy(&req, manifest, projectDir)
+			applyManifestToDeploy(&req, m, projectDir)
 		}
 	}
 	if err := validateStringInputs(
