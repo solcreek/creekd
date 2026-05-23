@@ -41,6 +41,7 @@ func newTestBackend(t *testing.T) (url string, sup *supervisor.Supervisor) {
 	// that happens whenever fcb5def's auto-default kicks in
 	// (Linux + root, e.g. the privileged Docker matrix in CI).
 	sup.GracefulShutdownTimeout = 500 * time.Millisecond
+	sup.DisableDefaultSandbox = true
 
 	srv := adminapi.New(sup, dispatch.NewRouter(), "")
 	hs := httptest.NewServer(srv.Handler())

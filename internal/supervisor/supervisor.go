@@ -493,6 +493,15 @@ type Supervisor struct {
 	// SIGKILL escalation. Default 30s for production; tests use shorter.
 	GracefulShutdownTimeout time.Duration
 
+	// DisableDefaultSandbox suppresses applyDefaultSandbox's auto-flip.
+	// Production never sets this; test harnesses do, because their
+	// spawned commands (sleep, true, hand-rolled HTTP servers) aren't
+	// init-aware and become unkillable as PID 1 in a fresh PID
+	// namespace. Callers that want sandboxing in tests pass an
+	// explicit Sandbox per-Config; this flag only short-circuits the
+	// secure-by-default policy.
+	DisableDefaultSandbox bool
+
 	// LogDir is the root directory for per-app log files (M5.6). When
 	// set, each app's stdout/stderr is captured through a logs.Rotator
 	// at <LogDir>/<appID>/current.log instead of being forwarded
@@ -1075,7 +1084,9 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		volumeRefs:      volumeIDs(cfg.VolumeMounts),
 		sup:             s,
 	}
-	applyDefaultSandbox(&cfg)
+	if !s.DisableDefaultSandbox {
+		applyDefaultSandbox(&cfg)
+	}
 
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller

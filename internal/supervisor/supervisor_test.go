@@ -47,6 +47,12 @@ func newTestSupervisor() *Supervisor {
 	// dropped until SIGKILL fires. Individual tests that need a
 	// longer window override this after the helper returns.
 	sup.GracefulShutdownTimeout = 500 * time.Millisecond
+	// Test commands (sleep, true, ad-hoc HTTP servers) aren't
+	// init-aware and become unkillable as PID 1 in a fresh PID
+	// namespace. Suppress the secure-by-default auto-flip; tests
+	// that actually verify sandbox behaviour pass an explicit
+	// Sandbox per-Config.
+	sup.DisableDefaultSandbox = true
 	return sup
 }
 
