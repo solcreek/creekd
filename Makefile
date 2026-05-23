@@ -9,6 +9,15 @@ GO ?= go
 DOCKER ?= docker
 DOCKER_IMAGE_TAG ?= creekd-test:dev
 
+OAPI_CODEGEN ?= $(shell go env GOPATH)/bin/oapi-codegen
+
+# generate runs oapi-codegen to produce Go types + server interface
+# from the OpenAPI spec. Re-run after editing api/openapi.yaml.
+.PHONY: generate
+generate:
+	cd api && $(OAPI_CODEGEN) --config cfg/types.yaml openapi.yaml
+	cd api && $(OAPI_CODEGEN) --config cfg/server.yaml openapi.yaml
+
 # build produces the production binary (no sandbox/lima code).
 # Use build-dev for the full binary with sandbox support.
 .PHONY: build
