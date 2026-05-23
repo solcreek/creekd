@@ -1,10 +1,8 @@
 package main
 
-// Manifest-aware seeding helpers for creekctl's up/ensure/deploy.
-// The CreekdManifest type, its file loader, and the entrypoint
-// security validator live in github.com/solcreek/creekd/api/manifest
-// — this file only knows how to fold a parsed manifest into the
-// admin API request types that creekctl already builds.
+// Manifest-aware seeding helpers for creekctl's up/ensure/deploy:
+// fold a parsed manifest into the admin API request types,
+// preserving CLI-flag precedence.
 
 import (
 	"path/filepath"

@@ -90,7 +90,7 @@ validateCreekdDeployManifest({
 
 This applies recursively: the `adapter` object is also strict (only `name` and `version` are accepted).
 
-**The contract is meant to evolve additively** — new optional fields can be added to v1 without breaking older adapters (they simply won't write them) or older readers (they'll … wait, no — older readers WILL reject manifests with the new field under strict mode). Forward-compatibility for new fields is a coordinated upgrade: bump creekd first, then adapters.
+**Adding new top-level fields requires a coordinated rollout.** Under strict mode, an older `creekd` rejects manifests that contain a field it doesn't know about, so the order is: bump `creekd` to a version that recognises the new field, then bump adapters to a `@solcreek/creekd-manifest` version that writes it. The reverse order leaves a window where adapters produce manifests `creekd` refuses to load.
 
 If you need to attach truly adapter-private extension data, the recommended approach is to put it elsewhere (a separate file in `.creek-creekd/`, environment variables, etc.) until a future `metadata: Record<string, unknown>` extension slot is added to v1.
 

@@ -25,7 +25,7 @@ jobs:
     outputs:
       manifest: ${{ steps.filter.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -42,13 +42,15 @@ jobs:
     if: needs.detect-changes.outputs.manifest == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache: true
       - name: Test api/manifest package
-        run: go test -race -count=1 ./api/manifest/...
+        # No -race: api/manifest has no goroutines. Skip the
+        # instrumented build that would only slow us down.
+        run: go test -count=1 ./api/manifest/...
 
   ts-roundtrip:
     needs: detect-changes
@@ -58,7 +60,7 @@ jobs:
       run:
         working-directory: packages/creekd-manifest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
         with:
           # Repo root has no package.json (creekd is a Go repo); point

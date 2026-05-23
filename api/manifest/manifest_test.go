@@ -201,10 +201,11 @@ func TestLoadRejectsUnknownTopLevelField(t *testing.T) {
 	}
 }
 
-// TestLoadParsesExtensionFields confirms the surface fields beyond
-// the minimum (adapter, hasPrerender, serveDirs, etc.) are actually
-// captured into the struct — previously these were silently dropped
-// under lenient parsing, which is now visible.
+// TestLoadParsesExtensionFields asserts that the surface fields
+// beyond the required minimum — adapter / hasPrerender / serveDirs /
+// nextVersion / buildId — get captured into the struct rather than
+// passed through opaquely. Together with strict-mode rejection of
+// unknown keys, this pins the canonical contract.
 func TestLoadParsesExtensionFields(t *testing.T) {
 	mp, _ := writeManifest(t, goodManifest)
 	m, _, err := Load(mp)
