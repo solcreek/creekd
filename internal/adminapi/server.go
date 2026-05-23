@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"strings"
+	"time"
 
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/state"
@@ -21,7 +22,8 @@ type Server struct {
 	sup    *supervisor.Supervisor
 	router *dispatch.Router
 	token  string
-	store  *state.Store // optional; set via SetStore to enable persistence
+	store  *state.Store   // optional; set via SetStore to enable persistence
+	audit  *AuditLogger   // optional; set via SetAuditLogger to enable audit logging
 
 	mux *http.ServeMux
 }
@@ -32,6 +34,10 @@ type Server struct {
 // disables persistence (the default; only safe for ephemeral test
 // runs).
 func (s *Server) SetStore(st *state.Store) { s.store = st }
+
+// SetAuditLogger enables structured audit logging for all mutating
+// API operations (spawn, stop, deploy, restart, reset).
+func (s *Server) SetAuditLogger(a *AuditLogger) { s.audit = a }
 
 // New returns a Server backed by sup. dispatchRouter, when non-nil,
 // is updated on spawn/stop so that registered apps are reachable
@@ -126,8 +132,38 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
+
+		// Audit mutating operations
+		if s.audit != nil && isMutating(r.Method) {
+			start := time.Now()
+			aw := &auditResponseWriter{ResponseWriter: w, statusCode: 200}
+			h(aw, r)
+			s.audit.Log(AuditEntry{
+				Timestamp:  start.UTC().Format(time.RFC3339),
+				Method:     r.Method,
+				Path:       r.URL.Path,
+				AppID:      extractAppID(r.URL.Path),
+				Action:     actionFromRequest(r.Method, r.URL.Path),
+				Actor:      hashToken(s.extractToken(r)),
+				StatusCode: aw.statusCode,
+				DurationMS: time.Since(start).Milliseconds(),
+				SourceIP:   r.RemoteAddr,
+			})
+			return
+		}
+
 		h(w, r)
 	}
+}
+
+// extractToken returns the raw bearer token from the request (for hashing).
+func (s *Server) extractToken(r *http.Request) string {
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if strings.HasPrefix(got, prefix) {
+		return got[len(prefix):]
+	}
+	return ""
 }
 
 // checkBearer returns true if the Authorization header carries the

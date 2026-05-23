@@ -209,6 +209,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if store != nil {
 		adminServer.SetStore(store)
 	}
+	// Audit log: structured NDJSON of all mutating admin API operations.
+	// Stored alongside state in CREEKD_STATE_DIR/audit/audit.log.
+	if dir := os.Getenv("CREEKD_STATE_DIR"); dir != "" {
+		auditLogger, auditErr := adminapi.NewAuditLogger(filepath.Join(dir, "audit"))
+		if auditErr != nil {
+			logger.Warn("audit log disabled", "err", auditErr)
+		} else {
+			adminServer.SetAuditLogger(auditLogger)
+			defer auditLogger.Close()
+			logger.Info("audit log enabled", "dir", filepath.Join(dir, "audit"))
+		}
+	}
 	adminServer.SetMetricsHandler(m.Handler())
 	if os.Getenv("CREEKD_DEBUG_PPROF") == "1" {
 		adminServer.EnablePprof()
