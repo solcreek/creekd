@@ -1028,15 +1028,25 @@ var hasSysAdminCap = readSysAdminCapFromProc
 // versions since the cap was defined.
 const capSysAdminBit = 21
 
-// readSysAdminCapFromProc parses /proc/self/status's CapEff line and
-// reports whether the CAP_SYS_ADMIN bit is set. Any read or parse
-// failure returns false — refusing to apply default isolation is
-// always safer than applying it where it won't work.
+// readSysAdminCapFromProc reads /proc/self/status and delegates to
+// parseSysAdminCap. A read failure returns false — refusing to apply
+// default isolation is always safer than applying it where it won't
+// work. Linux-only path; non-Linux callers shouldn't reach here
+// (canApplyDefaultSandbox gates on runtimeIsLinux first).
 func readSysAdminCapFromProc() bool {
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
 		return false
 	}
+	return parseSysAdminCap(data)
+}
+
+// parseSysAdminCap is the platform-independent core: scan the
+// /proc/self/status text for a CapEff line and check bit 21 of the
+// hex bitmask. Malformed or missing CapEff returns false. Extracted
+// so the parser can be table-tested on any OS without needing the
+// real /proc filesystem.
+func parseSysAdminCap(data []byte) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		rest, ok := strings.CutPrefix(line, "CapEff:")
 		if !ok {

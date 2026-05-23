@@ -197,11 +197,73 @@ func TestApplyDefaultSandbox(t *testing.T) {
 	})
 }
 
-// TestReadSysAdminCapFromProc is a smoke test for the /proc/self/status
-// parser. We can't assert TRUE or FALSE (depends on test runner
-// privilege), but we can confirm the function runs without panicking
-// and the parser handles the format the kernel emits. Skipped on
-// non-Linux where /proc/self/status doesn't exist.
+// TestParseSysAdminCap covers the pure /proc/self/status parser
+// directly. CAP_SYS_ADMIN is the security gate for default sandbox
+// application, so the table runs on any OS without depending on
+// the test runner's actual privileges.
+func TestParseSysAdminCap(t *testing.T) {
+	const header = "Name:\tsupervisor\nState:\tR (running)\n"
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "all caps cleared",
+			body: header + "CapEff:\t0000000000000000\n",
+			want: false,
+		},
+		{
+			name: "only CAP_SYS_ADMIN set (bit 21)",
+			body: header + "CapEff:\t0000000000200000\n",
+			want: true,
+		},
+		{
+			name: "full cap set (root in privileged container)",
+			body: header + "CapEff:\t000001ffffffffff\n",
+			want: true,
+		},
+		{
+			name: "CapEff present but CAP_SYS_ADMIN cleared (CAP_NET_ADMIN bit 12 only)",
+			body: header + "CapEff:\t0000000000001000\n",
+			want: false,
+		},
+		{
+			name: "leading/trailing whitespace tolerated",
+			body: header + "CapEff:   \t  0000000000200000  \n",
+			want: true,
+		},
+		{
+			name: "no CapEff line",
+			body: header + "Uid:\t1000\n",
+			want: false,
+		},
+		{
+			name: "malformed hex",
+			body: header + "CapEff:\tnot-a-number\n",
+			want: false,
+		},
+		{
+			name: "empty input",
+			body: "",
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseSysAdminCap([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("parseSysAdminCap = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestReadSysAdminCapFromProc is a smoke test against the real
+// /proc/self/status (where it exists). Asserts only that the
+// function returns without panicking — true vs false depends on
+// the test runner's privilege, which the table-test above covers
+// in isolation.
 func TestReadSysAdminCapFromProc(t *testing.T) {
 	if _, err := os.Stat("/proc/self/status"); err != nil {
 		t.Skip("/proc/self/status not available")
