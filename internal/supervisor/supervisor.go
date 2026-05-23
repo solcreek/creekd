@@ -49,6 +49,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -894,6 +895,24 @@ func New(logger *slog.Logger) *Supervisor {
 // computeBackoff returns the delay before the (count+1)-th restart.
 // count is the number of restarts already in this window.
 // Sequence (with default settings): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
+// filterSupervisorEnv removes CREEKD_* and CREEKCTL_* env vars from
+// the parent's environment before passing to child processes. Prevents
+// admin tokens and internal config from leaking to tenant apps.
+func filterSupervisorEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		key := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			key = kv[:i]
+		}
+		if strings.HasPrefix(key, "CREEKD_") || strings.HasPrefix(key, "CREEKCTL_") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	return filtered
+}
+
 func (s *Supervisor) computeBackoff(count int) time.Duration {
 	if count <= 0 {
 		return s.InitialBackoff
@@ -1165,7 +1184,8 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 		}, origArgs[1:]...)...)
 	}
 
-	env := append(os.Environ(), fmt.Sprintf("PORT=%d", app.Port))
+	env := filterSupervisorEnv(os.Environ())
+	env = append(env, fmt.Sprintf("PORT=%d", app.Port))
 	if len(extraEnv) > 0 {
 		env = append(env, extraEnv...)
 	}
