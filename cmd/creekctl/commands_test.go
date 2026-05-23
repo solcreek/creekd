@@ -1152,3 +1152,97 @@ func TestRMDryRun(t *testing.T) {
 		t.Error("app was removed despite --dry-run")
 	}
 }
+
+// --- release phase tests -------------------------------------------
+
+func TestReleaseOutputStruct(t *testing.T) {
+	r := releaseOutput{
+		Command:    "bun run db:migrate",
+		ExitCode:   0,
+		DurationMS: 123,
+		Output:     "Migration complete.",
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["command"] != "bun run db:migrate" {
+		t.Errorf("command = %v", got["command"])
+	}
+	if got["exit_code"].(float64) != 0 {
+		t.Errorf("exit_code = %v", got["exit_code"])
+	}
+}
+
+func TestRunReleaseSuccess(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"rel-ok", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("rel-ok") })
+
+	cf := commonFlags{server: url}
+	result, err := runRelease(context.Background(), cf, "rel-ok", "echo hello", 10)
+	if err != nil {
+		t.Fatalf("runRelease: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.Output, "hello") {
+		t.Errorf("Output = %q, want to contain 'hello'", result.Output)
+	}
+}
+
+func TestRunReleaseFailure(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"rel-fail", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("rel-fail") })
+
+	cf := commonFlags{server: url}
+	result, err := runRelease(context.Background(), cf, "rel-fail", "exit 1", 10)
+	if err == nil {
+		t.Fatal("expected error for failing release")
+	}
+	if result.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", result.ExitCode)
+	}
+}
+
+func TestRunReleaseTimeout(t *testing.T) {
+	url, sup := newTestBackend(t)
+	port := freeTCPPort(t)
+	if _, err := runSub(t, "up", []string{
+		"rel-to", "--server", url,
+		"--command", "sleep", "--arg", "30", "--port", strconv.Itoa(port),
+	}); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	t.Cleanup(func() { _ = sup.Stop("rel-to") })
+
+	cf := commonFlags{server: url}
+	result, err := runRelease(context.Background(), cf, "rel-to", "sleep 30", 1)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want to contain 'timed out'", err.Error())
+	}
+	if result.ExitCode != -1 {
+		t.Errorf("ExitCode = %d, want -1 (timeout)", result.ExitCode)
+	}
+}

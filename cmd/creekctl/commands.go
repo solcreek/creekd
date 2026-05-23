@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/solcreek/creekd/internal/adminapi"
 	"github.com/solcreek/creekd/internal/adminclient"
@@ -588,17 +589,19 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	var sf sandboxFlags
 	sf.register(fs)
 	var (
-		command    = fs.String("command", "", "executable to run (explicit mode)")
-		entry      = fs.String("entry", "", "entry script (with --runtime)")
-		runtimeArg = fs.String("runtime", "", "bun|node|deno")
-		port       = fs.Int("port", 0, "v2 port (must differ from v1's)")
-		fromPath   = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
-		healthPath = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
-		jsonInput  = fs.String("json-input", "", "raw DeployRequest JSON (agent-facing; overrides individual flags)")
-		args       stringSliceFlag
-		env        stringSliceFlag
-		readyMS    = fs.Int64("ready-timeout-ms", 0, "max wait for v2 to be healthy")
-		netIso     = fs.Bool("net-isolation", false, "spawn v2 inside a netns")
+		command        = fs.String("command", "", "executable to run (explicit mode)")
+		entry          = fs.String("entry", "", "entry script (with --runtime)")
+		runtimeArg     = fs.String("runtime", "", "bun|node|deno")
+		port           = fs.Int("port", 0, "v2 port (must differ from v1's)")
+		fromPath       = fs.String("from", "", "path to a .creek-creekd/manifest.json (seeds runtime/entry/port; CLI flags override)")
+		healthPath     = fs.String("health-path", "", "HTTP path for the periodic liveness probe (default \"/\"; set to e.g. \"/healthz\" for strict readiness)")
+		jsonInput      = fs.String("json-input", "", "raw DeployRequest JSON (agent-facing; overrides individual flags)")
+		releaseCmd     = fs.String("release", "", "command to run after v2 is healthy but before traffic swap (e.g., db migration)")
+		releaseTimeout = fs.Int("release-timeout", 60, "release command timeout in seconds")
+		args           stringSliceFlag
+		env            stringSliceFlag
+		readyMS        = fs.Int64("ready-timeout-ms", 0, "max wait for v2 to be healthy")
+		netIso         = fs.Bool("net-isolation", false, "spawn v2 inside a netns")
 	)
 	fs.Var(&args, "arg", "argument (repeat for multiple)")
 	fs.Var(&env, "env", "environment KEY=VAL (repeat for multiple)")
@@ -652,10 +655,93 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Release phase: run command after v2 is healthy, before caller
+	// considers deploy "done". Failure is reported but does NOT
+	// auto-rollback — the blue-green swap already happened inside
+	// supervisor.Deploy. Rollback requires a separate creekctl deploy
+	// with the old config. This matches Heroku's behavior where
+	// release failures are reported but the release is already live.
+	var releaseResult *releaseOutput
+	if *releaseCmd != "" {
+		releaseResult, err = runRelease(ctx, cf, id, *releaseCmd, *releaseTimeout)
+		if err != nil {
+			if cf.json {
+				return writeJSON(w, map[string]any{
+					"app":     app,
+					"release": releaseResult,
+					"error":   "release_failed",
+				})
+			}
+			fmt.Fprintf(w, "⚠ Release command failed: %v\n", err)
+			fmt.Fprintf(w, "  The deploy completed but the release command did not succeed.\n")
+			fmt.Fprintf(w, "  Rollback with: creekctl deploy %s ...(previous config)\n", id)
+			return writeAppDetail(w, app)
+		}
+	}
+
 	if cf.json {
+		if releaseResult != nil {
+			return writeJSON(w, map[string]any{
+				"app":     app,
+				"release": releaseResult,
+			})
+		}
 		return writeJSON(w, app)
 	}
+	if releaseResult != nil {
+		fmt.Fprintf(w, "✓ Release: %s (%dms)\n\n", releaseResult.Command, releaseResult.DurationMS)
+	}
 	return writeAppDetail(w, app)
+}
+
+type releaseOutput struct {
+	Command    string `json:"command"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMS int64  `json:"duration_ms"`
+	Output     string `json:"output,omitempty"`
+}
+
+func runRelease(ctx context.Context, cf commonFlags, appID, command string, timeoutSec int) (*releaseOutput, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", command)
+
+	// Inherit app env vars via creekctl exec-style injection
+	client := cf.client()
+	app, err := client.Get(ctx, appID)
+	if err != nil {
+		return nil, fmt.Errorf("release: cannot get app env: %w", err)
+	}
+	cmd.Env = append(os.Environ(), app.Env...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", app.Port))
+
+	out, err := cmd.CombinedOutput()
+	duration := time.Since(start).Milliseconds()
+
+	result := &releaseOutput{
+		Command:    command,
+		DurationMS: duration,
+		Output:     strings.TrimSpace(string(out)),
+	}
+
+	if err != nil {
+		if timeoutCtx.Err() != nil {
+			result.ExitCode = -1
+			return result, fmt.Errorf("release: timed out after %ds", timeoutSec)
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			result.ExitCode = exitErr.ExitCode()
+		} else {
+			result.ExitCode = -1
+		}
+		return result, fmt.Errorf("release: exit %d: %s", result.ExitCode, result.Output)
+	}
+
+	result.ExitCode = 0
+	return result, nil
 }
 
 // --- logs ---------------------------------------------------------
