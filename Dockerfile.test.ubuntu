@@ -17,6 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iptables \
         util-linux \
         git \
+        gcc \
+        libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
