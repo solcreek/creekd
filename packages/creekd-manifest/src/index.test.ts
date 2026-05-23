@@ -3,6 +3,9 @@
 // lives in src/corpus.test.ts.
 
 import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   isCreekdDeployManifest,
@@ -11,20 +14,26 @@ import {
   type CreekdDeployManifest,
 } from "./index.js";
 
-const goodManifest: CreekdDeployManifest = {
-  version: 1,
-  framework: "nextjs",
-  target: "creekd",
-  buildId: "test-build",
-  nextVersion: "16.2.3",
-  adapter: { name: "@solcreek/adapter-creekd", version: "0.1.0" },
-  hasMiddleware: false,
-  hasPrerender: true,
-  runtime: "bun",
-  entrypoint: ".next/standalone/server.js",
-  port: 18900,
-  serveDirs: [".next/standalone"],
-};
+// Same shared fixture the cross-language corpus uses. Loaded from
+// api/manifest/testdata/valid/nextjs-full.json so updates to the
+// canonical "full valid manifest" flow through unit tests too.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const goodManifest: CreekdDeployManifest = JSON.parse(
+  fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "..",
+      "..",
+      "..",
+      "api",
+      "manifest",
+      "testdata",
+      "valid",
+      "nextjs-full.json",
+    ),
+    "utf8",
+  ),
+);
 
 describe("isCreekdRuntime", () => {
   it.each(["bun", "node", "deno"])("accepts %s", (r) => {
@@ -42,7 +51,7 @@ describe("validateCreekdDeployManifest happy path", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.manifest.runtime).toBe("bun");
-      expect(result.manifest.port).toBe(18900);
+      expect(result.manifest.port).toBe(3000);
     }
   });
 

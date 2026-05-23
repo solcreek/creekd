@@ -23,20 +23,17 @@ func writeManifest(t *testing.T, body string) (manifestPath, projectDir string) 
 	return manifestPath, projectDir
 }
 
-const goodManifest = `{
-  "version": 1,
-  "framework": "nextjs",
-  "target": "creekd",
-  "buildId": "test-build",
-  "nextVersion": "16.2.3",
-  "adapter": {"name": "@solcreek/adapter-creekd", "version": "0.1.0"},
-  "hasMiddleware": false,
-  "hasPrerender": true,
-  "runtime": "bun",
-  "entrypoint": ".next/standalone/server.js",
-  "port": 18900,
-  "serveDirs": [".next/standalone"]
-}`
+// goodManifest is the same fixture the cross-language corpus uses,
+// loaded from testdata/valid/nextjs-full.json so updates to the
+// fixture flow through unit tests too. Tests that need a mutated
+// variant strings.Replace specific tokens in this base.
+var goodManifest = func() string {
+	body, err := corpusFS.ReadFile("testdata/valid/nextjs-full.json")
+	if err != nil {
+		panic("corpus_test embed missing nextjs-full.json: " + err.Error())
+	}
+	return string(body)
+}()
 
 func TestLoadHappy(t *testing.T) {
 	mp, projectDir := writeManifest(t, goodManifest)
@@ -56,8 +53,8 @@ func TestLoadHappy(t *testing.T) {
 	if m.Entrypoint != ".next/standalone/server.js" {
 		t.Errorf("Entrypoint = %q", m.Entrypoint)
 	}
-	if m.Port != 18900 {
-		t.Errorf("Port = %d, want 18900", m.Port)
+	if m.Port != 3000 {
+		t.Errorf("Port = %d, want 3000", m.Port)
 	}
 }
 
@@ -106,7 +103,7 @@ func TestLoadAllowsNonNextFrameworkMetadata(t *testing.T) {
 }
 
 func TestLoadRejectsPortOutOfRange(t *testing.T) {
-	body := strings.Replace(goodManifest, `"port": 18900`, `"port": 70000`, 1)
+	body := strings.Replace(goodManifest, `"port": 3000`, `"port": 70000`, 1)
 	mp, _ := writeManifest(t, body)
 	_, _, err := Load(mp)
 	if err == nil || !strings.Contains(err.Error(), "out of range") {
@@ -235,7 +232,7 @@ func TestLoadParsesExtensionFields(t *testing.T) {
 	if m.NextVersion != "16.2.3" {
 		t.Errorf("NextVersion = %q", m.NextVersion)
 	}
-	if m.BuildID != "test-build" {
+	if m.BuildID != "test-build-id" {
 		t.Errorf("BuildID = %q", m.BuildID)
 	}
 }
