@@ -82,15 +82,15 @@ func eventuallyTrue(timeout time.Duration, f func() bool) bool {
 // platform plumbing that follows.
 func TestApplyDefaultSandbox(t *testing.T) {
 	origGOOS := goos
-	origGeteuid := geteuid
+	origHasCap := hasSysAdminCap
 	t.Cleanup(func() {
 		goos = origGOOS
-		geteuid = origGeteuid
+		hasSysAdminCap = origHasCap
 	})
 
-	t.Run("Linux non-root: no Sandbox stays nil", func(t *testing.T) {
+	t.Run("Linux without CAP_SYS_ADMIN: no Sandbox stays nil", func(t *testing.T) {
 		goos = "linux"
-		geteuid = func() int { return 1000 }
+		hasSysAdminCap = func() bool { return false }
 		cfg := Config{ID: "x", Command: "sleep"}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox != nil {
@@ -98,9 +98,9 @@ func TestApplyDefaultSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("Linux non-root: zero Sandbox stays empty", func(t *testing.T) {
+	t.Run("Linux without CAP_SYS_ADMIN: zero Sandbox stays empty", func(t *testing.T) {
 		goos = "linux"
-		geteuid = func() int { return 1000 }
+		hasSysAdminCap = func() bool { return false }
 		cfg := Config{ID: "x", Command: "sleep", Sandbox: &sandbox.Spec{}}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox == nil || cfg.Sandbox.Any() {
@@ -108,9 +108,14 @@ func TestApplyDefaultSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("Linux non-root + VolumeMounts: stateful defaults still apply", func(t *testing.T) {
+	t.Run("Linux without CAP_SYS_ADMIN + VolumeMounts: legacy stateful default applies", func(t *testing.T) {
+		// Preserves pre-fcb5def behaviour: a stateful spawn without
+		// the capability to enforce isolation still gets the defaults
+		// flipped on. The clone(CLONE_NEWPID) downstream will EPERM
+		// at spawn time, which is the honest failure — better than
+		// silently spawning a stateful app with host /proc visibility.
 		goos = "linux"
-		geteuid = func() int { return 1000 }
+		hasSysAdminCap = func() bool { return false }
 		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox == nil {
@@ -121,9 +126,9 @@ func TestApplyDefaultSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("Linux root: PID + NoNewPrivs default for stateless app", func(t *testing.T) {
+	t.Run("Linux with CAP_SYS_ADMIN: PID + NoNewPrivs for stateless app", func(t *testing.T) {
 		goos = "linux"
-		geteuid = func() int { return 0 }
+		hasSysAdminCap = func() bool { return true }
 		cfg := Config{ID: "x", Command: "sleep"}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox == nil {
@@ -137,9 +142,9 @@ func TestApplyDefaultSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("Linux root + VolumeMounts: full isolation default", func(t *testing.T) {
+	t.Run("Linux with CAP_SYS_ADMIN + VolumeMounts: full isolation default", func(t *testing.T) {
 		goos = "linux"
-		geteuid = func() int { return 0 }
+		hasSysAdminCap = func() bool { return true }
 		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox == nil ||
@@ -150,7 +155,7 @@ func TestApplyDefaultSandbox(t *testing.T) {
 
 	t.Run("explicit Sandbox with any field true skips auto-flip", func(t *testing.T) {
 		goos = "linux"
-		geteuid = func() int { return 0 }
+		hasSysAdminCap = func() bool { return true }
 		cfg := Config{
 			ID:      "x",
 			Command: "sleep",
@@ -165,15 +170,27 @@ func TestApplyDefaultSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("non-Linux: stateless apps never get defaults even as root", func(t *testing.T) {
+	t.Run("non-Linux: stateless apps never get defaults", func(t *testing.T) {
 		goos = "darwin"
-		geteuid = func() int { return 0 }
+		hasSysAdminCap = func() bool { return true } // shouldn't be consulted
 		cfg := Config{ID: "x", Command: "sleep"}
 		applyDefaultSandbox(&cfg)
 		if cfg.Sandbox != nil {
 			t.Errorf("Sandbox = %+v, want nil on non-Linux", cfg.Sandbox)
 		}
 	})
+}
+
+// TestReadSysAdminCapFromProc is a smoke test for the /proc/self/status
+// parser. We can't assert TRUE or FALSE (depends on test runner
+// privilege), but we can confirm the function runs without panicking
+// and the parser handles the format the kernel emits. Skipped on
+// non-Linux where /proc/self/status doesn't exist.
+func TestReadSysAdminCapFromProc(t *testing.T) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("/proc/self/status not available")
+	}
+	_ = readSysAdminCapFromProc()
 }
 
 func TestSpawnLongRunning(t *testing.T) {

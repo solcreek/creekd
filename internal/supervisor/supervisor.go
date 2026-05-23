@@ -50,6 +50,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -973,29 +974,62 @@ func applyDefaultSandbox(cfg *Config) {
 // default sandbox (PID namespace via CLONE_NEWPID, NoNewPrivs via
 // the setpriv wrapper which itself runs under our clone).
 //
-// We default isolation ON for the production scenario (creekd
-// running as root on Linux — the only place it can manage cgroups,
-// netns, and the full sandbox surface anyway). For everything else
-// — dev on macOS, CI on a non-privileged runner, integration tests
-// that spawn a real creekd as the test user — we skip the defaults
-// rather than try to apply them and fail at clone time with a
-// "fork/exec /usr/bin/setpriv: operation not permitted" that
-// misleadingly blames setpriv when the actual failure is
-// CLONE_NEWPID rejected for lack of CAP_SYS_ADMIN.
+// We test for CAP_SYS_ADMIN in the effective set rather than
+// euid == 0 because the relationship between root and capabilities
+// has diverged on modern Linux:
 //
-// Callers who want defaults applied in an unprivileged context
-// (e.g. with user namespaces) should pass an explicit Sandbox.
+//   - Root in an unprivileged Docker container has a bounded
+//     capability set; clone(CLONE_NEWPID) still EPERMs.
+//   - A systemd unit can drop caps via CapabilityBoundingSet=
+//     while keeping User=root, with the same failure mode.
+//   - A non-root process with file caps granting CAP_SYS_ADMIN
+//     could (rare but valid) run the sandbox successfully.
+//
+// /proc/self/status's CapEff line gives us the actual effective
+// set the kernel will check at clone() time. Falling back to
+// "no defaults" when we can't read the cap set is the safe
+// behaviour: spawn proceeds without isolation rather than failing
+// with a confusing setpriv error.
 func canApplyDefaultSandbox() bool {
 	if !runtimeIsLinux() {
 		return false
 	}
-	return geteuid() == 0
+	return hasSysAdminCap()
 }
 
 var goos = goruntime.GOOS
 
-// geteuid is overridable for tests. Default delegates to os.Geteuid.
-var geteuid = func() int { return os.Geteuid() }
+// hasSysAdminCap reports whether the current process has CAP_SYS_ADMIN
+// in its effective capability set. Overridable for tests.
+var hasSysAdminCap = readSysAdminCapFromProc
+
+// capSysAdminBit is bit 21 of the capability bitmask, per
+// <linux/capability.h>'s CAP_SYS_ADMIN = 21. Stable across kernel
+// versions since the cap was defined.
+const capSysAdminBit = 21
+
+// readSysAdminCapFromProc parses /proc/self/status's CapEff line and
+// reports whether the CAP_SYS_ADMIN bit is set. Any read or parse
+// failure returns false — refusing to apply default isolation is
+// always safer than applying it where it won't work.
+func readSysAdminCapFromProc() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		caps, err := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+		if err != nil {
+			return false
+		}
+		return caps&(1<<capSysAdminBit) != 0
+	}
+	return false
+}
 
 // filterSupervisorEnv removes CREEKD_* and CREEKCTL_* env vars from
 // the parent's environment before passing to child processes. Prevents
