@@ -68,14 +68,34 @@ bench-cpu:
 # --privileged + cgroupns=host gives the test code unrestricted
 # /sys/fs/cgroup access; without these, sub-cgroup creation fails
 # with EACCES and the cgroup tests skip themselves rather than fail.
+# DISTRO selects which Dockerfile to use for Linux tests.
+# Default: Debian bookworm (Dockerfile.test).
+# Override: make test-linux DISTRO=ubuntu
+DISTRO ?= debian
+
 .PHONY: test-linux
 test-linux:
+ifeq ($(DISTRO),ubuntu)
+	$(DOCKER) build -f Dockerfile.test.ubuntu -t $(DOCKER_IMAGE_TAG)-ubuntu .
+	$(DOCKER) run --rm \
+		--privileged \
+		--cgroupns=host \
+		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+		$(DOCKER_IMAGE_TAG)-ubuntu
+else
 	$(DOCKER) build -f Dockerfile.test -t $(DOCKER_IMAGE_TAG) .
 	$(DOCKER) run --rm \
 		--privileged \
 		--cgroupns=host \
 		-v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 		$(DOCKER_IMAGE_TAG)
+endif
+
+# test-linux-matrix runs privileged tests on both Debian and Ubuntu.
+.PHONY: test-linux-matrix
+test-linux-matrix:
+	$(MAKE) test-linux DISTRO=debian
+	$(MAKE) test-linux DISTRO=ubuntu
 
 # test-cgroup runs just the M5.5 cgroup-related suites — faster
 # feedback than the full test-linux when iterating on cgroup code.

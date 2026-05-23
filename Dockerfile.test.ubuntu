@@ -1,0 +1,28 @@
+# Ubuntu 24.04 test runner for distro matrix testing.
+# Same structure as Dockerfile.test (Debian bookworm) but on Ubuntu Noble.
+
+FROM golang:1.26-bookworm AS builder
+
+FROM ubuntu:24.04
+
+# Install Go from builder stage
+COPY --from=builder /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        coreutils \
+        busybox-static \
+        iproute2 \
+        iptables \
+        util-linux \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY go.mod go.sum* ./
+RUN go mod download
+COPY . .
+
+ENV GOFLAGS=-buildvcs=false
+CMD ["go", "test", "-race", "-count=1", "-timeout", "300s", "./..."]

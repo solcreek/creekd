@@ -33,16 +33,16 @@ jobs:
         run: go test -race -count=1 -timeout 180s ./...
 
   test-linux-privileged:
-    name: test-linux (privileged docker)
+    name: test-linux (${{ matrix.distro }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, ubuntu]
     steps:
       - uses: actions/checkout@v6
-      - name: make test-linux
-        # Builds Dockerfile.test (busybox-static, iproute2, iptables,
-        # util-linux's setpriv) and runs the full suite inside a
-        # --privileged container with cgroupfs rw — the only way the
-        # M5.5 cgroup / netns / sandbox integration tests actually run.
-        run: make test-linux
+      - name: make test-linux (DISTRO=${{ matrix.distro }})
+        run: make test-linux DISTRO=${{ matrix.distro }}
 
   bench:
     name: bench (smoke)
