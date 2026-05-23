@@ -915,9 +915,6 @@ func New(logger *slog.Logger) *Supervisor {
 	}
 }
 
-// computeBackoff returns the delay before the (count+1)-th restart.
-// count is the number of restarts already in this window.
-// Sequence (with default settings): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
 // runtimeIsLinux reports whether we're on Linux (where namespace
 // isolation actually works). On macOS/Windows, sandbox.Apply returns
 // ErrUnsupported, so we skip default isolation to avoid breaking dev.
@@ -1079,6 +1076,9 @@ func filterSupervisorEnv(env []string) []string {
 	return filtered
 }
 
+// computeBackoff returns the delay before the (count+1)-th restart.
+// count is the number of restarts already in this window. Sequence
+// with default settings: 1s, 2s, 4s, 8s, 16s, 30s, 30s, ...
 func (s *Supervisor) computeBackoff(count int) time.Duration {
 	if count <= 0 {
 		return s.InitialBackoff
