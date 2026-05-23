@@ -7,10 +7,24 @@
 // process fields here. Framework-specific metadata is preserved as
 // optional informational fields that creekd treats as opaque.
 //
-// This package is the **canonical Go side of the contract**. The
-// matching TypeScript types live at packages/creekd-manifest/ under
-// the same repo so the two languages can't drift; CI runs the same
-// testdata corpus through both validators.
+// # Audience
+//
+// This package is the **canonical Go side of the contract**.
+// External consumers (deployment adapters) read and write manifests
+// through the npm package @solcreek/creekd-manifest at
+// packages/creekd-manifest/; Go consumption is scoped to creekd's
+// own internal binaries (creekctl, creekd). For this reason the
+// Manifest.Runtime field uses internal/runtime.Runtime — the
+// canonical creekd runtime enum — even though api/manifest itself
+// lives under api/. A future external Go consumer would need
+// either a public api/runtime package or a locally-redefined
+// manifest.Runtime; the contract corpus and CI already pin the
+// over-the-wire string values ("bun"/"node"/"deno") so a later
+// type-level refactor is wire-compatible.
+//
+// The matching TypeScript types live at packages/creekd-manifest/
+// so the two languages can't drift; CI runs the same testdata
+// corpus through both validators.
 package manifest
 
 import (
