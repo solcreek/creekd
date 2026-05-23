@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/solcreek/creekd/internal/sandbox"
+
 	"github.com/solcreek/creekd/internal/cgroup"
 	runtimePkg "github.com/solcreek/creekd/internal/runtime"
 )
@@ -52,6 +54,113 @@ func eventuallyTrue(timeout time.Duration, f func() bool) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return f()
+}
+
+// TestApplyDefaultSandbox guards the privilege-gated default policy.
+// On a non-root caller the supervisor must NOT auto-default
+// PIDNamespace/NoNewPrivs — the resulting clone(CLONE_NEWPID) would
+// fail with EPERM at run time (no CAP_SYS_ADMIN). On a root caller
+// the defaults still apply, so production deployments keep the
+// hardening that fcb5def introduced.
+//
+// applyDefaultSandbox is tested directly rather than through Spawn:
+// on macOS dev hosts, sandbox.Apply returns ErrUnsupported when given
+// a non-empty Spec; the test purpose is the policy decision, not the
+// platform plumbing that follows.
+func TestApplyDefaultSandbox(t *testing.T) {
+	origGOOS := goos
+	origGeteuid := geteuid
+	t.Cleanup(func() {
+		goos = origGOOS
+		geteuid = origGeteuid
+	})
+
+	t.Run("Linux non-root: no Sandbox stays nil", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 1000 }
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux non-root: zero Sandbox stays empty", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 1000 }
+		cfg := Config{ID: "x", Command: "sleep", Sandbox: &sandbox.Spec{}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil || cfg.Sandbox.Any() {
+			t.Errorf("Sandbox = %+v, want non-nil with all fields false", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux non-root + VolumeMounts: stateful defaults still apply", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 1000 }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil {
+			t.Fatal("Sandbox = nil, want stateful default")
+		}
+		if !cfg.Sandbox.MountNamespace || !cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want all three flags true", cfg.Sandbox)
+		}
+	})
+
+	t.Run("Linux root: PID + NoNewPrivs default for stateless app", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 0 }
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil {
+			t.Fatal("Sandbox = nil, want defaults")
+		}
+		if !cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want PIDNamespace + NoNewPrivs", cfg.Sandbox)
+		}
+		if cfg.Sandbox.MountNamespace {
+			t.Errorf("MountNamespace = true, want false (stateless app)")
+		}
+	})
+
+	t.Run("Linux root + VolumeMounts: full isolation default", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 0 }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox == nil ||
+			!cfg.Sandbox.PIDNamespace || !cfg.Sandbox.NoNewPrivs || !cfg.Sandbox.MountNamespace {
+			t.Errorf("Sandbox = %+v, want all three flags true", cfg.Sandbox)
+		}
+	})
+
+	t.Run("explicit Sandbox with any field true skips auto-flip", func(t *testing.T) {
+		goos = "linux"
+		geteuid = func() int { return 0 }
+		cfg := Config{
+			ID:      "x",
+			Command: "sleep",
+			Sandbox: &sandbox.Spec{Chroot: "/jail"},
+		}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox.PIDNamespace || cfg.Sandbox.NoNewPrivs {
+			t.Errorf("Sandbox = %+v, want only Chroot set (no auto-flip)", cfg.Sandbox)
+		}
+		if cfg.Sandbox.Chroot != "/jail" {
+			t.Errorf("Chroot = %q, want \"/jail\"", cfg.Sandbox.Chroot)
+		}
+	})
+
+	t.Run("non-Linux: stateless apps never get defaults even as root", func(t *testing.T) {
+		goos = "darwin"
+		geteuid = func() int { return 0 }
+		cfg := Config{ID: "x", Command: "sleep"}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil on non-Linux", cfg.Sandbox)
+		}
+	})
 }
 
 func TestSpawnLongRunning(t *testing.T) {

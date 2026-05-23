@@ -903,7 +903,90 @@ func runtimeIsLinux() bool {
 	return goos == "linux"
 }
 
+// applyDefaultSandbox mutates cfg.Sandbox in place to apply the
+// secure-by-default isolation policy. Two paths:
+//
+//  1. Privileged Linux (canApplyDefaultSandbox): default PID +
+//     NoNewPrivs for every app, plus Mount namespace when VolumeMounts
+//     are present. Pentest review flagged cross-tenant /proc
+//     visibility and setuid escalation as the things this guards
+//     against.
+//  2. Anywhere else (macOS dev, non-root CI, unprivileged hosts):
+//     only apply the legacy "stateful apps get full isolation"
+//     default when VolumeMounts is non-empty. Stateless apps stay
+//     unsandboxed because applying CLONE_NEWPID without
+//     CAP_SYS_ADMIN fails at clone() with EPERM and surfaces as a
+//     misleading setpriv error.
+//
+// Callers can opt out of any defaulting by passing an explicit
+// non-zero Sandbox (any field true wins — the auto-flip only fires
+// when Sandbox is nil or has every field at zero value).
+func applyDefaultSandbox(cfg *Config) {
+	if canApplyDefaultSandbox() {
+		if cfg.Sandbox == nil {
+			cfg.Sandbox = &sandbox.Spec{
+				PIDNamespace: true,
+				NoNewPrivs:   true,
+			}
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		} else if !cfg.Sandbox.Any() {
+			cfg.Sandbox.PIDNamespace = true
+			cfg.Sandbox.NoNewPrivs = true
+			if len(cfg.VolumeMounts) > 0 {
+				cfg.Sandbox.MountNamespace = true
+			}
+		}
+		return
+	}
+	// Unprivileged path: legacy stateful-only default.
+	if len(cfg.VolumeMounts) == 0 {
+		return
+	}
+	if cfg.Sandbox == nil {
+		cfg.Sandbox = &sandbox.Spec{
+			MountNamespace: true,
+			PIDNamespace:   true,
+			NoNewPrivs:     true,
+		}
+		return
+	}
+	if !cfg.Sandbox.Any() {
+		cfg.Sandbox.MountNamespace = true
+		cfg.Sandbox.PIDNamespace = true
+		cfg.Sandbox.NoNewPrivs = true
+	}
+}
+
+// canApplyDefaultSandbox reports whether the supervisor is running
+// with the privilege actually required to enforce the secure-by-
+// default sandbox (PID namespace via CLONE_NEWPID, NoNewPrivs via
+// the setpriv wrapper which itself runs under our clone).
+//
+// We default isolation ON for the production scenario (creekd
+// running as root on Linux — the only place it can manage cgroups,
+// netns, and the full sandbox surface anyway). For everything else
+// — dev on macOS, CI on a non-privileged runner, integration tests
+// that spawn a real creekd as the test user — we skip the defaults
+// rather than try to apply them and fail at clone time with a
+// "fork/exec /usr/bin/setpriv: operation not permitted" that
+// misleadingly blames setpriv when the actual failure is
+// CLONE_NEWPID rejected for lack of CAP_SYS_ADMIN.
+//
+// Callers who want defaults applied in an unprivileged context
+// (e.g. with user namespaces) should pass an explicit Sandbox.
+func canApplyDefaultSandbox() bool {
+	if !runtimeIsLinux() {
+		return false
+	}
+	return geteuid() == 0
+}
+
 var goos = goruntime.GOOS
+
+// geteuid is overridable for tests. Default delegates to os.Geteuid.
+var geteuid = func() int { return os.Geteuid() }
 
 // filterSupervisorEnv removes CREEKD_* and CREEKCTL_* env vars from
 // the parent's environment before passing to child processes. Prevents
@@ -992,55 +1075,7 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		volumeRefs:      volumeIDs(cfg.VolumeMounts),
 		sup:             s,
 	}
-	// Hardening default for stateful workloads: when VolumeMounts is
-	// non-empty, the tenant runs as root in the host mount namespace
-	// by default — pentest review flagged this as the #1 issue
-	// because MS_NOSUID on the bind is hygiene, not isolation
-	// (tenant root can still exec /usr/bin/sudo across mounts, can
-	// chmod / hardlink, etc.). Default MountNamespace, PIDNamespace,
-	// and NoNewPrivs to ON when VolumeMounts is non-empty unless
-	// the caller explicitly opted any of them out via a non-nil
-	// Sandbox with that field set false.
-	//
-	// Callers who really want host-NS visibility for a stateful app
-	// (e.g. a debug shell) must pass an explicit Sandbox with the
-	// fields set false — silence used to be opt-in, now it's opt-out.
-	// Default sandbox isolation on Linux: PID + NoNewPrivs for ALL apps.
-	// MountNamespace added when VolumeMounts are present.
-	// This prevents cross-tenant /proc visibility and setuid escalation.
-	// Callers can opt out by setting explicit Sandbox fields.
-	// On non-Linux (macOS dev), sandboxing is a no-op (ErrUnsupported),
-	// so we only apply defaults when the platform supports it.
-	if runtimeIsLinux() {
-		if cfg.Sandbox == nil {
-			cfg.Sandbox = &sandbox.Spec{
-				PIDNamespace: true,
-				NoNewPrivs:   true,
-			}
-			if len(cfg.VolumeMounts) > 0 {
-				cfg.Sandbox.MountNamespace = true
-			}
-		} else if !cfg.Sandbox.Any() {
-			cfg.Sandbox.PIDNamespace = true
-			cfg.Sandbox.NoNewPrivs = true
-			if len(cfg.VolumeMounts) > 0 {
-				cfg.Sandbox.MountNamespace = true
-			}
-		}
-	} else if len(cfg.VolumeMounts) > 0 {
-		// Non-Linux: only apply defaults for stateful apps (original behavior)
-		if cfg.Sandbox == nil {
-			cfg.Sandbox = &sandbox.Spec{
-				MountNamespace: true,
-				PIDNamespace:   true,
-				NoNewPrivs:     true,
-			}
-		} else if !cfg.Sandbox.Any() {
-			cfg.Sandbox.MountNamespace = true
-			cfg.Sandbox.PIDNamespace = true
-			cfg.Sandbox.NoNewPrivs = true
-		}
-	}
+	applyDefaultSandbox(&cfg)
 
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller
