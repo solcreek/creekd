@@ -26,7 +26,7 @@ jobs:
       manifest: ${{ steps.filter.outputs.manifest }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -60,6 +60,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v6
+        with:
+          # Repo root has no package.json (creekd is a Go repo); point
+          # the action at the npm package so it picks up packageManager
+          # without us hardcoding the pnpm version here.
+          package_json_file: packages/creekd-manifest/package.json
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
