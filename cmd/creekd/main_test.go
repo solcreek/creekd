@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -23,6 +24,8 @@ func TestIsLoopback(t *testing.T) {
 		{":9080", false}, // empty host == any interface
 		{"example.com:80", false},
 		{"not-an-addr", false}, // malformed
+		{"unix:///var/run/creekd.sock", true},   // Unix socket = local
+		{"/var/run/creekd.sock", true},           // absolute path = local
 	}
 	for _, c := range cases {
 		if got := isLoopback(c.in); got != c.want {
@@ -173,5 +176,38 @@ func TestHandleVersionFlag(t *testing.T) {
 				t.Errorf("output should be empty for non-version args, got %q", printed)
 			}
 		})
+	}
+}
+
+func TestListenAdminAddrTCP(t *testing.T) {
+	ln, err := listenAdminAddr("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenAdminAddr TCP: %v", err)
+	}
+	defer ln.Close()
+	if ln.Addr().Network() != "tcp" {
+		t.Errorf("network = %q, want tcp", ln.Addr().Network())
+	}
+}
+
+func TestListenAdminAddrUnixSocket(t *testing.T) {
+	sockPath := t.TempDir() + "/admin.sock"
+	ln, err := listenAdminAddr("unix://" + sockPath)
+	if err != nil {
+		t.Fatalf("listenAdminAddr Unix: %v", err)
+	}
+	defer ln.Close()
+	if ln.Addr().Network() != "unix" {
+		t.Errorf("network = %q, want unix", ln.Addr().Network())
+	}
+
+	// Verify socket permissions are 0600
+	fi, statErr := os.Stat(sockPath)
+	if statErr != nil {
+		t.Fatalf("stat socket: %v", statErr)
+	}
+	perm := fi.Mode().Perm()
+	if perm != 0600 {
+		t.Errorf("socket perm = %o, want 0600", perm)
 	}
 }

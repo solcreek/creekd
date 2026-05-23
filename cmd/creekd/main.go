@@ -222,7 +222,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// indefinitely. MaxHeaderBytes is bounded too — header floods
 	// were the cheapest pre-AdminAPI DoS path.
 	adminSrv := &http.Server{
-		Addr:              adminAddr,
 		Handler:           adminServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -230,7 +229,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
-	adminLn, err := net.Listen("tcp", adminAddr)
+	adminLn, err := listenAdminAddr(adminAddr)
 	if err != nil {
 		return fmt.Errorf("admin listen %s: %w", adminAddr, err)
 	}
@@ -448,21 +447,42 @@ func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 // isLoopback returns true if addr's host portion resolves to a
 // loopback IP. Used to gate unauthenticated admin listeners.
 func isLoopback(addr string) bool {
+	// Unix sockets are local-only by definition.
+	if strings.HasPrefix(addr, "unix://") || strings.HasPrefix(addr, "/") {
+		return true
+	}
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		// Treat malformed addresses as non-loopback so we err on the
-		// side of demanding a token.
 		return false
 	}
 	if host == "" {
-		// Empty host means "any interface" — not loopback.
 		return false
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		// Hostnames: refuse to call them loopback without resolution.
-		// "localhost" is the common case; accept it explicitly.
 		return host == "localhost"
 	}
 	return ip.IsLoopback()
+}
+
+// listenAdminAddr creates a net.Listener for the admin API.
+// Supports TCP (host:port) and Unix socket (unix:///path).
+// Unix socket files are created with 0600 permissions (owner only).
+func listenAdminAddr(addr string) (net.Listener, error) {
+	if strings.HasPrefix(addr, "unix://") {
+		sockPath := strings.TrimPrefix(addr, "unix://")
+		// Remove stale socket file from previous run
+		os.Remove(sockPath)
+		ln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			return nil, err
+		}
+		// Restrict socket to owner only (no group, no world)
+		if err := os.Chmod(sockPath, 0600); err != nil {
+			ln.Close()
+			return nil, fmt.Errorf("chmod socket %s: %w", sockPath, err)
+		}
+		return ln, nil
+	}
+	return net.Listen("tcp", addr)
 }
