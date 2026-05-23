@@ -93,8 +93,14 @@ export type ManifestValidation =
   | { ok: false; reason: string };
 
 function validateEntrypoint(ep: string): string | null {
-  // Absolute path check — Posix and Windows.
-  if (ep.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(ep)) {
+  // Absolute path check — Posix, Windows drive-letter, Windows UNC.
+  // The forward-slash UNC form ("//server/share") is caught by the
+  // leading-"/" Posix check that runs first.
+  if (
+    ep.startsWith("/") ||
+    ep.startsWith("\\\\") ||
+    /^[a-zA-Z]:[\\/]/.test(ep)
+  ) {
     return `entrypoint ${JSON.stringify(ep)} must be relative to the project root, not absolute`;
   }
   // Traversal check — any segment-resolved ".." that escapes.

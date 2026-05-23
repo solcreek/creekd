@@ -133,6 +133,15 @@ describe("validateCreekdDeployManifest rejections (descriptive errors)", () => {
   });
 
   it.each([
+    "\\\\server\\share\\file.js",
+    "\\\\?\\C:\\app.js",
+  ])("rejects Windows UNC absolute entrypoint %s", (ep) => {
+    const result = validateCreekdDeployManifest({ ...goodManifest, entrypoint: ep });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toContain("absolute");
+  });
+
+  it.each([
     "../escape.js",
     "./../escape.js",
     ".next/../../escape.js",
