@@ -179,6 +179,22 @@ func TestApplyDefaultSandbox(t *testing.T) {
 			t.Errorf("Sandbox = %+v, want nil on non-Linux", cfg.Sandbox)
 		}
 	})
+
+	t.Run("non-Linux + VolumeMounts: still no defaults (legacy gate)", func(t *testing.T) {
+		// Pre-fix the legacy stateful path applied unconditionally,
+		// producing a Spec that sandbox.Apply would reject at spawn
+		// time on non-Linux with ErrUnsupported. The fix gates the
+		// legacy branch on Linux too so macOS dev with VolumeMounts
+		// spawns without isolation, consistent with the rest of the
+		// non-Linux matrix.
+		goos = "darwin"
+		hasSysAdminCap = func() bool { return true }
+		cfg := Config{ID: "x", Command: "sleep", VolumeMounts: []VolumeMount{{VolumeID: "v1"}}}
+		applyDefaultSandbox(&cfg)
+		if cfg.Sandbox != nil {
+			t.Errorf("Sandbox = %+v, want nil on non-Linux even with VolumeMounts", cfg.Sandbox)
+		}
+	})
 }
 
 // TestReadSysAdminCapFromProc is a smoke test for the /proc/self/status

@@ -962,7 +962,15 @@ func applyDefaultSandbox(cfg *Config) {
 		}
 		return
 	}
-	// Unprivileged path: legacy stateful-only default.
+	// Unprivileged path: legacy stateful-only default. Gated on Linux
+	// because sandbox.Apply returns ErrUnsupported on non-Linux for a
+	// non-empty Spec — applying defaults there would just guarantee a
+	// spawn-time error. macOS dev with VolumeMounts spawns without
+	// isolation, which is consistent with the rest of the non-Linux
+	// matrix (no auto-flip).
+	if !runtimeIsLinux() {
+		return
+	}
 	if len(cfg.VolumeMounts) == 0 {
 		return
 	}
