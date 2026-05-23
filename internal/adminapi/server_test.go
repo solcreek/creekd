@@ -745,14 +745,15 @@ func TestVolumeRegisterRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestVolumeViewOfMapsAllFields(t *testing.T) {
+func TestVolumeToViewMapsAllFields(t *testing.T) {
 	v := supervisor.Volume{
 		ID: "vol-a", BackingPath: "tenant-a/data", ReadOnly: true, FSType: "xfs",
 	}
-	got := volumeViewOf(v)
-	if got.ID != "vol-a" || got.BackingPath != "tenant-a/data" ||
-		!got.ReadOnly || got.FSType != "xfs" {
-		t.Errorf("volumeViewOf dropped fields: %+v", got)
+	got := volumeToView(v)
+	if got.Id != "vol-a" || got.BackingPath != "tenant-a/data" ||
+		got.ReadOnly == nil || !*got.ReadOnly ||
+		got.FsType == nil || *got.FsType != "xfs" {
+		t.Errorf("volumeToView dropped fields: %+v", got)
 	}
 }
 
