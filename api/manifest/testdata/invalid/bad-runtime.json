@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "python",
+  "entrypoint": "server.py",
+  "port": 3000
+}

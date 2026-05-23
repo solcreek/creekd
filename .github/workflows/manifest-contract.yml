@@ -1,0 +1,101 @@
+name: Manifest contract
+
+# Both validators (api/manifest/ in Go, packages/creekd-manifest/ in
+# TS) must agree on accept/reject for every fixture in
+# api/manifest/testdata/. This workflow runs both sides whenever a
+# PR touches either, so drift is caught at review time.
+#
+# Always triggered (no `on.*.paths` filter) so a future branch-
+# protection "required check" rule never gets stuck pending when an
+# unrelated PR doesn't touch manifest code. Job-level gating uses
+# dorny/paths-filter; the final aggregator job allows the gated
+# jobs to be `skipped` and still passes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      manifest: ${{ steps.filter.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            manifest:
+              - 'api/manifest/**'
+              - 'packages/creekd-manifest/**'
+              # Workflow itself counts too — bad YAML changes should
+              # surface on the PR introducing them.
+              - '.github/workflows/manifest-contract.yml'
+
+  go-roundtrip:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.manifest == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: Test api/manifest package
+        # No -race: api/manifest has no goroutines. Skip the
+        # instrumented build that would only slow us down.
+        run: go test -count=1 ./api/manifest/...
+
+  ts-roundtrip:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.manifest == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/creekd-manifest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          # Repo root has no package.json (creekd is a Go repo); point
+          # the action at the npm package so it picks up packageManager
+          # without us hardcoding the pnpm version here.
+          package_json_file: packages/creekd-manifest/package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: packages/creekd-manifest/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  # Aggregator — the job to mark as a required check in branch
+  # protection. Allows both `success` and `skipped` so PRs that
+  # don't touch manifest code pass without running the gated jobs.
+  manifest-contract:
+    needs: [detect-changes, go-roundtrip, ts-roundtrip]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate
+        run: |
+          for result in \
+            "${{ needs.detect-changes.result }}" \
+            "${{ needs.go-roundtrip.result }}" \
+            "${{ needs.ts-roundtrip.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "manifest contract dependency ended with: $result"
+                exit 1
+                ;;
+            esac
+          done
+          echo "manifest contract: all required jobs succeeded or were skipped"

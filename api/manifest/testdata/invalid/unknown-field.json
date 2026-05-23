@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "target": "creekd",
+  "runtime": "node",
+  "entryPont": "server.js",
+  "port": 3000
+}
