@@ -246,15 +246,87 @@ func TestListAndGet(t *testing.T) {
 		t.Errorf("apps len = %d, want 2", len(list.Apps))
 	}
 
-	// Get one.
+	// Get one — now returns the k8s-style envelope shape.
 	status, body = ts.do(t, "GET", "/v1/apps/a", nil, "")
 	if status != http.StatusOK {
 		t.Fatalf("get status = %d", status)
 	}
-	var view apitypes.AppView
-	mustJSON(t, body, &view)
-	if view.Id != "a" || view.Port != p1 {
-		t.Errorf("view = %+v", view)
+	var envelope apitypes.App
+	mustJSON(t, body, &envelope)
+	if envelope.ApiVersion != apitypes.CreekDevv1alpha1 {
+		t.Errorf("apiVersion = %q, want %q", envelope.ApiVersion, apitypes.CreekDevv1alpha1)
+	}
+	if envelope.Kind != apitypes.AppKindApp {
+		t.Errorf("kind = %q, want %q", envelope.Kind, apitypes.AppKindApp)
+	}
+	if envelope.Metadata.Name != "a" {
+		t.Errorf("metadata.name = %q, want %q", envelope.Metadata.Name, "a")
+	}
+	if envelope.Spec.Port == nil || *envelope.Spec.Port != p1 {
+		t.Errorf("spec.port = %v, want %d", envelope.Spec.Port, p1)
+	}
+	if envelope.Status.Phase != apitypes.AppStatusPhase("running") &&
+		envelope.Status.Phase != apitypes.AppStatusPhase("starting") {
+		t.Errorf("status.phase = %q, want running|starting", envelope.Status.Phase)
+	}
+	// Test server lacks a store, so metadata is zero-valued. This
+	// path is documented behavior — the runtime status is still
+	// authoritative; metadata only carries identity. Once store is
+	// wired in for tests (see TestGetAppEnvelopeWithStore), uid and
+	// rv become non-zero. Phase is the K8s 1.13-deprecated pattern
+	// — see BACKLOG.md API-07.
+}
+
+// TestGetAppEnvelopeWithStore verifies the full envelope shape when
+// the store is wired in — uid (UUIDv7), generation, resourceVersion,
+// and creationTimestamp all populate.
+func TestGetAppEnvelopeWithStore(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	p := freeTCPPort(t)
+	before := time.Now().UTC().Add(-time.Second)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "envtest", Command: ptr("sleep"), Args: &[]string{"30"}, Port: p}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn status = %d, body = %s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("envtest") })
+	after := time.Now().UTC().Add(time.Second)
+
+	status, body := ts.do(t, "GET", "/v1/apps/envtest", nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", status, body)
+	}
+	var envelope apitypes.App
+	mustJSON(t, body, &envelope)
+
+	if envelope.Metadata.Uid.String() == "00000000-0000-0000-0000-000000000000" {
+		t.Error("metadata.uid is zero with store configured; want generated UUIDv7")
+	}
+	if envelope.Metadata.Uid.Version() != 7 {
+		t.Errorf("metadata.uid version = %d, want 7 (UUIDv7)", envelope.Metadata.Uid.Version())
+	}
+	if envelope.Metadata.Generation != 1 {
+		t.Errorf("metadata.generation = %d, want 1 on first spawn", envelope.Metadata.Generation)
+	}
+	if envelope.Metadata.ResourceVersion != "1" {
+		t.Errorf("metadata.resourceVersion = %q, want \"1\" on first spawn", envelope.Metadata.ResourceVersion)
+	}
+	if envelope.Metadata.CreationTimestamp.Before(before) ||
+		envelope.Metadata.CreationTimestamp.After(after) {
+		t.Errorf("metadata.creationTimestamp = %v, want within [%v, %v]",
+			envelope.Metadata.CreationTimestamp, before, after)
+	}
+	if envelope.Status.ObservedGeneration != envelope.Metadata.Generation {
+		// At this calibration step observedGeneration is synced to
+		// Generation. Once async deploy-flow convergence lands (v6
+		// implementation order #10), this will lag during a deploy.
+		t.Errorf("status.observedGeneration = %d, want %d (synced for calibration)",
+			envelope.Status.ObservedGeneration, envelope.Metadata.Generation)
 	}
 }
 

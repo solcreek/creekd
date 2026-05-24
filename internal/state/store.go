@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/solcreek/creekd/internal/supervisor"
 )
@@ -14,7 +17,14 @@ import (
 // FormatVersion is the schema version embedded in every written
 // state file. Bump when the on-disk shape changes; readers refuse
 // versions they don't recognise.
-const FormatVersion = 1
+//
+// v1 → v2 (2026-05-24): adds AppMetadata (uid / generation /
+// resourceVersion / creationTimestamp) per app, persisted alongside
+// Config. v1 files are migrated forward on load — each app gets a
+// freshly-generated UUIDv7 and creationTimestamp = time.Now() at
+// migration time (best-effort; the true original creation moment is
+// lost). Migration writes v2 back to disk transparently.
+const FormatVersion = 2
 
 // State is the on-disk shape of the persisted app set + volumes.
 // Volumes are restored BEFORE Apps on daemon start so VolumeMount
@@ -27,9 +37,35 @@ type State struct {
 
 // App is one persisted entry. The supervisor.Config is stored
 // verbatim — on restore the same Spawn call reconstructs the same
-// runtime state (modulo ephemeral fields like PID).
+// runtime state (modulo ephemeral fields like PID). AppMetadata is
+// the envelope-layer persistent identity (uid + generation + rv +
+// creationTimestamp) per DESIGN-self-host-state.md §"The interop-
+// bearing subset".
 type App struct {
-	Config supervisor.Config `json:"config"`
+	Config   supervisor.Config `json:"config"`
+	Metadata AppMetadata       `json:"metadata"`
+}
+
+// AppMetadata is the per-app envelope-layer persistent identity.
+// Generated on first AddApp; preserved across Deploy (which bumps
+// Generation + ResourceVersion but keeps UID + CreationTimestamp);
+// preserved across restore (uid + creationTimestamp NEVER
+// regenerated).
+type AppMetadata struct {
+	// UID is the UUIDv7 stable identity. Never reused even across
+	// delete+recreate with the same name.
+	UID string `json:"uid"`
+	// Generation bumps on every successful spec write
+	// (AddApp on an existing ID). Does NOT bump on status writes
+	// or annotation/label changes.
+	Generation int64 `json:"generation"`
+	// ResourceVersion bumps on every write (spec or status). Served
+	// to clients as a string per K8s wire convention. Clients MUST
+	// NOT do arithmetic on it.
+	ResourceVersion uint64 `json:"resource_version"`
+	// CreationTimestamp is RFC3339 at first AddApp; immutable;
+	// preserved across restore.
+	CreationTimestamp time.Time `json:"creation_timestamp"`
 }
 
 // Volume is one persisted volume registration. The supervisor.Volume
@@ -44,9 +80,30 @@ type Volume struct {
 type Store struct {
 	path string
 
-	mu      sync.Mutex
-	apps    map[string]supervisor.Config // appID → config
-	volumes map[string]supervisor.Volume // volumeID → volume
+	mu       sync.Mutex
+	apps     map[string]supervisor.Config // appID → config
+	metadata map[string]AppMetadata       // appID → envelope metadata
+	volumes  map[string]supervisor.Volume // volumeID → volume
+}
+
+// newAppMetadata generates fresh envelope metadata for a brand-new
+// app. UUIDv7 (RFC 9562). Generation starts at 1 (the create write
+// counts); ResourceVersion starts at 1 likewise. CreationTimestamp
+// is the moment of creation in UTC.
+func newAppMetadata() AppMetadata {
+	u, err := uuid.NewV7()
+	if err != nil {
+		// uuid.NewV7 only returns an error if the system can't
+		// produce 6 bytes of randomness — extraordinary. Fall back
+		// to v4 so the caller never panics on AddApp.
+		u = uuid.New()
+	}
+	return AppMetadata{
+		UID:               u.String(),
+		Generation:        1,
+		ResourceVersion:   1,
+		CreationTimestamp: time.Now().UTC(),
+	}
 }
 
 // NewStore opens (or creates) the state file at path. If the file
@@ -54,11 +111,17 @@ type Store struct {
 // treated as an empty state. The parent directory is created on
 // first save. Returns an error only on permission / unreadable-file
 // failure — an empty file or absent file is normal.
+//
+// v1 → v2 migration: if the loaded file is FormatVersion=1, each
+// app gets freshly-generated metadata (UUIDv7, generation=1, rv=1,
+// creationTimestamp=time.Now()) and the file is rewritten as v2.
+// The migration is transparent — callers see only the v2 shape.
 func NewStore(path string) (*Store, error) {
 	s := &Store{
-		path:    path,
-		apps:    make(map[string]supervisor.Config),
-		volumes: make(map[string]supervisor.Volume),
+		path:     path,
+		apps:     make(map[string]supervisor.Config),
+		metadata: make(map[string]AppMetadata),
+		volumes:  make(map[string]supervisor.Volume),
 	}
 	if err := s.load(); err != nil {
 		return nil, err
@@ -95,49 +158,87 @@ func (s *Store) Apps() []supervisor.Config {
 // behaviour matters only for the Deploy path which legitimately
 // overwrites.
 //
-// Copy-on-write: builds a candidate map, flushes that to disk, and
-// only on flush success does it swap s.apps. If the flush fails the
-// in-memory cache stays at the pre-call state, matching the on-disk
-// state. Without this, a failed flush would leave in-memory ahead of
-// disk; a subsequent successful flush would then persist what was
-// reported as failed.
+// Metadata semantics:
+//   - First AddApp for an ID: generates fresh AppMetadata (UUIDv7 +
+//     generation=1 + rv=1 + creationTimestamp=now).
+//   - Overwriting AddApp (Deploy): preserves UID + CreationTimestamp;
+//     bumps Generation by 1 and ResourceVersion by 1.
+//
+// Copy-on-write: builds candidate maps, flushes them to disk, and
+// only on flush success swaps s.apps + s.metadata. If the flush fails
+// the in-memory cache stays at the pre-call state, matching the
+// on-disk state.
 func (s *Store) AddApp(cfg supervisor.Config) error {
 	if cfg.ID == "" {
 		return errors.New("state: empty app id")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next := cloneMap(s.apps)
+	nextApps := cloneMap(s.apps)
 	// Deep-clone the inbound config so a later mutation by the caller
 	// (e.g. appending to cfg.Env) cannot reach back into our snapshot.
-	next[cfg.ID] = supervisor.CloneConfig(cfg)
-	if err := s.flushMap(next); err != nil {
+	nextApps[cfg.ID] = supervisor.CloneConfig(cfg)
+	nextMeta := cloneMetadataMap(s.metadata)
+	if existing, ok := s.metadata[cfg.ID]; ok {
+		// Deploy / overwrite: preserve identity, bump versions.
+		nextMeta[cfg.ID] = AppMetadata{
+			UID:               existing.UID,
+			CreationTimestamp: existing.CreationTimestamp,
+			Generation:        existing.Generation + 1,
+			ResourceVersion:   existing.ResourceVersion + 1,
+		}
+	} else {
+		nextMeta[cfg.ID] = newAppMetadata()
+	}
+	if err := s.flushFull(nextApps, nextMeta, s.volumes); err != nil {
 		return err
 	}
-	s.apps = next
+	s.apps = nextApps
+	s.metadata = nextMeta
 	return nil
 }
 
 // RemoveApp drops the entry for id. Removing an unknown id is a
 // no-op (the on-disk state is already in sync). Same copy-on-write
 // rule as AddApp — a flush failure leaves the in-memory cache intact.
+//
+// Per v5 design (delete-then-recreate with same name gets fresh uid),
+// removal drops the metadata too — there is no carry-over of the
+// previous UID if the same name is later re-spawned.
 func (s *Store) RemoveApp(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.apps[id]; !ok {
 		return nil
 	}
-	next := cloneMap(s.apps)
-	delete(next, id)
-	if err := s.flushMap(next); err != nil {
+	nextApps := cloneMap(s.apps)
+	delete(nextApps, id)
+	nextMeta := cloneMetadataMap(s.metadata)
+	delete(nextMeta, id)
+	if err := s.flushFull(nextApps, nextMeta, s.volumes); err != nil {
 		return err
 	}
-	s.apps = next
+	s.apps = nextApps
+	s.metadata = nextMeta
 	return nil
+}
+
+// Meta returns the persisted envelope metadata for id. The bool is
+// false when no such app exists.
+func (s *Store) Meta(id string) (AppMetadata, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.metadata[id]
+	return m, ok
 }
 
 // load reads the JSON file into the in-memory cache. Missing file
 // → empty cache, no error. Corrupted JSON or unknown version → error.
+//
+// v1 files are migrated forward to v2 transparently: each loaded app
+// gets fresh metadata (UUIDv7 + creationTimestamp=time.Now()) and the
+// migrated state is written back. Older formats (v0 / future v3+)
+// are rejected.
 func (s *Store) load() error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -149,13 +250,46 @@ func (s *Store) load() error {
 	if len(data) == 0 {
 		return nil
 	}
-	var st State
-	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("state: decode %s: %w", s.path, err)
+	// Peek at the version field before full-shape decode — v1 has a
+	// different App shape (no metadata block) so a single struct
+	// decode would silently zero the new fields for v1 files.
+	var head struct {
+		Version int `json:"version"`
 	}
-	if st.Version != FormatVersion {
+	if err := json.Unmarshal(data, &head); err != nil {
+		return fmt.Errorf("state: decode version header: %w", err)
+	}
+	switch head.Version {
+	case 1:
+		if err := s.loadV1(data); err != nil {
+			return err
+		}
+		// Persist forward as v2 so subsequent boots take the v2 path.
+		if err := s.flushBoth(s.apps, s.volumes); err != nil {
+			return fmt.Errorf("state: v1→v2 migration flush: %w", err)
+		}
+		return nil
+	case FormatVersion:
+		return s.loadV2(data)
+	default:
 		return fmt.Errorf("state: unsupported version %d (want %d)",
-			st.Version, FormatVersion)
+			head.Version, FormatVersion)
+	}
+}
+
+// loadV1 decodes the legacy v1 shape ({"version":1,"apps":[{"config":...}]})
+// and generates fresh AppMetadata for each app.
+func (s *Store) loadV1(data []byte) error {
+	type appV1 struct {
+		Config supervisor.Config `json:"config"`
+	}
+	var st struct {
+		Version int      `json:"version"`
+		Volumes []Volume `json:"volumes,omitempty"`
+		Apps    []appV1  `json:"apps"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("state: decode v1: %w", err)
 	}
 	for _, v := range st.Volumes {
 		if v.Volume.ID == "" {
@@ -168,6 +302,36 @@ func (s *Store) load() error {
 			continue
 		}
 		s.apps[a.Config.ID] = a.Config
+		s.metadata[a.Config.ID] = newAppMetadata()
+	}
+	return nil
+}
+
+// loadV2 decodes the current State shape.
+func (s *Store) loadV2(data []byte) error {
+	var st State
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("state: decode v2: %w", err)
+	}
+	for _, v := range st.Volumes {
+		if v.Volume.ID == "" {
+			continue
+		}
+		s.volumes[v.Volume.ID] = v.Volume
+	}
+	for _, a := range st.Apps {
+		if a.Config.ID == "" {
+			continue
+		}
+		s.apps[a.Config.ID] = a.Config
+		// Defensive: if a v2 file is missing metadata (shouldn't
+		// happen with our writer, but a hand-edited file might),
+		// fall back to a freshly-generated stamp.
+		if a.Metadata.UID == "" {
+			s.metadata[a.Config.ID] = newAppMetadata()
+		} else {
+			s.metadata[a.Config.ID] = a.Metadata
+		}
 	}
 	return nil
 }
@@ -233,16 +397,16 @@ func cloneVolumeMap(src map[string]supervisor.Volume) map[string]supervisor.Volu
 	return dst
 }
 
-// flushMap writes the given app map snapshot to disk atomically.
-// Used by AddApp / RemoveApp; preserves the current volumes map.
-// Caller must hold s.mu.
-func (s *Store) flushMap(m map[string]supervisor.Config) error {
-	return s.flushBoth(m, s.volumes)
+// flushBoth writes apps + the current metadata snapshot + the given
+// volumes map atomically. Used by Volume mutations + as the v1→v2
+// migration writeback path. Caller must hold s.mu.
+func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]supervisor.Volume) error {
+	return s.flushFull(apps, s.metadata, volumes)
 }
 
-// flushBoth writes both maps atomically. Used by Volume mutations.
-// Caller must hold s.mu.
-func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]supervisor.Volume) error {
+// flushFull writes all three maps atomically. Used by AddApp /
+// RemoveApp when metadata is also changing. Caller must hold s.mu.
+func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string]AppMetadata, volumes map[string]supervisor.Volume) error {
 	// Mode 0o700 / 0o600 — state.json contains every supervised
 	// app's full Config (env vars, commands, volume refs). World-
 	// readable defaults would leak tenant secrets to any local
@@ -267,7 +431,10 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 	}
 	sortStrings(appIDs)
 	for _, id := range appIDs {
-		st.Apps = append(st.Apps, App{Config: apps[id]})
+		st.Apps = append(st.Apps, App{
+			Config:   apps[id],
+			Metadata: metadata[id],
+		})
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -296,6 +463,16 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 // boundary is what supervisor.CloneConfig prevents.
 func cloneMap(src map[string]supervisor.Config) map[string]supervisor.Config {
 	dst := make(map[string]supervisor.Config, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// cloneMetadataMap is the AppMetadata-typed counterpart to cloneMap.
+// AppMetadata is a small value struct (~64 bytes); pure value copy.
+func cloneMetadataMap(src map[string]AppMetadata) map[string]AppMetadata {
+	dst := make(map[string]AppMetadata, len(src)+1)
 	for k, v := range src {
 		dst[k] = v
 	}

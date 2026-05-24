@@ -240,7 +240,22 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, appToView(app))
+	// Envelope refactor lands per-handler. GetApp is the first
+	// endpoint to expose the k8s-style {apiVersion, kind, metadata,
+	// spec, status} shape. Other handlers still return AppView until
+	// they're refactored individually.
+	//
+	// If store is not configured (some test paths) or the app
+	// predates the metadata era (in-memory-only spawn), fall back to
+	// a zero-metadata envelope rather than 500ing — the runtime
+	// state is still authoritative for status fields.
+	var meta state.AppMetadata
+	if s.store != nil {
+		if m, ok := s.store.Meta(id); ok {
+			meta = m
+		}
+	}
+	writeJSON(w, http.StatusOK, appToEnvelope(app, meta))
 }
 
 func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {

@@ -69,15 +69,22 @@ paths:
 
     get:
       operationId: getApp
-      summary: Get app details
+      summary: Get app details (k8s-style envelope)
+      description: |
+        Returns the App resource in the k8s wire-format envelope
+        `{apiVersion, kind, metadata, spec, status}`. This is the
+        first endpoint to use the envelope shape; SpawnApp + ListApps
+        still return the legacy AppView shape during the envelope
+        refactor (will land per-handler over subsequent PRs).
+        See DESIGN-self-host-state.md §"The interop-bearing subset".
       tags: [apps]
       responses:
         "200":
-          description: App details
+          description: App envelope
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AppView"
+                $ref: "#/components/schemas/App"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -574,6 +581,100 @@ components:
         timeout_ms:
           type: integer
           format: int64
+
+    App:
+      type: object
+      description: |
+        K8s-style resource envelope. See DESIGN-self-host-state.md
+        "The interop-bearing subset" for the field semantics.
+      required: [apiVersion, kind, metadata, spec, status]
+      properties:
+        apiVersion:
+          type: string
+          enum: ["creek.dev/v1alpha1"]
+        kind:
+          type: string
+          enum: ["App"]
+        metadata:
+          $ref: "#/components/schemas/AppMetadata"
+        spec:
+          $ref: "#/components/schemas/AppSpec"
+        status:
+          $ref: "#/components/schemas/AppStatus"
+
+    AppMetadata:
+      type: object
+      required: [name, uid, generation, resourceVersion, creationTimestamp]
+      properties:
+        name:
+          type: string
+          description: Human-readable ID, [a-z0-9-] 1-63 chars.
+        uid:
+          type: string
+          format: uuid
+          description: UUIDv7. Stable across rename; never reused.
+        generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Bumps on every successful spec write. NOT bumped on status, annotations, or labels.
+        resourceVersion:
+          type: string
+          description: Opaque CAS token. Clients MUST NOT do arithmetic on it.
+        creationTimestamp:
+          type: string
+          format: date-time
+          description: RFC3339. Immutable; preserved across restore.
+
+    AppSpec:
+      type: object
+      description: Desired state. Settable by clients.
+      properties:
+        runtime:
+          type: string
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: array
+          items:
+            type: string
+        port:
+          type: integer
+
+    AppStatus:
+      type: object
+      description: Observed state. Server-written; clients receive 405 on writes.
+      required: [observedGeneration, phase, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
+      properties:
+        observedGeneration:
+          type: integer
+          format: int64
+          description: Last spec generation the deploy flow has converged to a healthy state on.
+        phase:
+          type: string
+          enum: [starting, running, crash_loop, stopping, stopped]
+          description: |
+            Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
+            here for the calibration PR while the Release ledger +
+            conditions design lands separately. See BACKLOG.md API-07.
+        currentPid:
+          type: integer
+        currentPort:
+          type: integer
+        restartCount:
+          type: integer
+        healthFailures:
+          type: integer
+          format: int64
+        uptimeMs:
+          type: integer
+          format: int64
+        netIp:
+          type: string
 
     AppView:
       type: object

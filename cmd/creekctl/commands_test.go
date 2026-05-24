@@ -353,8 +353,17 @@ func TestGetJSONOutputIsValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("output not valid JSON: %v\noutput:\n%s", err, out)
 	}
-	if got["id"] != "j" {
-		t.Errorf("id = %v, want j", got["id"])
+	// GET now returns the k8s-style envelope: name lives under
+	// .metadata.name, not as a top-level id field.
+	metadata, ok := got["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("envelope missing .metadata object; got %v", got)
+	}
+	if metadata["name"] != "j" {
+		t.Errorf("metadata.name = %v, want j", metadata["name"])
+	}
+	if got["apiVersion"] != "creek.dev/v1alpha1" {
+		t.Errorf("apiVersion = %v, want creek.dev/v1alpha1", got["apiVersion"])
 	}
 }
 
@@ -695,7 +704,7 @@ func newDeployCaptureServer(t *testing.T) (string, *deployCapture) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(apitypes.AppView{
 				Id:     "deploy-from-test",
-				Status: apitypes.Running,
+				Status: apitypes.AppViewStatusRunning,
 				Port:   cap.Request.Port,
 			})
 			return

@@ -93,9 +93,13 @@ func (c *Client) List(ctx context.Context) ([]apitypes.AppView, error) {
 	return resp.Apps, nil
 }
 
-// Get fetches one app by ID.
-func (c *Client) Get(ctx context.Context, id string) (*apitypes.AppView, error) {
-	var v apitypes.AppView
+// Get fetches one app by ID. Returns the k8s-style envelope (App).
+//
+// Envelope refactor lands per-handler — GetApp is the first endpoint
+// to expose the envelope shape; List/Spawn/Deploy/Restart/Reset still
+// return the legacy AppView until they're refactored individually.
+func (c *Client) Get(ctx context.Context, id string) (*apitypes.App, error) {
+	var v apitypes.App
 	if err := c.do(ctx, http.MethodGet, "/v1/apps/"+url.PathEscape(id), nil, &v); err != nil {
 		return nil, err
 	}
