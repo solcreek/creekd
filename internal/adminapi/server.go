@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/solcreek/creekd/internal/apitypes"
+	"github.com/solcreek/creekd/internal/backup"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
@@ -28,6 +30,7 @@ type Server struct {
 	token      string
 	store      *state.Store
 	audit      *AuditLogger
+	hostkey    *backup.HostKey
 	conditions *conditionTracker
 
 	mux *http.ServeMux
@@ -39,6 +42,14 @@ func (s *Server) SetStore(st *state.Store) { s.store = st }
 // SetAuditLogger enables structured audit logging for all mutating
 // API operations.
 func (s *Server) SetAuditLogger(a *AuditLogger) { s.audit = a }
+
+// SetHostkey wires the daemon's persistent ed25519 host key into
+// the admin server so GET /v1/hostkey can serve the public half +
+// fingerprint. The handler returns 503 when this is nil — daemon
+// startup is responsible for loading the key before binding the
+// listener in production. Test paths that don't exercise hostkey
+// discovery may leave it nil and the matching tests must opt out.
+func (s *Server) SetHostkey(hk *backup.HostKey) { s.hostkey = hk }
 
 // New returns a Server backed by sup.
 func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token string) *Server {
@@ -94,9 +105,17 @@ func (s *Server) SetMetricsHandler(h http.Handler) {
 // --- Middleware ---
 
 // authMiddleware returns a MiddlewareFunc that checks the bearer token.
+// /v1/hostkey is exempt — the laptop's `creek init --adopt` path
+// (TOFU discovery, DESIGN §"TOFU hostkey discovery") needs to fetch
+// the public key BEFORE any credentials have been provisioned. The
+// key it returns is by definition public.
 func (s *Server) authMiddleware() apitypes.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isPublicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if s.token != "" && !s.checkBearer(r) {
 				writeError(w, http.StatusUnauthorized, string(apitypes.ErrorCodeUnauthorized),
 					"missing or invalid bearer token")
@@ -105,6 +124,13 @@ func (s *Server) authMiddleware() apitypes.MiddlewareFunc {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// isPublicPath returns true for paths that intentionally skip auth.
+// Kept small + explicit (whitelist, not regex) so any future
+// auth-bypass slot is reviewable at the function level.
+func isPublicPath(path string) bool {
+	return path == "/v1/hostkey"
 }
 
 // auditMiddleware returns a MiddlewareFunc that logs mutating operations.
@@ -278,6 +304,31 @@ func (s *Server) ListApps(w http.ResponseWriter, _ *http.Request) {
 		views = append(views, appToView(a))
 	}
 	writeJSON(w, http.StatusOK, apitypes.ListAppsResponse{Apps: views})
+}
+
+// GetHostkey returns the daemon's public ed25519 host key +
+// fingerprint. Unauthenticated by design — the public key is
+// public by definition, and this is the discovery primitive for
+// Path B (adopt-existing-host) TOFU pinning. The operator MUST
+// verify the returned fingerprint against an out-of-band
+// reference (provider console / serial output / paper bundle)
+// before pinning — a MITM on this response is otherwise
+// undetectable.
+//
+// 503 when hostkey is not wired: early boot, or a test setup
+// that omitted SetHostkey. Differentiates from auth failure
+// (which is 401) and not-found (which is 404 on /v1/apps/...).
+func (s *Server) GetHostkey(w http.ResponseWriter, _ *http.Request) {
+	if s.hostkey == nil {
+		writeError(w, http.StatusServiceUnavailable, string(apitypes.ErrorCodeInternal),
+			"hostkey not initialised")
+		return
+	}
+	writeJSON(w, http.StatusOK, apitypes.HostkeyInfo{
+		Algorithm:   apitypes.Ed25519,
+		PublicKey:   base64.StdEncoding.EncodeToString(s.hostkey.Pub),
+		Fingerprint: s.hostkey.Fingerprint,
+	})
 }
 
 func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {

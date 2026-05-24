@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/backup"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/metrics"
 	"github.com/solcreek/creekd/internal/state"
@@ -219,6 +220,34 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			adminServer.SetAuditLogger(auditLogger)
 			defer auditLogger.Close()
 			logger.Info("audit log enabled", "dir", filepath.Join(dir, "audit"))
+		}
+	}
+	// Host key: load-or-create the persistent ed25519 keypair that
+	// signs Tier 0 backup manifests (#7) and serves as the TOFU pin
+	// target for `creek init` (#21). On first generation we log the
+	// fingerprint at WARN so an operator reading the console captures
+	// it; subsequent boots log at INFO. CREEKD_STATE_DIR gates
+	// everything: without persistent state there's no hostkey
+	// identity to maintain.
+	if dir := os.Getenv("CREEKD_STATE_DIR"); dir != "" {
+		path := filepath.Join(dir, "hostkey")
+		_, statErr := os.Stat(path)
+		freshlyGenerated := os.IsNotExist(statErr)
+		hk, hkErr := backup.LoadOrCreateHostKey(path)
+		if hkErr != nil {
+			logger.Warn("hostkey unavailable", "err", hkErr)
+		} else {
+			adminServer.SetHostkey(hk)
+			if freshlyGenerated {
+				// First-boot ceremony: operator-readable banner so
+				// the fingerprint can be captured to a password
+				// manager / paper bundle. Verbatim format keeps
+				// post-hoc grep predictable.
+				logger.Warn("hostkey generated — record this fingerprint out-of-band",
+					"fingerprint", hk.Fingerprint, "path", path)
+			} else {
+				logger.Info("hostkey loaded", "fingerprint", hk.Fingerprint)
+			}
 		}
 	}
 	adminServer.SetMetricsHandler(m.Handler())

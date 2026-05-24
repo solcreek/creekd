@@ -202,6 +202,21 @@ func (e EventType) Valid() bool {
 	}
 }
 
+// Defines values for HostkeyInfoAlgorithm.
+const (
+	Ed25519 HostkeyInfoAlgorithm = "ed25519"
+)
+
+// Valid indicates whether the value is a known member of the HostkeyInfoAlgorithm enum.
+func (e HostkeyInfoAlgorithm) Valid() bool {
+	switch e {
+	case Ed25519:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ReleasePhase.
 const (
 	Active     ReleasePhase = "Active"
@@ -404,6 +419,21 @@ type ErrorResponse struct {
 
 // EventType defines model for EventType.
 type EventType string
+
+// HostkeyInfo Public ed25519 host key + fingerprint. Algorithm field is
+// a forward-compat slot; only "ed25519" is recognised today.
+type HostkeyInfo struct {
+	Algorithm HostkeyInfoAlgorithm `json:"algorithm"`
+
+	// Fingerprint sha256:<hex> of the public key bytes.
+	Fingerprint string `json:"fingerprint"`
+
+	// PublicKey base64 of the 32-byte ed25519 public key.
+	PublicKey string `json:"publicKey"`
+}
+
+// HostkeyInfoAlgorithm defines model for HostkeyInfo.Algorithm.
+type HostkeyInfoAlgorithm string
 
 // Limits defines model for Limits.
 type Limits struct {
