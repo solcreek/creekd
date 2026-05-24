@@ -129,9 +129,14 @@ func casApplies(r *http.Request) bool {
 		// DELETE /v1/apps/{id} — applies if id is present.
 		return strings.HasPrefix(path, "/v1/apps/") && extractAppID(path) != ""
 	case http.MethodPost:
-		// POST /v1/apps/{id}/deploy — spec mutation. Restart and
-		// reset are operations, not spec writes.
-		return strings.HasSuffix(path, "/deploy") && extractAppID(path) != ""
+		// POST /v1/apps/{id}/deploy and /rollback are both spec
+		// mutations (each creates a Release that flips the Active
+		// pointer). Restart and reset are operations, not spec
+		// writes — left out.
+		if extractAppID(path) == "" {
+			return false
+		}
+		return strings.HasSuffix(path, "/deploy") || strings.HasSuffix(path, "/rollback")
 	case http.MethodPut, http.MethodPatch:
 		// Reserved for the future PUT/PATCH /v1/apps/{id} land.
 		// When that endpoint exists it MUST require If-Match per

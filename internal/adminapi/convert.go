@@ -1,7 +1,9 @@
 package adminapi
 
 import (
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -162,6 +164,77 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata, ct *conditionTra
 		envelope.Status.NetIp = &s
 	}
 	return envelope
+}
+
+// resolveOriginalArtifactRelease returns the ReleaseSeq of the
+// first-appearance artifact for a chain of rollbacks. If target
+// is itself a rollback record (Spec.OriginalArtifactRelease set),
+// the chain pointer is propagated; otherwise the target IS the
+// first appearance. The new release created by rolling back to
+// target inherits this value so `creek releases` audit walks
+// don't re-resolve at display time.
+func resolveOriginalArtifactRelease(target state.Release) int64 {
+	if target.Spec.OriginalArtifactRelease != 0 {
+		return target.Spec.OriginalArtifactRelease
+	}
+	return target.Spec.ReleaseSeq
+}
+
+// releaseToWire converts a persisted state.Release to the wire
+// shape (apitypes.Release). ConfigSnapshot is intentionally NOT
+// returned on the wire — it's an internal rollback enabler that
+// would expose env-var values to anyone reading the release
+// ledger over the admin API. Restoring the snapshot is a
+// server-internal concern.
+func releaseToWire(r state.Release) apitypes.Release {
+	uid, _ := uuid.Parse(r.UID)
+	return apitypes.Release{
+		Uid:               uid,
+		Phase:             apitypes.ReleasePhase(r.Phase),
+		CreationTimestamp: r.CreationTimestamp,
+		Spec:              releaseSpecToWire(r.Spec),
+	}
+}
+
+func releaseSpecToWire(s state.ReleaseSpec) apitypes.ReleaseSpec {
+	appUID, _ := uuid.Parse(s.AppUID)
+	spec := apitypes.ReleaseSpec{
+		AppUid:     appUID,
+		ReleaseSeq: s.ReleaseSeq,
+	}
+	if s.GitSha != "" {
+		spec.GitSha = &s.GitSha
+	}
+	if s.Image != "" {
+		spec.Image = &s.Image
+	}
+	if s.EnvHash != "" {
+		spec.EnvHash = &s.EnvHash
+	}
+	if s.CreatedBy != "" {
+		spec.CreatedBy = &s.CreatedBy
+	}
+	if s.RolledBackFrom != 0 {
+		v := s.RolledBackFrom
+		spec.RolledBackFrom = &v
+	}
+	if s.OriginalArtifactRelease != 0 {
+		v := s.OriginalArtifactRelease
+		spec.OriginalArtifactRelease = &v
+	}
+	return spec
+}
+
+// releaseActor returns a stable identifier for the caller of a
+// release-creating request: the Bearer token's sha256 prefix when
+// auth is on, falling back to the source IP. Matches the audit
+// logger's hashToken convention so cross-referencing audit.log
+// against the release ledger is straightforward.
+func releaseActor(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return hashToken(strings.TrimPrefix(h, "Bearer "))
+	}
+	return r.RemoteAddr
 }
 
 // volumeToView converts a supervisor Volume to the spec VolumeView.

@@ -1,12 +1,35 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/solcreek/creekd/internal/supervisor"
 )
+
+// EnvHash returns "sha256:" + hex over the sorted KEY=value
+// pairs of env. Used as the ReleaseSpec.EnvHash field so a
+// rollback can detect identical-vs-divergent env without
+// inspecting the values themselves. Order-insensitive: the hash
+// only depends on the SET of pairs, not their order in the input
+// slice.
+func EnvHash(env []string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	sorted := append([]string(nil), env...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	h.Write([]byte(strings.Join(sorted, "\x00")))
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
 
 // Release is the persisted ledger entry created on every deploy
 // (and every rollback — see CreateRelease's PriorActivePhase
@@ -30,15 +53,22 @@ type Release struct {
 // OriginalArtifactRelease) reference other Releases by seq within
 // the same app; zero means "not applicable" (fresh deploy, not a
 // rollback).
+//
+// ConfigSnapshot pins the supervisor.Config at release-creation
+// time so a future rollback can re-run the exact same workload.
+// 0.0.x has no image registry — the Config snapshot IS the
+// release artifact. 0.1.0 may layer image references on top but
+// keeps the snapshot for in-tree rollback semantics.
 type ReleaseSpec struct {
-	AppUID                  string `json:"app_uid"`
-	ReleaseSeq              int64  `json:"release_seq"`
-	GitSha                  string `json:"git_sha,omitempty"`
-	Image                   string `json:"image,omitempty"`
-	EnvHash                 string `json:"env_hash,omitempty"`
-	CreatedBy               string `json:"created_by,omitempty"`
-	RolledBackFrom          int64  `json:"rolled_back_from,omitempty"`
-	OriginalArtifactRelease int64  `json:"original_artifact_release,omitempty"`
+	AppUID                  string             `json:"app_uid"`
+	ReleaseSeq              int64              `json:"release_seq"`
+	GitSha                  string             `json:"git_sha,omitempty"`
+	Image                   string             `json:"image,omitempty"`
+	EnvHash                 string             `json:"env_hash,omitempty"`
+	CreatedBy               string             `json:"created_by,omitempty"`
+	RolledBackFrom          int64              `json:"rolled_back_from,omitempty"`
+	OriginalArtifactRelease int64              `json:"original_artifact_release,omitempty"`
+	ConfigSnapshot          *supervisor.Config `json:"config_snapshot,omitempty"`
 }
 
 // ReleasePhase is the closed enum of mutable phase values per

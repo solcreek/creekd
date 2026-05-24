@@ -132,6 +132,7 @@ const (
 	ErrorCodeInvalidRuntime          ErrorCode = "invalid_runtime"
 	ErrorCodeNotFound                ErrorCode = "not_found"
 	ErrorCodePortConflict            ErrorCode = "port_conflict"
+	ErrorCodeReleaseArtifactPruned   ErrorCode = "release_artifact_pruned"
 	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
 	ErrorCodeStorageCorrupted        ErrorCode = "storage_corrupted"
 	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
@@ -158,6 +159,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeNotFound:
 		return true
 	case ErrorCodePortConflict:
+		return true
+	case ErrorCodeReleaseArtifactPruned:
 		return true
 	case ErrorCodeResourceVersionMismatch:
 		return true
@@ -193,6 +196,27 @@ func (e EventType) Valid() bool {
 	case EventTypeRestart:
 		return true
 	case EventTypeStatusChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReleasePhase.
+const (
+	Active     ReleasePhase = "Active"
+	RolledBack ReleasePhase = "RolledBack"
+	Superseded ReleasePhase = "Superseded"
+)
+
+// Valid indicates whether the value is a known member of the ReleasePhase enum.
+func (e ReleasePhase) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case RolledBack:
+		return true
+	case Superseded:
 		return true
 	default:
 		return false
@@ -400,6 +424,53 @@ type ListVolumesResponse struct {
 	Volumes []VolumeView `json:"volumes"`
 }
 
+// Release One entry in an app's release ledger. Created on every
+// successful deploy + rollback. Immutable except for `phase`,
+// which transitions Active → Superseded | RolledBack as newer
+// releases land. Records are kept indefinitely; only the
+// underlying artifact images are GC'd (Phase 1.5).
+type Release struct {
+	CreationTimestamp time.Time    `json:"creationTimestamp"`
+	Phase             ReleasePhase `json:"phase"`
+
+	// Spec Immutable payload of one Release. `rolledBackFrom` +
+	// `originalArtifactRelease` reference the source release by
+	// ReleaseSeq within the same app; zero / unset means "fresh
+	// deploy, not a rollback".
+	Spec ReleaseSpec `json:"spec"`
+
+	// Uid UUIDv7 stable identity.
+	Uid openapi_types.UUID `json:"uid"`
+}
+
+// ReleasePhase defines model for Release.Phase.
+type ReleasePhase string
+
+// ReleaseSpec Immutable payload of one Release. `rolledBackFrom` +
+// `originalArtifactRelease` reference the source release by
+// ReleaseSeq within the same app; zero / unset means "fresh
+// deploy, not a rollback".
+type ReleaseSpec struct {
+	AppUid openapi_types.UUID `json:"appUid"`
+
+	// CreatedBy Identity of the caller that created this release.
+	CreatedBy *string `json:"createdBy,omitempty"`
+
+	// EnvHash sha256:<hex> over sorted KEY=value env pairs.
+	EnvHash *string `json:"envHash,omitempty"`
+	GitSha  *string `json:"gitSha,omitempty"`
+	Image   *string `json:"image,omitempty"`
+
+	// OriginalArtifactRelease First-appearance ReleaseSeq of the underlying artifact. Resolves rollback-chain ambiguity.
+	OriginalArtifactRelease *int64 `json:"originalArtifactRelease,omitempty"`
+
+	// ReleaseSeq Per-app monotonic counter; never reused.
+	ReleaseSeq int64 `json:"releaseSeq"`
+
+	// RolledBackFrom Immediate source ReleaseSeq if this release was created by a rollback.
+	RolledBackFrom *int64 `json:"rolledBackFrom,omitempty"`
+}
+
 // RestartRequest defines model for RestartRequest.
 type RestartRequest struct {
 	TimeoutMs *int64 `json:"timeout_ms,omitempty"`
@@ -516,6 +587,15 @@ type GetAppLogsParams struct {
 
 // GetAppLogsParamsFollow defines parameters for GetAppLogs.
 type GetAppLogsParamsFollow string
+
+// RollbackAppParams defines parameters for RollbackApp.
+type RollbackAppParams struct {
+	// To Target ReleaseSeq to roll back to.
+	To int64 `form:"to" json:"to"`
+
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
 
 // DeleteVolumeParams defines parameters for DeleteVolume.
 type DeleteVolumeParams struct {
