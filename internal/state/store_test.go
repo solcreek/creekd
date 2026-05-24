@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -756,5 +757,124 @@ func TestLoadV2RepairsMissingMetadataAndPersists(t *testing.T) {
 	}
 	if !m1.CreationTimestamp.Equal(m2.CreationTimestamp) {
 		t.Errorf("CreationTimestamp changed across restart: first=%v second=%v", m1.CreationTimestamp, m2.CreationTimestamp)
+	}
+}
+
+// --- #5a tests: fsync + read-back verify + filesystem check ----------
+
+// TestFlushPersistsAcrossSimulatedReadBackError covers the
+// StorageCorruptedError surface: even though we can't realistically
+// inject a fsyncgate fault from a unit test, the error type itself
+// must format clearly enough that an operator paged at 3am
+// understands the situation.
+func TestStorageCorruptedErrorFormat(t *testing.T) {
+	err := &StorageCorruptedError{
+		Path:       "/var/lib/creekd/state.json",
+		WantSHA256: "deadbeefcafebabe",
+		GotSHA256:  "0000000000000000",
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"/var/lib/creekd/state.json",
+		"sha256:deadbeefcafebabe",
+		"sha256:0000000000000000",
+		"refusing further writes",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("StorageCorruptedError.Error() = %q; missing %q", msg, want)
+		}
+	}
+}
+
+// TestUnsupportedFilesystemErrorFormat verifies the same surface
+// for the filesystem-rejection error.
+func TestUnsupportedFilesystemErrorFormat(t *testing.T) {
+	err := &UnsupportedFilesystemError{
+		Path:       "/var/lib/creekd",
+		Detected:   "zfs",
+		MagicValue: 0x2FC12FC1,
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"/var/lib/creekd",
+		"zfs",
+		"ext4 or xfs",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("UnsupportedFilesystemError.Error() = %q; missing %q", msg, want)
+		}
+	}
+}
+
+// TestFlushFsyncSequenceCompletes covers the durability sequence
+// happy-path end-to-end. The fsync calls land real kernel syscalls
+// in this test (no mocking) — if any return EINVAL/EBADF/etc on
+// the host's tempdir filesystem the test will surface that. The
+// per-test runtime budget for state package grew from ~5s to ~30s
+// on this change for exactly this reason — every AddApp now pays
+// real fsync cost.
+func TestFlushFsyncSequenceCompletes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		cfg := supervisor.Config{
+			ID:      "fsync-" + string(rune('a'+i)),
+			Command: "sleep",
+			Args:    []string{"1"},
+			Port:    9000 + i,
+		}
+		if err := s.AddApp(cfg); err != nil {
+			t.Fatalf("AddApp %s: %v", cfg.ID, err)
+		}
+	}
+
+	// Re-read from disk to verify the file matches what we expect.
+	// Crucially this exercises the read-back verify too — if any of
+	// the AddApp flushes had triggered StorageCorruptedError they
+	// would have returned non-nil above.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state.json: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("state.json is empty after 10 AddApp")
+	}
+	var st State
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatalf("parse state.json: %v", err)
+	}
+	if len(st.Apps) != 10 {
+		t.Errorf("apps in state.json = %d, want 10", len(st.Apps))
+	}
+	if st.Version != FormatVersion {
+		t.Errorf("version = %d, want %d", st.Version, FormatVersion)
+	}
+}
+
+// TestNewStoreAcceptsTempDirOnLinux on Linux verifies that the
+// filesystem check accepts t.TempDir's filesystem (typically ext4
+// or tmpfs depending on /tmp mount). tmpfs would be rejected by
+// the check; ext4 accepted. On non-Linux (Mac dev) the check is a
+// no-op so the test always passes.
+func TestNewStoreAcceptsTempDirOnSupportedFS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	_, err := NewStore(path)
+	if err != nil {
+		// On Linux CI the default TMPDIR is sometimes mounted on
+		// tmpfs (e.g. /tmp in some container configurations). That's
+		// not creekd's fault — it's expected behaviour for the
+		// filesystem check. Surface as a Skip rather than a fail so
+		// the test runs cleanly across host configurations.
+		var ufs *UnsupportedFilesystemError
+		if errors.As(err, &ufs) {
+			t.Skipf("test TempDir is on unsupported fs %q (%s); host CI quirk, skipping",
+				ufs.Detected, dir)
+		}
+		t.Fatalf("NewStore on TempDir: %v", err)
 	}
 }

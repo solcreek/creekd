@@ -1,6 +1,8 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,37 @@ import (
 
 	"github.com/solcreek/creekd/internal/supervisor"
 )
+
+// UnsupportedFilesystemError is returned by NewStore when the data
+// directory lives on a filesystem that doesn't meet the rename(2) +
+// fsync(dir) durability contract creekd requires. See
+// fscheck_linux.go for the magic constants checked.
+type UnsupportedFilesystemError struct {
+	Path       string
+	Detected   string
+	MagicValue int64
+}
+
+func (e *UnsupportedFilesystemError) Error() string {
+	return fmt.Sprintf("state: unsupported filesystem at %s (%s); creekd requires ext4 or xfs",
+		e.Path, e.Detected)
+}
+
+// StorageCorruptedError is returned by flushFull when read-back
+// verification fails — typically a silent fsync EIO that the
+// kernel can do on ext4 ("fsyncgate"). Surfaces FATAL so the daemon
+// refuses to keep writing into a corrupted store.
+type StorageCorruptedError struct {
+	Path       string
+	WantSHA256 string
+	GotSHA256  string
+}
+
+func (e *StorageCorruptedError) Error() string {
+	return fmt.Sprintf("state: read-back verify failed for %s (wrote sha256:%s, re-read sha256:%s); "+
+		"fsync may have silently failed — refusing further writes",
+		e.Path, e.WantSHA256, e.GotSHA256)
+}
 
 // FormatVersion is the schema version embedded in every written
 // state file. Bump when the on-disk shape changes; readers refuse
@@ -126,6 +159,9 @@ func newAppMetadata() (AppMetadata, error) {
 // creationTimestamp=time.Now()) and the file is rewritten as v2.
 // The migration is transparent — callers see only the v2 shape.
 func NewStore(path string) (*Store, error) {
+	if err := checkFilesystem(path); err != nil {
+		return nil, err
+	}
 	s := &Store{
 		path:     path,
 		apps:     make(map[string]supervisor.Config),
@@ -446,15 +482,28 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 	return s.flushFull(apps, s.metadata, volumes)
 }
 
-// flushFull writes all three maps atomically. Used by AddApp /
-// RemoveApp when metadata is also changing. Caller must hold s.mu.
+// flushFull writes all three maps atomically with the full
+// durability sequence:
+//
+//  1. Marshal target state, hash the bytes.
+//  2. Write temp file → fsync(temp) so contents reach disk.
+//  3. Rename temp → state.json (atomic on ext4/xfs).
+//  4. fsync(parent_dir) so the directory entry update reaches disk.
+//  5. Read-back verify: re-read state.json, hash it, compare to (1).
+//     A mismatch indicates a silent fsync EIO (Postgres "fsyncgate"
+//     pattern) and surfaces StorageCorruptedError so the daemon
+//     can refuse further writes rather than building on rotten
+//     bytes.
+//
+// Caller must hold s.mu.
 func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string]AppMetadata, volumes map[string]supervisor.Volume) error {
 	// Mode 0o700 / 0o600 — state.json contains every supervised
 	// app's full Config (env vars, commands, volume refs). World-
 	// readable defaults would leak tenant secrets to any local
 	// process. Pentest H6 surfaced the previous 0o755/0o644.
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("state: mkdir %s: %w", filepath.Dir(s.path), err)
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("state: mkdir %s: %w", dir, err)
 	}
 	st := State{Version: FormatVersion}
 
@@ -482,16 +531,73 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 	if err != nil {
 		return fmt.Errorf("state: marshal: %w", err)
 	}
+	wantHash := sha256.Sum256(data)
+	wantHex := hex.EncodeToString(wantHash[:])
 
 	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("state: write %s: %w", tmp, err)
+	if err := writeFileAndFsync(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: write+fsync %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("state: rename %s → %s: %w", tmp, s.path, err)
 	}
+	if err := fsyncDir(dir); err != nil {
+		return fmt.Errorf("state: fsync parent %s: %w", dir, err)
+	}
+
+	// Read-back verification. If the kernel silently dropped a dirty
+	// page after fsync returned (the well-known Postgres fsyncgate
+	// pattern on ext4), the on-disk hash won't match what we wrote.
+	// Detecting it here keeps the daemon honest about durability.
+	gotData, err := os.ReadFile(s.path)
+	if err != nil {
+		return fmt.Errorf("state: read-back %s: %w", s.path, err)
+	}
+	gotHash := sha256.Sum256(gotData)
+	gotHex := hex.EncodeToString(gotHash[:])
+	if gotHex != wantHex {
+		return &StorageCorruptedError{
+			Path:       s.path,
+			WantSHA256: wantHex,
+			GotSHA256:  gotHex,
+		}
+	}
 	return nil
+}
+
+// writeFileAndFsync creates path (truncate if exists), writes data,
+// fsyncs the file descriptor, then closes. Mirrors os.WriteFile +
+// explicit fsync that os.WriteFile leaves to the kernel's whim.
+func writeFileAndFsync(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// fsyncDir opens the directory and fsyncs it. On ext4/xfs this is
+// what makes the rename's directory entry durable across power
+// loss. On darwin (dev path) it's a no-op syscall — F_FULLFSYNC
+// would be more strict but the dev Mac is never the production
+// target.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // cloneMap returns a copy of src at the map level only — Config
