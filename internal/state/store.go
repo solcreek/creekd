@@ -114,14 +114,44 @@ type Volume struct {
 
 // Store serialises persisted state under a JSON file. Construct
 // with NewStore; every mutation flushes synchronously to disk.
+//
+// Concurrency model (#5b):
+//
+//   - locks: per-app RWMutexes exposed via Store.Locks() for callers
+//     (CAS middleware + handlers) to hold across the
+//     validate → If-Match → mutate → audit-WAL → flush sequence.
+//     Different apps' write locks are independent so two mutations
+//     against different apps proceed in parallel.
+//
+//   - flushMu: serialises the actual disk write step. Held briefly
+//     during snapshot+marshal+rename+verify. Independent of per-app
+//     locks so two mutations against different apps still queue at
+//     the disk-write step (necessary — state.json is shared) but the
+//     queue wait is microseconds-bounded, not seconds.
+//
+//   - memMu: protects the in-memory maps (apps, metadata, volumes)
+//     so reads via Apps / Meta / Volumes never observe a torn swap.
+//     Held briefly during snapshot at the start of each mutation and
+//     during the swap at the end. Readers use RLock; multiple
+//     concurrent readers proceed.
 type Store struct {
 	path string
 
-	mu       sync.Mutex
+	locks *LockManager
+
+	flushMu sync.Mutex
+	memMu   sync.RWMutex
+
 	apps     map[string]supervisor.Config // appID → config
 	metadata map[string]AppMetadata       // appID → envelope metadata
 	volumes  map[string]supervisor.Volume // volumeID → volume
 }
+
+// Locks returns the per-app LockManager. CAS middleware acquires
+// AppLock(id).Lock() before letting a mutation request through and
+// releases when the response is written; this guarantees the
+// validate → If-Match → mutate → flush sequence is atomic per app.
+func (s *Store) Locks() *LockManager { return s.locks }
 
 // newAppMetadata generates fresh envelope metadata for a brand-new
 // app. UID is UUIDv7 (RFC 9562) — time-ordered. Generation starts at
@@ -164,6 +194,7 @@ func NewStore(path string) (*Store, error) {
 	}
 	s := &Store{
 		path:     path,
+		locks:    NewLockManager(),
 		apps:     make(map[string]supervisor.Config),
 		metadata: make(map[string]AppMetadata),
 		volumes:  make(map[string]supervisor.Volume),
@@ -184,8 +215,8 @@ func (s *Store) Path() string { return s.path }
 // caller mutations to Args, Env, CgroupLimits, or Sandbox can't leak
 // back into the Store's persisted snapshot.
 func (s *Store) Apps() []supervisor.Config {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.memMu.RLock()
+	defer s.memMu.RUnlock()
 	ids := make([]string, 0, len(s.apps))
 	for id := range s.apps {
 		ids = append(ids, id)
@@ -217,20 +248,32 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 	if cfg.ID == "" {
 		return errors.New("state: empty app id")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// flushMu serialises the snapshot+marshal+write+swap sequence
+	// against other in-Store mutations. Per-app locks (Locks().AppLock)
+	// are the upstream caller's responsibility — they gate the wider
+	// validate → If-Match → mutate flow at handler scope.
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	// Snapshot under memMu.RLock so a concurrent reader (Apps / Meta)
+	// observes a consistent map.
+	s.memMu.RLock()
 	nextApps := cloneMap(s.apps)
+	nextMeta := cloneMetadataMap(s.metadata)
+	existingMeta, hasMeta := s.metadata[cfg.ID]
+	currentVolumes := s.volumes
+	s.memMu.RUnlock()
+
 	// Deep-clone the inbound config so a later mutation by the caller
 	// (e.g. appending to cfg.Env) cannot reach back into our snapshot.
 	nextApps[cfg.ID] = supervisor.CloneConfig(cfg)
-	nextMeta := cloneMetadataMap(s.metadata)
-	if existing, ok := s.metadata[cfg.ID]; ok {
+	if hasMeta {
 		// Deploy / overwrite: preserve identity, bump versions.
 		nextMeta[cfg.ID] = AppMetadata{
-			UID:               existing.UID,
-			CreationTimestamp: existing.CreationTimestamp,
-			Generation:        existing.Generation + 1,
-			ResourceVersion:   existing.ResourceVersion + 1,
+			UID:               existingMeta.UID,
+			CreationTimestamp: existingMeta.CreationTimestamp,
+			Generation:        existingMeta.Generation + 1,
+			ResourceVersion:   existingMeta.ResourceVersion + 1,
 		}
 	} else {
 		meta, err := newAppMetadata()
@@ -239,11 +282,14 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 		}
 		nextMeta[cfg.ID] = meta
 	}
-	if err := s.flushFull(nextApps, nextMeta, s.volumes); err != nil {
+	if err := s.flushFull(nextApps, nextMeta, currentVolumes); err != nil {
 		return err
 	}
+	// Swap in atomically against any concurrent reader.
+	s.memMu.Lock()
 	s.apps = nextApps
 	s.metadata = nextMeta
+	s.memMu.Unlock()
 	return nil
 }
 
@@ -255,28 +301,36 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 // removal drops the metadata too — there is no carry-over of the
 // previous UID if the same name is later re-spawned.
 func (s *Store) RemoveApp(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	s.memMu.RLock()
 	if _, ok := s.apps[id]; !ok {
+		s.memMu.RUnlock()
 		return nil
 	}
 	nextApps := cloneMap(s.apps)
-	delete(nextApps, id)
 	nextMeta := cloneMetadataMap(s.metadata)
+	currentVolumes := s.volumes
+	s.memMu.RUnlock()
+
+	delete(nextApps, id)
 	delete(nextMeta, id)
-	if err := s.flushFull(nextApps, nextMeta, s.volumes); err != nil {
+	if err := s.flushFull(nextApps, nextMeta, currentVolumes); err != nil {
 		return err
 	}
+	s.memMu.Lock()
 	s.apps = nextApps
 	s.metadata = nextMeta
+	s.memMu.Unlock()
 	return nil
 }
 
 // Meta returns the persisted envelope metadata for id. The bool is
 // false when no such app exists.
 func (s *Store) Meta(id string) (AppMetadata, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.memMu.RLock()
+	defer s.memMu.RUnlock()
 	m, ok := s.metadata[id]
 	return m, ok
 }
@@ -314,13 +368,13 @@ func (s *Store) load() error {
 			return err
 		}
 		// Persist forward as v2 so subsequent boots take the v2 path.
-		// flushBoth requires s.mu held. load() runs from the
-		// constructor so there's currently no contention, but taking
-		// the lock keeps the documented contract honest in case
-		// load() is ever called from a reload context later.
-		s.mu.Lock()
+		// load() runs single-threaded during NewStore — no concurrent
+		// access possible — but flushBoth requires flushMu (PR #6's
+		// per-app-lock refactor separated this from s.mu) so acquire
+		// it explicitly to honour the contract.
+		s.flushMu.Lock()
 		err := s.flushBoth(s.apps, s.volumes)
-		s.mu.Unlock()
+		s.flushMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("state: v1→v2 migration flush %s: %w", s.path, err)
 		}
@@ -404,9 +458,9 @@ func (s *Store) loadV2(data []byte) error {
 	// uid + creationTimestamp are never regenerated across restore.
 	// Mirrors the v1→v2 migration flush in load().
 	if repaired {
-		s.mu.Lock()
+		s.flushMu.Lock()
 		err := s.flushBoth(s.apps, s.volumes)
-		s.mu.Unlock()
+		s.flushMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("state: persist repaired v2 metadata %s: %w", s.path, err)
 		}
@@ -418,8 +472,8 @@ func (s *Store) loadV2(data []byte) error {
 // alphabetical order. Replayed at daemon start before any Apps so
 // Spawn's VolumeMount references resolve.
 func (s *Store) Volumes() []supervisor.Volume {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.memMu.RLock()
+	defer s.memMu.RUnlock()
 	ids := make([]string, 0, len(s.volumes))
 	for id := range s.volumes {
 		ids = append(ids, id)
@@ -438,30 +492,45 @@ func (s *Store) AddVolume(v supervisor.Volume) error {
 	if v.ID == "" {
 		return errors.New("state: empty volume id")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	s.memMu.RLock()
 	nextVolumes := cloneVolumeMap(s.volumes)
+	currentApps := s.apps
+	s.memMu.RUnlock()
+
 	nextVolumes[v.ID] = v
-	if err := s.flushBoth(s.apps, nextVolumes); err != nil {
+	if err := s.flushBoth(currentApps, nextVolumes); err != nil {
 		return err
 	}
+	s.memMu.Lock()
 	s.volumes = nextVolumes
+	s.memMu.Unlock()
 	return nil
 }
 
 // RemoveVolume drops the entry for id. Unknown id is a no-op.
 func (s *Store) RemoveVolume(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	s.memMu.RLock()
 	if _, ok := s.volumes[id]; !ok {
+		s.memMu.RUnlock()
 		return nil
 	}
 	nextVolumes := cloneVolumeMap(s.volumes)
+	currentApps := s.apps
+	s.memMu.RUnlock()
+
 	delete(nextVolumes, id)
-	if err := s.flushBoth(s.apps, nextVolumes); err != nil {
+	if err := s.flushBoth(currentApps, nextVolumes); err != nil {
 		return err
 	}
+	s.memMu.Lock()
 	s.volumes = nextVolumes
+	s.memMu.Unlock()
 	return nil
 }
 
@@ -477,9 +546,16 @@ func cloneVolumeMap(src map[string]supervisor.Volume) map[string]supervisor.Volu
 
 // flushBoth writes apps + the current metadata snapshot + the given
 // volumes map atomically. Used by Volume mutations + as the v1→v2
-// migration writeback path. Caller must hold s.mu.
+// migration writeback path. Caller must hold s.flushMu.
+//
+// Reads s.metadata under memMu.RLock — Volume mutations don't change
+// the app metadata map but the read still needs synchronisation
+// against concurrent AddApp/RemoveApp swaps.
 func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]supervisor.Volume) error {
-	return s.flushFull(apps, s.metadata, volumes)
+	s.memMu.RLock()
+	metaSnapshot := s.metadata
+	s.memMu.RUnlock()
+	return s.flushFull(apps, metaSnapshot, volumes)
 }
 
 // flushFull writes all three maps atomically with the full
@@ -495,7 +571,7 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 //     can refuse further writes rather than building on rotten
 //     bytes.
 //
-// Caller must hold s.mu.
+// Caller must hold s.flushMu.
 func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string]AppMetadata, volumes map[string]supervisor.Volume) error {
 	// Mode 0o700 / 0o600 — state.json contains every supervised
 	// app's full Config (env vars, commands, volume refs). World-

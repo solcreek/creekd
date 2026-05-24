@@ -85,6 +85,20 @@ func (s *Server) casMiddleware() apitypes.MiddlewareFunc {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// Per DESIGN §"Mutex granularity": acquire the per-app
+			// write lock for the entire mutation request lifecycle so
+			// the (If-Match check → handler → store flush) sequence
+			// is atomic per app. Different apps' mutations proceed in
+			// parallel; same-app mutations serialise here.
+			//
+			// Hold the lock until the response is written. The
+			// previous global admin-API mutex is gone from this PR
+			// (#5b) onward.
+			unlock := s.store.Locks().AppLock(id)
+			unlock.Lock()
+			defer unlock.Unlock()
+
 			meta, ok := s.store.Meta(id)
 			if !ok {
 				next.ServeHTTP(w, r)
