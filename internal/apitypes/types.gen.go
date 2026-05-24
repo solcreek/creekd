@@ -105,16 +105,17 @@ func (e AppViewStatus) Valid() bool {
 
 // Defines values for ErrorCode.
 const (
-	ErrorCodeAlreadyRunning  ErrorCode = "already_running"
-	ErrorCodeBadRequest      ErrorCode = "bad_request"
-	ErrorCodeConflict        ErrorCode = "conflict"
-	ErrorCodeDeployUnhealthy ErrorCode = "deploy_unhealthy"
-	ErrorCodeInternal        ErrorCode = "internal"
-	ErrorCodeInvalidId       ErrorCode = "invalid_id"
-	ErrorCodeInvalidRuntime  ErrorCode = "invalid_runtime"
-	ErrorCodeNotFound        ErrorCode = "not_found"
-	ErrorCodePortConflict    ErrorCode = "port_conflict"
-	ErrorCodeUnauthorized    ErrorCode = "unauthorized"
+	ErrorCodeAlreadyRunning          ErrorCode = "already_running"
+	ErrorCodeBadRequest              ErrorCode = "bad_request"
+	ErrorCodeConflict                ErrorCode = "conflict"
+	ErrorCodeDeployUnhealthy         ErrorCode = "deploy_unhealthy"
+	ErrorCodeInternal                ErrorCode = "internal"
+	ErrorCodeInvalidId               ErrorCode = "invalid_id"
+	ErrorCodeInvalidRuntime          ErrorCode = "invalid_runtime"
+	ErrorCodeNotFound                ErrorCode = "not_found"
+	ErrorCodePortConflict            ErrorCode = "port_conflict"
+	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
+	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -137,6 +138,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeNotFound:
 		return true
 	case ErrorCodePortConflict:
+		return true
+	case ErrorCodeResourceVersionMismatch:
 		return true
 	case ErrorCodeUnauthorized:
 		return true
@@ -458,11 +461,26 @@ type BadRequest = ErrorResponse
 // NotFound defines model for NotFound.
 type NotFound = ErrorResponse
 
+// PreconditionFailed defines model for PreconditionFailed.
+type PreconditionFailed = ErrorResponse
+
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = ErrorResponse
 
 // bearerAuthContextKey is the context key for bearerAuth security scheme
 type bearerAuthContextKey string
+
+// StopAppParams defines parameters for StopApp.
+type StopAppParams struct {
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
+
+// DeployAppParams defines parameters for DeployApp.
+type DeployAppParams struct {
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
 
 // GetAppLogsParams defines parameters for GetAppLogs.
 type GetAppLogsParams struct {

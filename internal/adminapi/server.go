@@ -47,10 +47,13 @@ func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token stri
 		token:  token,
 		mux:    http.NewServeMux(),
 	}
-	// Wire the generated router with auth+audit middleware.
+	// Wire the generated router. Middleware order matters: auth runs
+	// first (reject unauthenticated requests before consulting state);
+	// CAS If-Match check next (cheap, deterministic); audit last so it
+	// observes the final status code including 401 / 412 paths.
 	apiHandler := apitypes.HandlerWithOptions(s, apitypes.StdHTTPServerOptions{
 		BaseRouter:       s.mux,
-		Middlewares:      []apitypes.MiddlewareFunc{s.authMiddleware(), s.auditMiddleware()},
+		Middlewares:      []apitypes.MiddlewareFunc{s.authMiddleware(), s.casMiddleware(), s.auditMiddleware()},
 		ErrorHandlerFunc: s.handleParamError,
 	})
 	_ = apiHandler // routes registered on s.mux
@@ -258,7 +261,7 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 	writeJSON(w, http.StatusOK, appToEnvelope(app, meta))
 }
 
-func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
+func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
 	if err := s.sup.Stop(id); err != nil {
 		if errors.Is(err, supervisor.ErrNotFound) {
 			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
@@ -280,7 +283,7 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
+func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, _ apitypes.DeployAppParams) {
 	var req apitypes.DeployRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())

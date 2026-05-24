@@ -93,7 +93,18 @@ paths:
     delete:
       operationId: stopApp
       summary: Stop and remove an app
+      description: |
+        Accepts optional `If-Match: <resourceVersion>` header.
+        Mismatch → 412 Precondition Failed with current rv in
+        response body. Missing header → unconditional delete, with
+        `Warning: 299 - "unconditional-write"` response header.
       tags: [apps]
+      parameters:
+        - in: header
+          name: If-Match
+          schema:
+            type: string
+          description: Current resourceVersion (opaque). Mismatch yields 412.
       responses:
         "204":
           description: App stopped
@@ -101,6 +112,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
 
   /v1/apps/{id}/deploy:
     parameters:
@@ -109,7 +122,18 @@ paths:
     post:
       operationId: deployApp
       summary: Blue-green deploy a new version
+      description: |
+        Accepts optional `If-Match: <resourceVersion>` header.
+        Mismatch → 412 Precondition Failed with current rv in
+        response body. Missing header → unconditional deploy, with
+        `Warning: 299 - "unconditional-write"` response header.
       tags: [apps]
+      parameters:
+        - in: header
+          name: If-Match
+          schema:
+            type: string
+          description: Current resourceVersion (opaque). Mismatch yields 412.
       requestBody:
         required: true
         content:
@@ -135,6 +159,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
         "502":
           description: New version failed health check
           content:
@@ -412,6 +438,22 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    PreconditionFailed:
+      description: |
+        If-Match header did not match the current resourceVersion.
+        Response body includes the current resourceVersion so clients
+        can retry. See DESIGN-self-host-state.md §"First-party CLI
+        MUST send If-Match".
+      headers:
+        ETag:
+          description: Current resourceVersion (opaque string) of the resource.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     Runtime:
       type: string
@@ -429,6 +471,7 @@ components:
         - invalid_id
         - invalid_runtime
         - deploy_unhealthy
+        - resource_version_mismatch
         - internal
 
     ErrorResponse:
