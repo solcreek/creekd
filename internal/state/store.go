@@ -202,7 +202,74 @@ func NewStore(path string) (*Store, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	// WAL replay-forward: any pending record without a matching
+	// commit captures a crash mid-write. Replay re-writes the
+	// pending's full state.json payload then emits a commit so the
+	// next boot sees nothing to do. See wal.go for the on-disk
+	// shape.
+	if err := s.replayWAL(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// replayWAL scans the WAL for orphan pending records and re-applies
+// the latest one's payload as state.json. After replay the
+// in-memory maps are repopulated to match.
+//
+// Most boots find no orphans — fast path returns immediately. When
+// orphans exist (crash recovery), the latest pending's payload
+// reflects the most recent intended state (per-app mutex serialises
+// same-app mutations; cross-app the LAST pending in the WAL is
+// always the freshest cumulative snapshot since flushFull holds
+// flushMu so only one mutation lands at a time).
+func (s *Store) replayWAL() error {
+	orphans, err := scanOrphanPending(walPath(s.path))
+	if err != nil {
+		return fmt.Errorf("state: scan WAL for replay: %w", err)
+	}
+	if len(orphans) == 0 {
+		return nil
+	}
+	latest := orphans[len(orphans)-1]
+	payload, err := decodePendingPayload(latest)
+	if err != nil {
+		return err
+	}
+
+	// Apply the payload as state.json via the same durability
+	// sequence as flushFull, MINUS the WAL writes (we're recovering
+	// FROM the WAL — re-appending pending would be a loop).
+	dir := filepath.Dir(s.path)
+	tmp := s.path + ".tmp"
+	if err := writeFileAndFsync(tmp, payload, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: replay write+fsync: %w", err)
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: replay rename: %w", err)
+	}
+	if err := fsyncDir(dir); err != nil {
+		return fmt.Errorf("state: replay fsync parent: %w", err)
+	}
+
+	// Repopulate in-memory maps from the replayed payload — load()
+	// already ran above against the pre-crash state.json, so the
+	// maps are stale. Drop them and re-decode from the new payload.
+	s.apps = make(map[string]supervisor.Config)
+	s.metadata = make(map[string]AppMetadata)
+	s.volumes = make(map[string]supervisor.Volume)
+	if err := s.loadV2(payload); err != nil {
+		return fmt.Errorf("state: replay decode payload: %w", err)
+	}
+
+	// Close the chain with a commit-after-replay record so the next
+	// boot won't try to replay this token again.
+	if err := appendCommit(walPath(s.path), latest.Token); err != nil {
+		return fmt.Errorf("state: replay commit: %w", err)
+	}
+	return nil
 }
 
 // Path returns the configured file path.
@@ -559,17 +626,27 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 }
 
 // flushFull writes all three maps atomically with the full
-// durability sequence:
+// durability + WAL sequence:
 //
 //  1. Marshal target state, hash the bytes.
-//  2. Write temp file → fsync(temp) so contents reach disk.
-//  3. Rename temp → state.json (atomic on ext4/xfs).
-//  4. fsync(parent_dir) so the directory entry update reaches disk.
-//  5. Read-back verify: re-read state.json, hash it, compare to (1).
+//  2. Append a pending record to <path>.wal with the bytes + hash;
+//     fsync the WAL.
+//  3. Write temp file → fsync(temp) so contents reach disk.
+//  4. Rename temp → state.json (atomic on ext4/xfs).
+//  5. fsync(parent_dir) so the directory entry update reaches disk.
+//  6. Read-back verify: re-read state.json, hash it, compare to (1).
 //     A mismatch indicates a silent fsync EIO (Postgres "fsyncgate"
 //     pattern) and surfaces StorageCorruptedError so the daemon
 //     can refuse further writes rather than building on rotten
 //     bytes.
+//  7. Append a commit record to the WAL referencing the pending
+//     token; fsync the WAL.
+//
+// Crash anywhere between (2)'s fsync and (7)'s fsync produces an
+// orphan pending without commit. Boot replay-forward (in load())
+// detects orphans and re-writes their payload as state.json — the
+// pending captured the full bytes that should land, so replay is
+// deterministic.
 //
 // Caller must hold s.flushMu.
 func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string]AppMetadata, volumes map[string]supervisor.Volume) error {
@@ -610,6 +687,35 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 	wantHash := sha256.Sum256(data)
 	wantHex := hex.EncodeToString(wantHash[:])
 
+	// WAL pending FIRST — its fsync makes durable the intent to
+	// land the new state. A subsequent crash (kernel panic, power
+	// loss, kill -9) triggers boot replay-forward of this token.
+	// A subsequent SOFT failure (read-only directory, fsync EIO)
+	// is recovered by emitting a rollback so the next boot treats
+	// the pending as a no-op rather than materialising an intent
+	// the caller observed as rejected.
+	walFile := walPath(s.path)
+	token, err := appendPending(walFile, data)
+	if err != nil {
+		return fmt.Errorf("state: wal pending: %w", err)
+	}
+
+	// Anchor for the rollback-on-error path. Set rollbackOnErr =
+	// false right before returning success so the deferred rollback
+	// is a no-op on the happy path.
+	rollbackOnErr := true
+	defer func() {
+		if rollbackOnErr {
+			// Best-effort rollback. If the WAL itself is broken
+			// here (e.g. disk full) the next boot will see an
+			// orphan pending and replay it — same outcome the
+			// pre-rollback DESIGN intended. Either way the daemon
+			// state stays consistent with on-disk reality after
+			// the next boot.
+			_ = appendRollback(walFile, token)
+		}
+	}()
+
 	tmp := s.path + ".tmp"
 	if err := writeFileAndFsync(tmp, data, 0o600); err != nil {
 		_ = os.Remove(tmp)
@@ -640,6 +746,15 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 			GotSHA256:  gotHex,
 		}
 	}
+
+	// WAL commit LAST — confirms the new state landed durably. Any
+	// next-boot scan that finds this token committed knows it can
+	// skip replay. fsync ensures we don't observe a "rolled back"
+	// commit later via Linux's writeback cache.
+	if err := appendCommit(walFile, token); err != nil {
+		return fmt.Errorf("state: wal commit: %w", err)
+	}
+	rollbackOnErr = false
 	return nil
 }
 
