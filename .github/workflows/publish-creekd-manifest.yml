@@ -65,10 +65,26 @@ jobs:
       # main.
       - run: pnpm test
 
+      # Skip the publish step when this exact version is already on
+      # npm — happens when the first release was cut manually with an
+      # OTP before the tag was pushed. Re-running the tag stays safe.
+      - name: Check if version already published
+        if: github.event_name == 'push'
+        id: published
+        run: |
+          pkg_name=$(node -p "require('./package.json').name")
+          pkg_version=$(node -p "require('./package.json').version")
+          if npm view "$pkg_name@$pkg_version" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$pkg_name@$pkg_version already on npm — skipping publish"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # OIDC trusted publishing exchanges the GitHub Actions identity
       # for an npm publish token. Requires the package's Trusted
       # Publisher to be configured at npmjs.com → package access.
       # Skipped on workflow_dispatch so manual verifications never
       # accidentally cut a release.
       - run: npm publish --provenance --access public
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.published.outputs.skip != 'true'
