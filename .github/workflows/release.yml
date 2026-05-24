@@ -5,11 +5,18 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write   # needed for the goreleaser action to create releases
+  contents: write    # goreleaser needs to create the release
+  id-token: write    # OIDC for cosign keyless signing + SLSA generator
+  attestations: write # GitHub-native attestations (SLSA provenance)
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    outputs:
+      # Comma-separated list of digests goreleaser produced. Consumed
+      # by the SLSA generator job below to attest exactly the bytes
+      # that hit the release page — no rebuild, no chance of drift.
+      hashes: ${{ steps.hashes.outputs.hashes }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -20,6 +27,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          # Pin sigstore/cosign to a known major. v2.x is the current
+          # GA line; v2 includes the sign-blob keyless flow.
+          cosign-release: "v2.4.1"
+
       - name: goreleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -27,3 +41,29 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: compute artifact hashes for SLSA attestation
+        id: hashes
+        # SHA256 every release asset that's a tarball or binary so the
+        # SLSA generator can attest the exact bytes goreleaser produced.
+        # Encode the multi-line input as base64 per slsa-framework
+        # convention to survive GitHub Actions' env-var sanitisation.
+        run: |
+          set -euo pipefail
+          cd dist
+          hashes=$(sha256sum *.tar.gz checksums.txt | base64 -w0)
+          echo "hashes=${hashes}" >> "$GITHUB_OUTPUT"
+
+  # SLSA Level 3 build provenance for every artifact in the release.
+  # Runs in a separate reusable workflow so the attestation chain
+  # has its own audit trail and isn't co-mingled with the build job.
+  provenance:
+    needs: [goreleaser]
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
+      upload-assets: true

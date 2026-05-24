@@ -11,11 +11,27 @@
 #   CREEKD_VERSION    pin a specific tag (default: latest)
 #   CREEKD_PREFIX     install dir (default: /usr/local/bin if root,
 #                     else $HOME/.local/bin)
+#   CREEKD_VERIFY_COSIGN
+#                     "1" → verify cosign keyless signature on
+#                     checksums.txt against the expected signer
+#                     identity (release.yml in this repo). Defaults
+#                     to soft-attempt: verify if cosign is on PATH,
+#                     skip otherwise with a WARN. Set to "1" to
+#                     hard-require — missing cosign aborts the
+#                     install with a clear error.
 set -eu
 
 REPO="solcreek/creekd"
 VERSION="${CREEKD_VERSION:-}"
 PREFIX="${CREEKD_PREFIX:-}"
+VERIFY_COSIGN="${CREEKD_VERIFY_COSIGN:-}"
+# OIDC subject identity that signs every release via
+# .github/workflows/release.yml. Pinned here so a fork or attacker
+# cannot substitute a different release pipeline and have their sig
+# pass verification — the expected identity is fixed at install
+# time. Updated only when this script's REPO changes.
+COSIGN_IDENTITY_REGEX="^https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v.*$"
+COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 # --- helpers ------------------------------------------------------
 
@@ -98,6 +114,37 @@ curl -fsSL -o "$tmp/$tar_name" "$tar_url" \
 log "==> downloading checksums.txt"
 curl -fsSL -o "$tmp/checksums.txt" "$sha_url" \
     || err "download failed: $sha_url"
+
+# Cosign signature + Fulcio cert sit alongside checksums.txt in the
+# release. Pull them speculatively — verification below only fires
+# if both cosign and the assets are present.
+sig_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt.sig"
+crt_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt.pem"
+curl -fsSL -o "$tmp/checksums.txt.sig" "$sig_url" 2>/dev/null || true
+curl -fsSL -o "$tmp/checksums.txt.pem" "$crt_url" 2>/dev/null || true
+
+# --- verify cosign signature -------------------------------------
+
+if command -v cosign >/dev/null 2>&1 \
+   && [ -s "$tmp/checksums.txt.sig" ] \
+   && [ -s "$tmp/checksums.txt.pem" ]; then
+    log "==> verifying cosign signature on checksums.txt"
+    if cosign verify-blob \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        --certificate "$tmp/checksums.txt.pem" \
+        --signature "$tmp/checksums.txt.sig" \
+        "$tmp/checksums.txt" >/dev/null 2>&1; then
+        log "==> cosign verified ($COSIGN_OIDC_ISSUER)"
+    else
+        err "cosign verification failed — checksums.txt signature did not match the expected release-pipeline identity"
+    fi
+elif [ "$VERIFY_COSIGN" = "1" ]; then
+    err "CREEKD_VERIFY_COSIGN=1 set but cosign or signature assets unavailable — aborting"
+else
+    log "note: skipping cosign verification (cosign or sig assets not present)"
+    log "      install cosign + re-run with CREEKD_VERIFY_COSIGN=1 to hard-require"
+fi
 
 # --- verify checksum ---------------------------------------------
 
