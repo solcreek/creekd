@@ -265,9 +265,11 @@ func TestListAndGet(t *testing.T) {
 	if envelope.Spec.Port == nil || *envelope.Spec.Port != p1 {
 		t.Errorf("spec.port = %v, want %d", envelope.Spec.Port, p1)
 	}
-	if envelope.Status.Phase != apitypes.AppStatusPhase("running") &&
-		envelope.Status.Phase != apitypes.AppStatusPhase("starting") {
-		t.Errorf("status.phase = %q, want running|starting", envelope.Status.Phase)
+	if len(envelope.Status.Conditions) != 4 {
+		t.Errorf("status.conditions length = %d, want 4 (Ready/Progressing/Degraded/BackupReady)", len(envelope.Status.Conditions))
+	}
+	if envelope.Status.Conditions[0].Type != apitypes.ConditionTypeReady {
+		t.Errorf("conditions[0].type = %q, want Ready (canonical order)", envelope.Status.Conditions[0].Type)
 	}
 	// Test server lacks a store, so the identity fields of metadata
 	// (uid / generation / resourceVersion / creationTimestamp) are
@@ -275,7 +277,6 @@ func TestListAndGet(t *testing.T) {
 	// This path is documented behavior — the runtime status is still
 	// authoritative. Once store is wired in for tests (see
 	// TestGetAppEnvelopeWithStore), the identity fields populate.
-	// Phase is the K8s 1.13-deprecated pattern — see BACKLOG.md API-07.
 }
 
 // TestGetAppEnvelopeWithStore verifies the full envelope shape when

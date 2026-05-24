@@ -372,8 +372,7 @@ paths:
         - name: force
           in: query
           schema:
-            type: string
-            enum: ["true"]
+            type: boolean
           description: Force delete even if apps reference this volume
       responses:
         "204":
@@ -691,25 +690,48 @@ components:
         port:
           type: integer
 
+    Condition:
+      type: object
+      description: |
+        Status of one named runtime condition. Mirrors the K8s
+        condition tuple: a closed type vocabulary, tri-state status
+        (True / False / Unknown), and the timestamp of the last
+        observed transition. `reason` is a CamelCase token for
+        machine consumption; `message` is human-readable.
+      required: [type, status, lastTransitionTime, reason]
+      properties:
+        type:
+          type: string
+          enum: [Ready, Progressing, Degraded, BackupReady]
+        status:
+          type: string
+          enum: ["True", "False", "Unknown"]
+        lastTransitionTime:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        message:
+          type: string
+
     AppStatus:
       type: object
       description: Observed state. Server-written; clients receive 405 on writes.
-      required: [observedGeneration, phase, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
+      required: [observedGeneration, conditions, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
       properties:
         observedGeneration:
           type: integer
           format: int64
           description: Last spec generation the deploy flow has converged to a healthy state on.
-        phase:
-          type: string
-          # Mirror supervisor.Status.String() output, same as AppView.status.
-          # See the comment on AppView.status for rationale (hyphenated
-          # crash-looping is the canonical wire format).
-          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
+        conditions:
+          type: array
           description: |
-            Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
-            here for the calibration PR while the Release ledger +
-            conditions design lands separately. See BACKLOG.md API-07.
+            Closed set of observed condition types: Ready, Progressing,
+            Degraded, BackupReady. Recomputed at GET time from supervisor
+            runtime state. The set is fixed in v1alpha1 — adding a new
+            condition type requires an ADR.
+          items:
+            $ref: "#/components/schemas/Condition"
         currentPid:
           type: integer
         currentPort:

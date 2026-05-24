@@ -23,11 +23,12 @@ var _ apitypes.ServerInterface = (*Server)(nil)
 // Server is the HTTP/JSON admin handler. Construct with New; obtain
 // the http.Handler via Handler.
 type Server struct {
-	sup    *supervisor.Supervisor
-	router *dispatch.Router
-	token  string
-	store  *state.Store
-	audit  *AuditLogger
+	sup        *supervisor.Supervisor
+	router     *dispatch.Router
+	token      string
+	store      *state.Store
+	audit      *AuditLogger
+	conditions *conditionTracker
 
 	mux *http.ServeMux
 }
@@ -42,10 +43,11 @@ func (s *Server) SetAuditLogger(a *AuditLogger) { s.audit = a }
 // New returns a Server backed by sup.
 func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token string) *Server {
 	s := &Server{
-		sup:    sup,
-		router: dispatchRouter,
-		token:  token,
-		mux:    http.NewServeMux(),
+		sup:        sup,
+		router:     dispatchRouter,
+		token:      token,
+		conditions: newConditionTracker(),
+		mux:        http.NewServeMux(),
 	}
 	// Wire the generated router. Middleware execution order on the
 	// inbound path: audit → auth → cas → handler. Audit wraps the
@@ -299,7 +301,7 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 			meta = m
 		}
 	}
-	writeJSON(w, http.StatusOK, appToEnvelope(app, meta))
+	writeJSON(w, http.StatusOK, appToEnvelope(app, meta, s.conditions))
 }
 
 func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
@@ -319,6 +321,9 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 			writeStoreError(w, "state.RemoveApp", err)
 			return
 		}
+	}
+	if s.conditions != nil {
+		s.conditions.forget(id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -521,7 +526,7 @@ func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.
 		tail = *params.Tail
 	}
 
-	follow := params.Follow != nil && *params.Follow == apitypes.GetAppLogsParamsFollowTrue
+	follow := params.Follow != nil && *params.Follow == apitypes.True
 
 	if follow {
 		streamLogs(w, r, logPath, tail)
@@ -585,7 +590,7 @@ func (s *Server) GetVolume(w http.ResponseWriter, _ *http.Request, id apitypes.V
 }
 
 func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitypes.VolumeID, params apitypes.DeleteVolumeParams) {
-	force := params.Force != nil && *params.Force == apitypes.DeleteVolumeParamsForceTrue
+	force := params.Force != nil && *params.Force
 
 	if err := s.sup.UnregisterVolume(id, force); err != nil {
 		switch {

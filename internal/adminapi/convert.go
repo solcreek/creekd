@@ -99,11 +99,17 @@ func appToView(app *supervisor.App) apitypes.AppView {
 // state.AppMetadata into the k8s-style envelope (apitypes.App). Used
 // by GetApp as the first endpoint to expose the envelope shape.
 //
-// `phase` (status.phase) is the K8s 1.13-deprecated phase pattern;
-// kept here for the envelope-refactor calibration window. See
-// BACKLOG.md API-07: refactor to conditions array before broader
-// envelope rollout (or document the divergence in red-lines).
-func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
+// Conditions are recomputed from supervisor runtime state via the
+// caller-supplied tracker so LastTransitionTime reflects the real
+// moment of the last status flip across calls. Tracker may be nil
+// in tests that don't care about LTT continuity; in that case a
+// fresh tracker is constructed per call (LTT = now).
+//
+// observedGeneration is wired through but not yet asynchronous;
+// see #10 for the dedicated async writer that will eventually
+// populate it from the deploy flow rather than mirroring
+// meta.Generation.
+func appToEnvelope(app *supervisor.App, meta state.AppMetadata, ct *conditionTracker) apitypes.App {
 	if app == nil {
 		return apitypes.App{}
 	}
@@ -112,6 +118,12 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
 	// means state was corrupted — we surface a zero UID rather than
 	// panic in a handler.
 	parsedUID, _ := uuid.Parse(meta.UID)
+
+	if ct == nil {
+		ct = newConditionTracker()
+	}
+	observedGen := meta.Generation // see comment above; #10 will fix
+	conditions := ct.computeAppConditions(app.ID, app.Status(), meta.Generation, observedGen, time.Now().UTC())
 
 	envelope := apitypes.App{
 		ApiVersion: apitypes.CreekDevv1alpha1,
@@ -125,8 +137,8 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
 		},
 		Spec: apitypes.AppSpec{},
 		Status: apitypes.AppStatus{
-			ObservedGeneration: meta.Generation,
-			Phase:              apitypes.AppStatusPhase(app.Status().String()),
+			ObservedGeneration: observedGen,
+			Conditions:         conditions,
 			CurrentPid:         app.PID(),
 			CurrentPort:        app.Port,
 			RestartCount:       app.RestartCount(),
