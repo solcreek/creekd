@@ -704,7 +704,7 @@ func newDeployCaptureServer(t *testing.T) (string, *deployCapture) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(apitypes.AppView{
 				Id:     "deploy-from-test",
-				Status: apitypes.AppViewStatusRunning,
+				Status: apitypes.Running,
 				Port:   cap.Request.Port,
 			})
 			return
