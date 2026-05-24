@@ -1,6 +1,8 @@
 # Build artifacts
 /creekd
 /creekd-*
+/creekctl
+/creekctl-*
 /bin/
 /dist/
 
