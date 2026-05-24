@@ -135,6 +135,7 @@ const (
 	ErrorCodeReleaseArtifactPruned   ErrorCode = "release_artifact_pruned"
 	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
 	ErrorCodeStorageCorrupted        ErrorCode = "storage_corrupted"
+	ErrorCodeSystemdHardeningDrift   ErrorCode = "systemd_hardening_drift"
 	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
 	ErrorCodeUnsupportedFilesystem   ErrorCode = "unsupported_filesystem"
 )
@@ -165,6 +166,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeResourceVersionMismatch:
 		return true
 	case ErrorCodeStorageCorrupted:
+		return true
+	case ErrorCodeSystemdHardeningDrift:
 		return true
 	case ErrorCodeUnauthorized:
 		return true
