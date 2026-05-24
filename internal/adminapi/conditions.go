@@ -11,7 +11,9 @@ import (
 // conditionTracker holds the per-app observed Condition tuple so
 // the GET handler can report LastTransitionTime that reflects the
 // real moment of the last status flip, not the moment of the
-// request.
+// request. It also tracks the Progressing-became-True monotonic
+// timestamp so the progressing_timeout DeployTimeout flip
+// (DESIGN §"progressing_timeout uses monotonic clock") can fire.
 //
 // The map is keyed by appID then ConditionType. It is process-
 // local (NOT persisted into state.json in 0.0.x) — after restart,
@@ -21,10 +23,28 @@ import (
 type conditionTracker struct {
 	mu sync.Mutex
 	m  map[string]map[apitypes.ConditionType]apitypes.Condition
+	// progressingStart records the moment Progressing flipped to True
+	// for each app. Cleared when Progressing leaves True. Used purely
+	// for the timeout check; LTT continues to come from m.
+	progressingStart map[string]time.Time
+	// progressingTimeout caps how long Progressing may stay True
+	// before flipping Progressing=False / Degraded=True
+	// reason=DeployTimeout. Default 5 min per DESIGN. Exposed as a
+	// field (not a constant) so tests can drive shorter windows.
+	progressingTimeout time.Duration
 }
 
+// defaultProgressingTimeout matches DESIGN-self-host-state.md
+// §"Condition types": "Progressing=True ... within
+// progressing_timeout (default 5 min)".
+const defaultProgressingTimeout = 5 * time.Minute
+
 func newConditionTracker() *conditionTracker {
-	return &conditionTracker{m: map[string]map[apitypes.ConditionType]apitypes.Condition{}}
+	return &conditionTracker{
+		m:                  map[string]map[apitypes.ConditionType]apitypes.Condition{},
+		progressingStart:   map[string]time.Time{},
+		progressingTimeout: defaultProgressingTimeout,
+	}
 }
 
 // computeAppConditions returns the four-condition slice for one
@@ -117,6 +137,11 @@ func (t *conditionTracker) computeAppConditions(appID string, status supervisor.
 		prog.Reason = "DeployInFlight"
 	}
 
+	// Apply the progressing_timeout flip BEFORE LTT capture so a
+	// just-triggered DeployTimeout transition gets a fresh LTT
+	// stamp rather than carrying the previous DeployInFlight one.
+	t.applyProgressingTimeout(appID, &prog, &deg, now)
+
 	// BackupReady — Tier 0 ships but the drill machinery + Tier 1
 	// don't exist yet in 0.0.x. We can't truthfully say "True"
 	// (no drill has run) or "False" (Tier 0 backups may be fine);
@@ -127,6 +152,39 @@ func (t *conditionTracker) computeAppConditions(appID string, status supervisor.
 	out := []apitypes.Condition{ready, prog, deg, backup}
 	t.applyTransitionTimes(appID, out, now)
 	return out
+}
+
+// applyProgressingTimeout mutates prog/deg in-place when Progressing
+// has been True for longer than the tracker's progressing_timeout.
+// Returns the (possibly-flipped) pair plus a hint that the caller
+// can use to clear progressingStart when Progressing has moved
+// away from True. Acquires the tracker mutex internally.
+func (t *conditionTracker) applyProgressingTimeout(appID string, prog, deg *apitypes.Condition, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if prog.Status != apitypes.ConditionStatusTrue {
+		// Progressing left True (or never went). Clear the
+		// monotonic anchor so the NEXT True→False→True cycle is
+		// measured from its own start, not the previous one.
+		delete(t.progressingStart, appID)
+		return
+	}
+	started, seen := t.progressingStart[appID]
+	if !seen {
+		t.progressingStart[appID] = now
+		return
+	}
+	if now.Sub(started) <= t.progressingTimeout {
+		return
+	}
+	// Timeout exceeded. Per DESIGN: Progressing flips False,
+	// Degraded flips True, both with reason=DeployTimeout. The
+	// CLI surfaces this via the deploy_stuck error code on --watch
+	// polls; the server-side wire just reports the conditions.
+	prog.Status = apitypes.ConditionStatusFalse
+	prog.Reason = "DeployTimeout"
+	deg.Status = apitypes.ConditionStatusTrue
+	deg.Reason = "DeployTimeout"
 }
 
 // applyTransitionTimes overwrites c.LastTransitionTime on each
@@ -159,8 +217,10 @@ func (t *conditionTracker) applyTransitionTimes(appID string, conds []apitypes.C
 
 // forget drops the per-app tracker entries on app delete so a
 // future create with the same name starts fresh. Idempotent.
+// Clears both the LTT map AND the progressing-monotonic anchor.
 func (t *conditionTracker) forget(appID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.m, appID)
+	delete(t.progressingStart, appID)
 }

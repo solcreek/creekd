@@ -124,8 +124,7 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata, ct *conditionTra
 	if ct == nil {
 		ct = newConditionTracker()
 	}
-	observedGen := meta.Generation // see comment above; #10 will fix
-	conditions := ct.computeAppConditions(app.ID, app.Status(), meta.Generation, observedGen, time.Now().UTC())
+	conditions := ct.computeAppConditions(app.ID, app.Status(), meta.Generation, meta.ObservedGeneration, time.Now().UTC())
 
 	envelope := apitypes.App{
 		ApiVersion: apitypes.CreekDevv1alpha1,
@@ -139,7 +138,7 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata, ct *conditionTra
 		},
 		Spec: apitypes.AppSpec{},
 		Status: apitypes.AppStatus{
-			ObservedGeneration: observedGen,
+			ObservedGeneration: meta.ObservedGeneration,
 			Conditions:         conditions,
 			CurrentPid:         app.PID(),
 			CurrentPort:        app.Port,

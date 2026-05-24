@@ -102,6 +102,74 @@ type ReleaseInput struct {
 // app" error from a "release storage failure" error.
 var ErrAppNotFound = errors.New("state: app not found")
 
+// ErrObservedGenerationRegression is returned by
+// SetObservedGeneration when the caller tries to LOWER
+// ObservedGeneration. Per DESIGN-self-host-state.md §"observedGeneration
+// strict ordering": "observedGeneration MUST NEVER decrease. Skip-ahead
+// is allowed (N → N+2 directly); regression is forbidden." The
+// setter enforces this so a slow deploy goroutine landing AFTER a
+// faster one can't accidentally roll the observed pointer back.
+var ErrObservedGenerationRegression = errors.New("state: observedGeneration must not decrease")
+
+// SetObservedGeneration writes app's ObservedGeneration field to
+// gen. Enforces the monotonic guard: gen MUST be >= current
+// ObservedGeneration AND <= current Generation (you cannot observe
+// a generation that hasn't been written yet). Bumps ResourceVersion
+// as a status side-effect.
+//
+// Used by the async deploy path (#26 onward) that lets DeployApp
+// return 202 immediately and finishes the convergence write later.
+// 0.0.x's synchronous DeployApp does not call this — AddApp keeps
+// observedGen in lockstep with Generation.
+func (s *Store) SetObservedGeneration(appID string, gen int64) error {
+	if appID == "" {
+		return errors.New("state: empty app id")
+	}
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	s.memMu.RLock()
+	cur, ok := s.metadata[appID]
+	if !ok {
+		s.memMu.RUnlock()
+		return fmt.Errorf("%w: %s", ErrAppNotFound, appID)
+	}
+	if gen < cur.ObservedGeneration {
+		s.memMu.RUnlock()
+		return fmt.Errorf("%w: cur=%d new=%d", ErrObservedGenerationRegression, cur.ObservedGeneration, gen)
+	}
+	if gen > cur.Generation {
+		s.memMu.RUnlock()
+		return fmt.Errorf("state: observedGeneration %d cannot exceed Generation %d", gen, cur.Generation)
+	}
+	if gen == cur.ObservedGeneration {
+		// No-op. Skip the disk write — observedGen already at this
+		// value, RV bump would be a spurious status mutation.
+		s.memMu.RUnlock()
+		return nil
+	}
+	nextApps := cloneMap(s.apps)
+	nextMeta := cloneMetadataMap(s.metadata)
+	currentVolumes := s.volumes
+	s.memMu.RUnlock()
+
+	nextMeta[appID] = AppMetadata{
+		UID:                cur.UID,
+		Generation:         cur.Generation,
+		ObservedGeneration: gen,
+		ResourceVersion:    cur.ResourceVersion + 1,
+		CreationTimestamp:  cur.CreationTimestamp,
+	}
+	if err := s.flushFull(nextApps, nextMeta, currentVolumes); err != nil {
+		return err
+	}
+	s.memMu.Lock()
+	s.apps = nextApps
+	s.metadata = nextMeta
+	s.memMu.Unlock()
+	return nil
+}
+
 // CreateRelease persists a new Release for appID. The new release
 // becomes Active; any existing Active release flips to
 // in.PriorActivePhase (default Superseded). releaseSeq is the
@@ -183,12 +251,16 @@ func (s *Store) CreateRelease(appID string, in ReleaseInput) (Release, error) {
 
 	// Bump ResourceVersion (status side-effect; new release IS a
 	// status mutation in K8s terms). Generation is unchanged — the
-	// app's spec didn't move.
+	// app's spec didn't move — and ObservedGeneration is carried
+	// through verbatim. CreateRelease is itself a status-side
+	// write; the deploy flow's convergence path owns the
+	// ObservedGeneration write via SetObservedGeneration.
 	nextMeta[appID] = AppMetadata{
-		UID:               meta.UID,
-		Generation:        meta.Generation,
-		ResourceVersion:   meta.ResourceVersion + 1,
-		CreationTimestamp: meta.CreationTimestamp,
+		UID:                meta.UID,
+		Generation:         meta.Generation,
+		ObservedGeneration: meta.ObservedGeneration,
+		ResourceVersion:    meta.ResourceVersion + 1,
+		CreationTimestamp:  meta.CreationTimestamp,
 	}
 
 	if err := s.flushFullWithReleases(nextApps, nextMeta, nextReleases, currentVolumes); err != nil {

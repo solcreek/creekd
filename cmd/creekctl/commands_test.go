@@ -704,7 +704,7 @@ func newDeployCaptureServer(t *testing.T) (string, *deployCapture) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(apitypes.AppView{
 				Id:     "deploy-from-test",
-				Status: apitypes.Running,
+				Status: apitypes.AppViewStatusRunning,
 				Port:   cap.Request.Port,
 			})
 			return
@@ -1007,7 +1007,10 @@ func TestEnsureCreatesNewApp(t *testing.T) {
 		t.Fatalf("ensure: %v", err)
 	}
 	t.Cleanup(func() { _ = sup.Stop("ens1") })
-	if !strings.Contains(out, "ens1") || !strings.Contains(out, "running") {
+	// Output is now the envelope shape (PR #5 ensure refactor) with
+	// status.conditions[] in place of phase=running (PR #8). Check the
+	// app id and at least one condition rendering.
+	if !strings.Contains(out, "ens1") || !strings.Contains(out, "Ready=") {
 		t.Errorf("ensure output missing expected fields:\n%s", out)
 	}
 }

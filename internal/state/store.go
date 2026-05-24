@@ -101,13 +101,19 @@ type AppMetadata struct {
 	// (AddApp on an existing ID). Does NOT bump on status writes
 	// or annotation/label changes.
 	Generation int64 `json:"generation"`
-	// ResourceVersion bumps on every spec write (AddApp on an existing
-	// or new ID). Currently never bumped for status changes because
-	// the Store has no status-write path yet — status persistence
-	// lands with status.conditions[] (subsequent stack PR). When it
-	// does, this counter will also bump on status writes, matching
-	// the K8s rv convention. Served to clients as a string per K8s
-	// wire convention. Clients MUST NOT do arithmetic on it.
+	// ObservedGeneration is the Generation value the deploy flow
+	// has converged to a healthy state on. In 0.0.x's synchronous
+	// DeployApp, observedGeneration moves in lockstep with
+	// Generation — AddApp writes them together. The async window
+	// (creek deploy --watch: 202 + background goroutine) introduces
+	// SetObservedGeneration as the late writer. The invariant
+	// ObservedGeneration ≤ Generation is enforced by the setter
+	// (monotonic guard — observedGeneration MUST NEVER decrease).
+	ObservedGeneration int64 `json:"observed_generation"`
+	// ResourceVersion bumps on every write (spec write via AddApp,
+	// status write via SetObservedGeneration / SetConditions).
+	// Served to clients as a string per K8s wire convention.
+	// Clients MUST NOT do arithmetic on it.
 	ResourceVersion uint64 `json:"resource_version"`
 	// CreationTimestamp is RFC3339 at first AddApp; immutable;
 	// preserved across restore.
@@ -181,10 +187,11 @@ func newAppMetadata() (AppMetadata, error) {
 		return AppMetadata{}, fmt.Errorf("state: uuid v7: %w", err)
 	}
 	return AppMetadata{
-		UID:               u.String(),
-		Generation:        1,
-		ResourceVersion:   1,
-		CreationTimestamp: time.Now().UTC(),
+		UID:                u.String(),
+		Generation:         1,
+		ObservedGeneration: 1, // sync spawn → convergence is atomic
+		ResourceVersion:    1,
+		CreationTimestamp:  time.Now().UTC(),
 	}, nil
 }
 
@@ -352,11 +359,19 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 	nextApps[cfg.ID] = supervisor.CloneConfig(cfg)
 	if hasMeta {
 		// Deploy / overwrite: preserve identity, bump versions.
+		// ObservedGeneration is bumped in lockstep with Generation
+		// because 0.0.x's DeployApp is synchronous: by the time
+		// AddApp lands, sup.Deploy has already converged. When #26
+		// flips DeployApp to 202 + background, the path will be
+		// "AddApp bumps Generation; SetObservedGeneration bumps
+		// observedGen later"; for now the invariant is
+		// Generation == ObservedGeneration on every successful Deploy.
 		nextMeta[cfg.ID] = AppMetadata{
-			UID:               existingMeta.UID,
-			CreationTimestamp: existingMeta.CreationTimestamp,
-			Generation:        existingMeta.Generation + 1,
-			ResourceVersion:   existingMeta.ResourceVersion + 1,
+			UID:                existingMeta.UID,
+			CreationTimestamp:  existingMeta.CreationTimestamp,
+			Generation:         existingMeta.Generation + 1,
+			ObservedGeneration: existingMeta.Generation + 1,
+			ResourceVersion:    existingMeta.ResourceVersion + 1,
 		}
 	} else {
 		meta, err := newAppMetadata()
