@@ -575,6 +575,7 @@ components:
         - storage_corrupted
         - release_artifact_pruned
         - systemd_hardening_drift
+        - upgrade_signature_invalid
         - internal
 
     ErrorResponse:

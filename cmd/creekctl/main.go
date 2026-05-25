@@ -85,6 +85,7 @@ Commands:
   db-reset           drop and recreate app database (sandbox)
   describe [cmd]     introspect command schema as JSON (agent-facing)
   hardening-check    validate creekd.service against the hardening set
+  self-upgrade       verify + replace creekd/creekctl from a GitHub release
   version            print version
   help               this message
 
