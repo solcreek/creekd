@@ -15,10 +15,14 @@
 #                     "1" → verify cosign keyless signature on
 #                     checksums.txt against the expected signer
 #                     identity (release.yml in this repo). Defaults
-#                     to soft-attempt: verify if cosign is on PATH,
-#                     skip otherwise with a WARN. Set to "1" to
-#                     hard-require — missing cosign aborts the
-#                     install with a clear error.
+#                     to soft-attempt: verify if cosign is on PATH
+#                     AND the signature assets exist on the release.
+#                     A 404 on the .sig/.pem is treated as legit (an
+#                     older release predates cosign signing); any
+#                     other fetch failure logs WARN and skips. Set
+#                     to "1" to hard-require — missing cosign or
+#                     unfetchable sig assets abort with a clear
+#                     error.
 set -eu
 
 REPO="solcreek/creekd"
@@ -30,7 +34,12 @@ VERIFY_COSIGN="${CREEKD_VERIFY_COSIGN:-}"
 # cannot substitute a different release pipeline and have their sig
 # pass verification — the expected identity is fixed at install
 # time. Updated only when this script's REPO changes.
-COSIGN_IDENTITY_REGEX="^https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v.*$"
+#
+# Dots in literal positions are escaped so a path like
+# "release-yml" (or any single char in place of the dots) can't
+# squeak past the matcher. Tag suffix is tightened to semver-ish so
+# branch refs can never satisfy the identity.
+COSIGN_IDENTITY_REGEX="^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+.*\$"
 COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 # --- helpers ------------------------------------------------------
@@ -116,18 +125,42 @@ curl -fsSL -o "$tmp/checksums.txt" "$sha_url" \
     || err "download failed: $sha_url"
 
 # Cosign signature + Fulcio cert sit alongside checksums.txt in the
-# release. Pull them speculatively — verification below only fires
-# if both cosign and the assets are present.
+# release. Fetch each one and capture the HTTP status so we can tell
+# "this release predates cosign signing" (404 → silent skip is fine)
+# from "transient network failure or proxy interference" (other →
+# loud WARN so the operator doesn't silently lose verification).
 sig_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt.sig"
 crt_url="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt.pem"
-curl -fsSL -o "$tmp/checksums.txt.sig" "$sig_url" 2>/dev/null || true
-curl -fsSL -o "$tmp/checksums.txt.pem" "$crt_url" 2>/dev/null || true
+
+# fetch_asset URL OUT_PATH -> echoes "ok", "absent", or "fetch_failed:<code>"
+fetch_asset() {
+    _url="$1"; _out="$2"
+    _code="$(curl -fsSL -o "$_out" -w '%{http_code}' "$_url" 2>/dev/null || true)"
+    if [ -s "$_out" ]; then
+        echo ok
+    elif [ "$_code" = "404" ]; then
+        echo absent
+    else
+        echo "fetch_failed:${_code:-network}"
+    fi
+}
+
+sig_status="$(fetch_asset "$sig_url" "$tmp/checksums.txt.sig")"
+crt_status="$(fetch_asset "$crt_url" "$tmp/checksums.txt.pem")"
 
 # --- verify cosign signature -------------------------------------
 
-if command -v cosign >/dev/null 2>&1 \
-   && [ -s "$tmp/checksums.txt.sig" ] \
-   && [ -s "$tmp/checksums.txt.pem" ]; then
+cosign_present=0
+command -v cosign >/dev/null 2>&1 && cosign_present=1
+
+# Flatten the "transient fetch failure" predicate to avoid POSIX sh
+# precedence subtleties when mixing && and || in one if-clause.
+sig_unreachable=0
+crt_unreachable=0
+[ "$sig_status" != ok ] && [ "$sig_status" != absent ] && sig_unreachable=1
+[ "$crt_status" != ok ] && [ "$crt_status" != absent ] && crt_unreachable=1
+
+if [ "$cosign_present" = 1 ] && [ "$sig_status" = ok ] && [ "$crt_status" = ok ]; then
     log "==> verifying cosign signature on checksums.txt"
     if cosign verify-blob \
         --certificate-identity-regexp "$COSIGN_IDENTITY_REGEX" \
@@ -140,9 +173,12 @@ if command -v cosign >/dev/null 2>&1 \
         err "cosign verification failed — checksums.txt signature did not match the expected release-pipeline identity"
     fi
 elif [ "$VERIFY_COSIGN" = "1" ]; then
-    err "CREEKD_VERIFY_COSIGN=1 set but cosign or signature assets unavailable — aborting"
+    err "CREEKD_VERIFY_COSIGN=1 set but verification could not run (cosign=${cosign_present} sig=${sig_status} cert=${crt_status})"
+elif [ "$cosign_present" = 1 ] && { [ "$sig_unreachable" = 1 ] || [ "$crt_unreachable" = 1 ]; }; then
+    log "WARN: cosign is installed but signature assets could not be fetched (sig=${sig_status} cert=${crt_status})"
+    log "      verification SKIPPED — re-run with CREEKD_VERIFY_COSIGN=1 to abort instead"
 else
-    log "note: skipping cosign verification (cosign or sig assets not present)"
+    log "note: skipping cosign verification (cosign=${cosign_present} sig=${sig_status} cert=${crt_status})"
     log "      install cosign + re-run with CREEKD_VERIFY_COSIGN=1 to hard-require"
 fi
 

@@ -79,8 +79,9 @@ checksum:
 # pin every binary's SHA256 — verifying one signature transitively
 # covers every artifact in the release. Uses GitHub Actions OIDC
 # (no long-lived signing key); Fulcio + Rekor record the
-# attestation. install.sh's --verify-cosign mode (and the future
-# `creekctl self upgrade`) check this chain against
+# attestation. install.sh (CREEKD_VERIFY_COSIGN env var; "1" to
+# hard-require, default soft-attempt) and the future
+# `creekctl self upgrade` check this chain against
 # https://github.com/solcreek/creekd/.github/workflows/release.yml
 # as the expected signer identity.
 #
