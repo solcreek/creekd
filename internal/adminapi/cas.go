@@ -65,6 +65,28 @@ func (s *Server) casMiddleware() apitypes.MiddlewareFunc {
 				next.ServeHTTP(w, r)
 				return
 			}
+
+			// Per DESIGN §"Mutex granularity": acquire the per-app
+			// write lock for the entire mutation request lifecycle so
+			// (If-Match check → handler → store flush) is atomic per
+			// app. Acquire BEFORE the If-Match-presence check so that
+			// unconditional writes (missing If-Match) also serialise
+			// per app — otherwise two concurrent unconditional DELETEs
+			// on the same app would race, reintroducing the TOCTOU
+			// gap this middleware exists to close.
+			//
+			// Different apps' mutations proceed in parallel; same-app
+			// mutations serialise here. The previous global admin-API
+			// mutex is gone from this PR (#5b) onward.
+			//
+			// Only meaningful when a store is configured; without one
+			// there's no shared state for per-app locking to protect.
+			if s.store != nil {
+				appLock := s.store.Locks().AppLock(id)
+				appLock.Lock()
+				defer appLock.Unlock()
+			}
+
 			ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
 			if ifMatch == "" {
 				// Spec promises this Warning on every unconditional
@@ -85,19 +107,6 @@ func (s *Server) casMiddleware() apitypes.MiddlewareFunc {
 				next.ServeHTTP(w, r)
 				return
 			}
-
-			// Per DESIGN §"Mutex granularity": acquire the per-app
-			// write lock for the entire mutation request lifecycle so
-			// the (If-Match check → handler → store flush) sequence
-			// is atomic per app. Different apps' mutations proceed in
-			// parallel; same-app mutations serialise here.
-			//
-			// Hold the lock until the response is written. The
-			// previous global admin-API mutex is gone from this PR
-			// (#5b) onward.
-			unlock := s.store.Locks().AppLock(id)
-			unlock.Lock()
-			defer unlock.Unlock()
 
 			meta, ok := s.store.Meta(id)
 			if !ok {

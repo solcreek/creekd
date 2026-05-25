@@ -557,3 +557,56 @@ func TestCAS_DuplicateIfMatchHeaderRequiresAuthFirst(t *testing.T) {
 		t.Errorf("response body leaks parsing detail to anonymous caller: %s", w.Body.String())
 	}
 }
+
+// TestCAS_PerAppLockHeldDuringUnconditionalWrite guards the contract
+// that the per-app lock serialises ALL casApplies mutations, not just
+// the If-Match-present subset. Without this property, two concurrent
+// unconditional DELETEs on the same app would race the store flush
+// step — the very TOCTOU window per-app locking was added to close.
+//
+// The test acquires the AppLock externally, then fires an
+// unconditional DELETE on a background goroutine, and observes that
+// the request blocks until the external lock is released.
+func TestCAS_PerAppLockHeldDuringUnconditionalWrite(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "lock-uncond", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("lock-uncond") })
+
+	// Hold the per-app lock externally. The middleware should block
+	// on this lock when the DELETE arrives — even though the DELETE
+	// carries no If-Match.
+	appLock := store.Locks().AppLock("lock-uncond")
+	appLock.Lock()
+
+	done := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest("DELETE", "/v1/apps/lock-uncond", nil)
+		rw := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(rw, req)
+		done <- rw.Code
+	}()
+
+	select {
+	case code := <-done:
+		t.Fatalf("DELETE completed (status=%d) without blocking on per-app lock — per-app lock is not held on the unconditional-write path", code)
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+
+	appLock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DELETE didn't complete after external lock released")
+	}
+}
