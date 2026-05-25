@@ -105,7 +105,7 @@ func TestLogsEndpointTailMode(t *testing.T) {
 	// Spawn an app first so the path is recognised.
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		apitypes.SpawnRequest{Id:"logged", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "logged", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("logged") })
 
 	// Pre-seed the log file (the sleep child won't emit anything itself).
@@ -134,7 +134,7 @@ func TestLogsEndpointDefaultTail(t *testing.T) {
 
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		apitypes.SpawnRequest{Id:"dflt", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "dflt", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("dflt") })
 
 	// 250 lines — more than defaultTail (100).
@@ -175,7 +175,7 @@ func TestLogsCaptureDisabledReturns400(t *testing.T) {
 	// LogDir intentionally empty.
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		apitypes.SpawnRequest{Id:"nolog", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "nolog", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("nolog") })
 
 	status, body := ts.do(t, "GET", "/v1/apps/nolog/logs", nil, "")
@@ -189,7 +189,7 @@ func TestLogsRejectsBadTailParam(t *testing.T) {
 	ts.sup.LogDir = t.TempDir()
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		apitypes.SpawnRequest{Id:"x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("x") })
 
 	status, _ := ts.do(t, "GET", "/v1/apps/x/logs?tail=abc", nil, "")
@@ -211,7 +211,7 @@ func TestLogsFollowModeStreamsAppendedLines(t *testing.T) {
 	ts.sup.LogDir = t.TempDir()
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		apitypes.SpawnRequest{Id:"follow", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "follow", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("follow") })
 
 	// Pre-existing tail.
