@@ -23,11 +23,12 @@ var _ apitypes.ServerInterface = (*Server)(nil)
 // Server is the HTTP/JSON admin handler. Construct with New; obtain
 // the http.Handler via Handler.
 type Server struct {
-	sup    *supervisor.Supervisor
-	router *dispatch.Router
-	token  string
-	store  *state.Store
-	audit  *AuditLogger
+	sup        *supervisor.Supervisor
+	router     *dispatch.Router
+	token      string
+	store      *state.Store
+	audit      *AuditLogger
+	conditions *conditionTracker
 
 	mux *http.ServeMux
 }
@@ -42,10 +43,11 @@ func (s *Server) SetAuditLogger(a *AuditLogger) { s.audit = a }
 // New returns a Server backed by sup.
 func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token string) *Server {
 	s := &Server{
-		sup:    sup,
-		router: dispatchRouter,
-		token:  token,
-		mux:    http.NewServeMux(),
+		sup:        sup,
+		router:     dispatchRouter,
+		token:      token,
+		conditions: newConditionTracker(),
+		mux:        http.NewServeMux(),
 	}
 	// Wire the generated router. Middleware execution order on the
 	// inbound path: audit → auth → cas → handler. Audit wraps the
@@ -299,7 +301,7 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 			meta = m
 		}
 	}
-	writeJSON(w, http.StatusOK, appToEnvelope(app, meta))
+	writeJSON(w, http.StatusOK, appToEnvelope(app, meta, s.conditions))
 }
 
 func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
@@ -319,6 +321,9 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 			writeStoreError(w, "state.RemoveApp", err)
 			return
 		}
+	}
+	if s.conditions != nil {
+		s.conditions.forget(id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -361,8 +366,113 @@ func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.A
 			writeStoreError(w, "state.AddApp (deploy)", serr)
 			return
 		}
+		// Append a Release record to the ledger. The deploy succeeded
+		// at the supervisor layer; this captures the artifact + env
+		// snapshot so a future rollback can re-run the exact config.
+		// CreateRelease bumps ResourceVersion (status mutation) on
+		// the same WAL pending — at-most-one-Active is preserved
+		// across crash.
+		cfgCopy := supervisor.CloneConfig(dcfg.Config)
+		spec := state.ReleaseSpec{
+			EnvHash:        state.EnvHash(cfgCopy.Env),
+			CreatedBy:      releaseActor(r),
+			ConfigSnapshot: &cfgCopy,
+		}
+		if _, rerr := s.store.CreateRelease(id, state.ReleaseInput{Spec: spec}); rerr != nil {
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+				"state.CreateRelease (deploy): "+rerr.Error())
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, appToView(app))
+}
+
+// RollbackApp re-runs the supervisor against the ConfigSnapshot of
+// the target Release (identified by `?to=<seq>`) and appends a new
+// Release record carrying RolledBackFrom + OriginalArtifactRelease
+// pointers. The prior Active release flips to RolledBack (distinct
+// from Superseded — distinguishes "rolled away from" vs "replaced
+// by newer deploy").
+//
+// 0.0.x scope:
+//   - Env: rollback restores the env that was captured in the
+//     target's ConfigSnapshot. The Heroku-style env_rollback_conflict
+//     guard for structurally-diverged env-var KEY sets ships in
+//     0.1.0 alongside KEK envelope encryption.
+//   - Image registry: not present in 0.0.x; ConfigSnapshot IS the
+//     artifact. A target Release missing ConfigSnapshot returns 404
+//     release_artifact_pruned — the ledger entry has nothing to
+//     re-run.
+func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, params apitypes.RollbackAppParams) {
+	if s.store == nil {
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+			"rollback requires a store; daemon not configured for persistence")
+		return
+	}
+	if params.To <= 0 {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest),
+			"?to=<releaseSeq> required (positive integer)")
+		return
+	}
+
+	target, ok := s.store.FindRelease(id, params.To)
+	if !ok {
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeReleaseArtifactPruned),
+			fmt.Sprintf("release %d not found in app %q ledger", params.To, id))
+		return
+	}
+	if target.Spec.ConfigSnapshot == nil {
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeReleaseArtifactPruned),
+			fmt.Sprintf("release %d has no config snapshot — cannot re-run", params.To))
+		return
+	}
+
+	// Re-run the snapshotted config through the same deploy path so
+	// the supervisor swaps process trees + dispatch entries atomically.
+	dcfg := supervisor.DeployConfig{Config: supervisor.CloneConfig(*target.Spec.ConfigSnapshot)}
+	dcfg.Config.ID = id
+	if _, err := s.sup.Deploy(r.Context(), s.router, dcfg); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrNotFound):
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), err.Error())
+		case errors.Is(err, supervisor.ErrPortConflict):
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodePortConflict), err.Error())
+		case errors.Is(err, supervisor.ErrDeployUnhealthy):
+			writeError(w, http.StatusBadGateway, string(apitypes.ErrorCodeDeployUnhealthy), err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+				"sup.Deploy (rollback): "+err.Error())
+		}
+		return
+	}
+	if serr := s.store.AddApp(dcfg.Config); serr != nil {
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+			"state.AddApp (rollback): "+serr.Error())
+		return
+	}
+
+	original := resolveOriginalArtifactRelease(target)
+
+	cfgCopy := supervisor.CloneConfig(dcfg.Config)
+	newSpec := state.ReleaseSpec{
+		GitSha:                  target.Spec.GitSha,
+		Image:                   target.Spec.Image,
+		EnvHash:                 state.EnvHash(cfgCopy.Env),
+		CreatedBy:               releaseActor(r),
+		RolledBackFrom:          target.Spec.ReleaseSeq,
+		OriginalArtifactRelease: original,
+		ConfigSnapshot:          &cfgCopy,
+	}
+	newRel, rerr := s.store.CreateRelease(id, state.ReleaseInput{
+		Spec:             newSpec,
+		PriorActivePhase: state.ReleasePhaseRolledBack,
+	})
+	if rerr != nil {
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+			"state.CreateRelease (rollback): "+rerr.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, releaseToWire(newRel))
 }
 
 func (s *Server) RestartApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
@@ -521,7 +631,7 @@ func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.
 		tail = *params.Tail
 	}
 
-	follow := params.Follow != nil && *params.Follow == apitypes.GetAppLogsParamsFollowTrue
+	follow := params.Follow != nil && *params.Follow == apitypes.True
 
 	if follow {
 		streamLogs(w, r, logPath, tail)
@@ -585,7 +695,7 @@ func (s *Server) GetVolume(w http.ResponseWriter, _ *http.Request, id apitypes.V
 }
 
 func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitypes.VolumeID, params apitypes.DeleteVolumeParams) {
-	force := params.Force != nil && *params.Force == apitypes.DeleteVolumeParamsForceTrue
+	force := params.Force != nil && *params.Force
 
 	if err := s.sup.UnregisterVolume(id, force); err != nil {
 		switch {

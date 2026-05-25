@@ -193,6 +193,66 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/apps/{id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    post:
+      operationId: rollbackApp
+      summary: Roll back to a prior release
+      description: |
+        Re-runs the supervisor with the ConfigSnapshot persisted in
+        the target Release. Creates a new Release record (with a
+        fresh, monotonic ReleaseSeq) pointing at the target's
+        artifact via `rolledBackFrom` and `originalArtifactRelease`.
+        The prior Active release flips to phase=RolledBack (not
+        Superseded, distinguishing rollback from forward deploy).
+
+        `to` is the target Release's ReleaseSeq. The target must
+        carry a `configSnapshot` — Releases created before #8c
+        (or rollback into a release with stripped snapshot) return
+        412 `release_artifact_pruned`.
+
+        Accepts optional `If-Match: <resourceVersion>`. Mismatch
+        → 412.
+      tags: [apps]
+      parameters:
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+          description: Target ReleaseSeq to roll back to.
+        - in: header
+          name: If-Match
+          schema:
+            type: string
+          description: Current resourceVersion (opaque). Mismatch yields 412.
+      responses:
+        "200":
+          description: Rollback complete, new Release active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Release"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            App or target release not found. When the release is
+            absent OR has no usable ConfigSnapshot, ErrorResponse.code
+            is `release_artifact_pruned`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
+
   /v1/apps/{id}/reset:
     parameters:
       - $ref: "#/components/parameters/AppID"
@@ -372,8 +432,7 @@ paths:
         - name: force
           in: query
           schema:
-            type: string
-            enum: ["true"]
+            type: boolean
           description: Force delete even if apps reference this volume
       responses:
         "204":
@@ -475,6 +534,7 @@ components:
         - resource_version_mismatch
         - unsupported_filesystem
         - storage_corrupted
+        - release_artifact_pruned
         - internal
 
     ErrorResponse:
@@ -691,25 +751,48 @@ components:
         port:
           type: integer
 
+    Condition:
+      type: object
+      description: |
+        Status of one named runtime condition. Mirrors the K8s
+        condition tuple: a closed type vocabulary, tri-state status
+        (True / False / Unknown), and the timestamp of the last
+        observed transition. `reason` is a CamelCase token for
+        machine consumption; `message` is human-readable.
+      required: [type, status, lastTransitionTime, reason]
+      properties:
+        type:
+          type: string
+          enum: [Ready, Progressing, Degraded, BackupReady]
+        status:
+          type: string
+          enum: ["True", "False", "Unknown"]
+        lastTransitionTime:
+          type: string
+          format: date-time
+        reason:
+          type: string
+        message:
+          type: string
+
     AppStatus:
       type: object
       description: Observed state. Server-written; clients receive 405 on writes.
-      required: [observedGeneration, phase, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
+      required: [observedGeneration, conditions, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
       properties:
         observedGeneration:
           type: integer
           format: int64
           description: Last spec generation the deploy flow has converged to a healthy state on.
-        phase:
-          type: string
-          # Mirror supervisor.Status.String() output, same as AppView.status.
-          # See the comment on AppView.status for rationale (hyphenated
-          # crash-looping is the canonical wire format).
-          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
+        conditions:
+          type: array
           description: |
-            Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
-            here for the calibration PR while the Release ledger +
-            conditions design lands separately. See BACKLOG.md API-07.
+            Closed set of observed condition types: Ready, Progressing,
+            Degraded, BackupReady. Recomputed at GET time from supervisor
+            runtime state. The set is fixed in v1alpha1 — adding a new
+            condition type requires an ADR.
+          items:
+            $ref: "#/components/schemas/Condition"
         currentPid:
           type: integer
         currentPort:
@@ -724,6 +807,64 @@ components:
           format: int64
         netIp:
           type: string
+
+    Release:
+      type: object
+      description: |
+        One entry in an app's release ledger. Created on every
+        successful deploy + rollback. Immutable except for `phase`,
+        which transitions Active → Superseded | RolledBack as newer
+        releases land. Records are kept indefinitely; only the
+        underlying artifact images are GC'd (Phase 1.5).
+      required: [uid, phase, creationTimestamp, spec]
+      properties:
+        uid:
+          type: string
+          format: uuid
+          description: UUIDv7 stable identity.
+        phase:
+          type: string
+          enum: [Active, Superseded, RolledBack]
+        creationTimestamp:
+          type: string
+          format: date-time
+        spec:
+          $ref: "#/components/schemas/ReleaseSpec"
+
+    ReleaseSpec:
+      type: object
+      description: |
+        Immutable payload of one Release. `rolledBackFrom` +
+        `originalArtifactRelease` reference the source release by
+        ReleaseSeq within the same app; zero / unset means "fresh
+        deploy, not a rollback".
+      required: [appUid, releaseSeq]
+      properties:
+        appUid:
+          type: string
+          format: uuid
+        releaseSeq:
+          type: integer
+          format: int64
+          description: Per-app monotonic counter; never reused.
+        gitSha:
+          type: string
+        image:
+          type: string
+        envHash:
+          type: string
+          description: sha256:<hex> over sorted KEY=value env pairs.
+        createdBy:
+          type: string
+          description: Identity of the caller that created this release.
+        rolledBackFrom:
+          type: integer
+          format: int64
+          description: Immediate source ReleaseSeq if this release was created by a rollback.
+        originalArtifactRelease:
+          type: integer
+          format: int64
+          description: First-appearance ReleaseSeq of the underlying artifact. Resolves rollback-chain ambiguity.
 
     AppView:
       type: object

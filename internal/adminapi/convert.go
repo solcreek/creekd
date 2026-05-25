@@ -1,7 +1,9 @@
 package adminapi
 
 import (
+	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -99,11 +101,17 @@ func appToView(app *supervisor.App) apitypes.AppView {
 // state.AppMetadata into the k8s-style envelope (apitypes.App). Used
 // by GetApp as the first endpoint to expose the envelope shape.
 //
-// `phase` (status.phase) is the K8s 1.13-deprecated phase pattern;
-// kept here for the envelope-refactor calibration window. See
-// BACKLOG.md API-07: refactor to conditions array before broader
-// envelope rollout (or document the divergence in red-lines).
-func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
+// Conditions are recomputed from supervisor runtime state via the
+// caller-supplied tracker so LastTransitionTime reflects the real
+// moment of the last status flip across calls. Tracker may be nil
+// in tests that don't care about LTT continuity; in that case a
+// fresh tracker is constructed per call (LTT = now).
+//
+// observedGeneration is wired through but not yet asynchronous;
+// see #10 for the dedicated async writer that will eventually
+// populate it from the deploy flow rather than mirroring
+// meta.Generation.
+func appToEnvelope(app *supervisor.App, meta state.AppMetadata, ct *conditionTracker) apitypes.App {
 	if app == nil {
 		return apitypes.App{}
 	}
@@ -112,6 +120,11 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
 	// means state was corrupted — we surface a zero UID rather than
 	// panic in a handler.
 	parsedUID, _ := uuid.Parse(meta.UID)
+
+	if ct == nil {
+		ct = newConditionTracker()
+	}
+	conditions := ct.computeAppConditions(app.ID, app.Status(), meta.Generation, meta.ObservedGeneration, time.Now().UTC())
 
 	envelope := apitypes.App{
 		ApiVersion: apitypes.CreekDevv1alpha1,
@@ -125,8 +138,8 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
 		},
 		Spec: apitypes.AppSpec{},
 		Status: apitypes.AppStatus{
-			ObservedGeneration: meta.Generation,
-			Phase:              apitypes.AppStatusPhase(app.Status().String()),
+			ObservedGeneration: meta.ObservedGeneration,
+			Conditions:         conditions,
 			CurrentPid:         app.PID(),
 			CurrentPort:        app.Port,
 			RestartCount:       app.RestartCount(),
@@ -150,6 +163,77 @@ func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
 		envelope.Status.NetIp = &s
 	}
 	return envelope
+}
+
+// resolveOriginalArtifactRelease returns the ReleaseSeq of the
+// first-appearance artifact for a chain of rollbacks. If target
+// is itself a rollback record (Spec.OriginalArtifactRelease set),
+// the chain pointer is propagated; otherwise the target IS the
+// first appearance. The new release created by rolling back to
+// target inherits this value so `creek releases` audit walks
+// don't re-resolve at display time.
+func resolveOriginalArtifactRelease(target state.Release) int64 {
+	if target.Spec.OriginalArtifactRelease != 0 {
+		return target.Spec.OriginalArtifactRelease
+	}
+	return target.Spec.ReleaseSeq
+}
+
+// releaseToWire converts a persisted state.Release to the wire
+// shape (apitypes.Release). ConfigSnapshot is intentionally NOT
+// returned on the wire — it's an internal rollback enabler that
+// would expose env-var values to anyone reading the release
+// ledger over the admin API. Restoring the snapshot is a
+// server-internal concern.
+func releaseToWire(r state.Release) apitypes.Release {
+	uid, _ := uuid.Parse(r.UID)
+	return apitypes.Release{
+		Uid:               uid,
+		Phase:             apitypes.ReleasePhase(r.Phase),
+		CreationTimestamp: r.CreationTimestamp,
+		Spec:              releaseSpecToWire(r.Spec),
+	}
+}
+
+func releaseSpecToWire(s state.ReleaseSpec) apitypes.ReleaseSpec {
+	appUID, _ := uuid.Parse(s.AppUID)
+	spec := apitypes.ReleaseSpec{
+		AppUid:     appUID,
+		ReleaseSeq: s.ReleaseSeq,
+	}
+	if s.GitSha != "" {
+		spec.GitSha = &s.GitSha
+	}
+	if s.Image != "" {
+		spec.Image = &s.Image
+	}
+	if s.EnvHash != "" {
+		spec.EnvHash = &s.EnvHash
+	}
+	if s.CreatedBy != "" {
+		spec.CreatedBy = &s.CreatedBy
+	}
+	if s.RolledBackFrom != 0 {
+		v := s.RolledBackFrom
+		spec.RolledBackFrom = &v
+	}
+	if s.OriginalArtifactRelease != 0 {
+		v := s.OriginalArtifactRelease
+		spec.OriginalArtifactRelease = &v
+	}
+	return spec
+}
+
+// releaseActor returns a stable identifier for the caller of a
+// release-creating request: the Bearer token's sha256 prefix when
+// auth is on, falling back to the source IP. Matches the audit
+// logger's hashToken convention so cross-referencing audit.log
+// against the release ledger is straightforward.
+func releaseActor(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		return hashToken(strings.TrimPrefix(h, "Bearer "))
+	}
+	return r.RemoteAddr
 }
 
 // volumeToView converts a supervisor Volume to the spec VolumeView.

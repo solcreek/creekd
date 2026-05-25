@@ -43,39 +43,6 @@ func (e AppKind) Valid() bool {
 	}
 }
 
-// Defines values for AppStatusPhase.
-const (
-	AppStatusPhaseCrashLooping AppStatusPhase = "crash-looping"
-	AppStatusPhaseCrashed      AppStatusPhase = "crashed"
-	AppStatusPhaseRunning      AppStatusPhase = "running"
-	AppStatusPhaseStarting     AppStatusPhase = "starting"
-	AppStatusPhaseStopped      AppStatusPhase = "stopped"
-	AppStatusPhaseUnhealthy    AppStatusPhase = "unhealthy"
-	AppStatusPhaseUnknown      AppStatusPhase = "unknown"
-)
-
-// Valid indicates whether the value is a known member of the AppStatusPhase enum.
-func (e AppStatusPhase) Valid() bool {
-	switch e {
-	case AppStatusPhaseCrashLooping:
-		return true
-	case AppStatusPhaseCrashed:
-		return true
-	case AppStatusPhaseRunning:
-		return true
-	case AppStatusPhaseStarting:
-		return true
-	case AppStatusPhaseStopped:
-		return true
-	case AppStatusPhaseUnhealthy:
-		return true
-	case AppStatusPhaseUnknown:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for AppViewStatus.
 const (
 	AppViewStatusCrashLooping AppViewStatus = "crash-looping"
@@ -109,6 +76,51 @@ func (e AppViewStatus) Valid() bool {
 	}
 }
 
+// Defines values for ConditionStatus.
+const (
+	ConditionStatusFalse   ConditionStatus = "False"
+	ConditionStatusTrue    ConditionStatus = "True"
+	ConditionStatusUnknown ConditionStatus = "Unknown"
+)
+
+// Valid indicates whether the value is a known member of the ConditionStatus enum.
+func (e ConditionStatus) Valid() bool {
+	switch e {
+	case ConditionStatusFalse:
+		return true
+	case ConditionStatusTrue:
+		return true
+	case ConditionStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConditionType.
+const (
+	ConditionTypeBackupReady ConditionType = "BackupReady"
+	ConditionTypeDegraded    ConditionType = "Degraded"
+	ConditionTypeProgressing ConditionType = "Progressing"
+	ConditionTypeReady       ConditionType = "Ready"
+)
+
+// Valid indicates whether the value is a known member of the ConditionType enum.
+func (e ConditionType) Valid() bool {
+	switch e {
+	case ConditionTypeBackupReady:
+		return true
+	case ConditionTypeDegraded:
+		return true
+	case ConditionTypeProgressing:
+		return true
+	case ConditionTypeReady:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorCode.
 const (
 	ErrorCodeAlreadyRunning          ErrorCode = "already_running"
@@ -120,6 +132,7 @@ const (
 	ErrorCodeInvalidRuntime          ErrorCode = "invalid_runtime"
 	ErrorCodeNotFound                ErrorCode = "not_found"
 	ErrorCodePortConflict            ErrorCode = "port_conflict"
+	ErrorCodeReleaseArtifactPruned   ErrorCode = "release_artifact_pruned"
 	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
 	ErrorCodeStorageCorrupted        ErrorCode = "storage_corrupted"
 	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
@@ -147,6 +160,8 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case ErrorCodePortConflict:
 		return true
+	case ErrorCodeReleaseArtifactPruned:
+		return true
 	case ErrorCodeResourceVersionMismatch:
 		return true
 	case ErrorCodeStorageCorrupted:
@@ -162,25 +177,46 @@ func (e ErrorCode) Valid() bool {
 
 // Defines values for EventType.
 const (
-	HealthFailure EventType = "health_failure"
-	OomKill       EventType = "oom_kill"
-	Ready         EventType = "ready"
-	Restart       EventType = "restart"
-	StatusChanged EventType = "status_changed"
+	EventTypeHealthFailure EventType = "health_failure"
+	EventTypeOomKill       EventType = "oom_kill"
+	EventTypeReady         EventType = "ready"
+	EventTypeRestart       EventType = "restart"
+	EventTypeStatusChanged EventType = "status_changed"
 )
 
 // Valid indicates whether the value is a known member of the EventType enum.
 func (e EventType) Valid() bool {
 	switch e {
-	case HealthFailure:
+	case EventTypeHealthFailure:
 		return true
-	case OomKill:
+	case EventTypeOomKill:
 		return true
-	case Ready:
+	case EventTypeReady:
 		return true
-	case Restart:
+	case EventTypeRestart:
 		return true
-	case StatusChanged:
+	case EventTypeStatusChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReleasePhase.
+const (
+	Active     ReleasePhase = "Active"
+	RolledBack ReleasePhase = "RolledBack"
+	Superseded ReleasePhase = "Superseded"
+)
+
+// Valid indicates whether the value is a known member of the ReleasePhase enum.
+func (e ReleasePhase) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case RolledBack:
+		return true
+	case Superseded:
 		return true
 	default:
 		return false
@@ -210,28 +246,13 @@ func (e Runtime) Valid() bool {
 
 // Defines values for GetAppLogsParamsFollow.
 const (
-	GetAppLogsParamsFollowTrue GetAppLogsParamsFollow = "true"
+	True GetAppLogsParamsFollow = "true"
 )
 
 // Valid indicates whether the value is a known member of the GetAppLogsParamsFollow enum.
 func (e GetAppLogsParamsFollow) Valid() bool {
 	switch e {
-	case GetAppLogsParamsFollowTrue:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for DeleteVolumeParamsForce.
-const (
-	DeleteVolumeParamsForceTrue DeleteVolumeParamsForce = "true"
-)
-
-// Valid indicates whether the value is a known member of the DeleteVolumeParamsForce enum.
-func (e DeleteVolumeParamsForce) Valid() bool {
-	switch e {
-	case DeleteVolumeParamsForceTrue:
+	case True:
 		return true
 	default:
 		return false
@@ -300,26 +321,21 @@ type AppSpec struct {
 
 // AppStatus Observed state. Server-written; clients receive 405 on writes.
 type AppStatus struct {
-	CurrentPid     int     `json:"currentPid"`
-	CurrentPort    int     `json:"currentPort"`
-	HealthFailures int64   `json:"healthFailures"`
-	NetIp          *string `json:"netIp,omitempty"`
+	// Conditions Closed set of observed condition types: Ready, Progressing,
+	// Degraded, BackupReady. Recomputed at GET time from supervisor
+	// runtime state. The set is fixed in v1alpha1 — adding a new
+	// condition type requires an ADR.
+	Conditions     []Condition `json:"conditions"`
+	CurrentPid     int         `json:"currentPid"`
+	CurrentPort    int         `json:"currentPort"`
+	HealthFailures int64       `json:"healthFailures"`
+	NetIp          *string     `json:"netIp,omitempty"`
 
 	// ObservedGeneration Last spec generation the deploy flow has converged to a healthy state on.
 	ObservedGeneration int64 `json:"observedGeneration"`
-
-	// Phase Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
-	// here for the calibration PR while the Release ledger +
-	// conditions design lands separately. See BACKLOG.md API-07.
-	Phase        AppStatusPhase `json:"phase"`
-	RestartCount int            `json:"restartCount"`
-	UptimeMs     int64          `json:"uptimeMs"`
+	RestartCount       int   `json:"restartCount"`
+	UptimeMs           int64 `json:"uptimeMs"`
 }
-
-// AppStatusPhase Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
-// here for the calibration PR while the Release ledger +
-// conditions design lands separately. See BACKLOG.md API-07.
-type AppStatusPhase string
 
 // AppView defines model for AppView.
 type AppView struct {
@@ -339,6 +355,25 @@ type AppView struct {
 
 // AppViewStatus defines model for AppView.Status.
 type AppViewStatus string
+
+// Condition Status of one named runtime condition. Mirrors the K8s
+// condition tuple: a closed type vocabulary, tri-state status
+// (True / False / Unknown), and the timestamp of the last
+// observed transition. `reason` is a CamelCase token for
+// machine consumption; `message` is human-readable.
+type Condition struct {
+	LastTransitionTime time.Time       `json:"lastTransitionTime"`
+	Message            *string         `json:"message,omitempty"`
+	Reason             string          `json:"reason"`
+	Status             ConditionStatus `json:"status"`
+	Type               ConditionType   `json:"type"`
+}
+
+// ConditionStatus defines model for Condition.Status.
+type ConditionStatus string
+
+// ConditionType defines model for Condition.Type.
+type ConditionType string
 
 // DeployRequest defines model for DeployRequest.
 type DeployRequest struct {
@@ -387,6 +422,53 @@ type ListAppsResponse struct {
 // ListVolumesResponse defines model for ListVolumesResponse.
 type ListVolumesResponse struct {
 	Volumes []VolumeView `json:"volumes"`
+}
+
+// Release One entry in an app's release ledger. Created on every
+// successful deploy + rollback. Immutable except for `phase`,
+// which transitions Active → Superseded | RolledBack as newer
+// releases land. Records are kept indefinitely; only the
+// underlying artifact images are GC'd (Phase 1.5).
+type Release struct {
+	CreationTimestamp time.Time    `json:"creationTimestamp"`
+	Phase             ReleasePhase `json:"phase"`
+
+	// Spec Immutable payload of one Release. `rolledBackFrom` +
+	// `originalArtifactRelease` reference the source release by
+	// ReleaseSeq within the same app; zero / unset means "fresh
+	// deploy, not a rollback".
+	Spec ReleaseSpec `json:"spec"`
+
+	// Uid UUIDv7 stable identity.
+	Uid openapi_types.UUID `json:"uid"`
+}
+
+// ReleasePhase defines model for Release.Phase.
+type ReleasePhase string
+
+// ReleaseSpec Immutable payload of one Release. `rolledBackFrom` +
+// `originalArtifactRelease` reference the source release by
+// ReleaseSeq within the same app; zero / unset means "fresh
+// deploy, not a rollback".
+type ReleaseSpec struct {
+	AppUid openapi_types.UUID `json:"appUid"`
+
+	// CreatedBy Identity of the caller that created this release.
+	CreatedBy *string `json:"createdBy,omitempty"`
+
+	// EnvHash sha256:<hex> over sorted KEY=value env pairs.
+	EnvHash *string `json:"envHash,omitempty"`
+	GitSha  *string `json:"gitSha,omitempty"`
+	Image   *string `json:"image,omitempty"`
+
+	// OriginalArtifactRelease First-appearance ReleaseSeq of the underlying artifact. Resolves rollback-chain ambiguity.
+	OriginalArtifactRelease *int64 `json:"originalArtifactRelease,omitempty"`
+
+	// ReleaseSeq Per-app monotonic counter; never reused.
+	ReleaseSeq int64 `json:"releaseSeq"`
+
+	// RolledBackFrom Immediate source ReleaseSeq if this release was created by a rollback.
+	RolledBackFrom *int64 `json:"rolledBackFrom,omitempty"`
 }
 
 // RestartRequest defines model for RestartRequest.
@@ -506,14 +588,20 @@ type GetAppLogsParams struct {
 // GetAppLogsParamsFollow defines parameters for GetAppLogs.
 type GetAppLogsParamsFollow string
 
+// RollbackAppParams defines parameters for RollbackApp.
+type RollbackAppParams struct {
+	// To Target ReleaseSeq to roll back to.
+	To int64 `form:"to" json:"to"`
+
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
+
 // DeleteVolumeParams defines parameters for DeleteVolume.
 type DeleteVolumeParams struct {
 	// Force Force delete even if apps reference this volume
-	Force *DeleteVolumeParamsForce `form:"force,omitempty" json:"force,omitempty"`
+	Force *bool `form:"force,omitempty" json:"force,omitempty"`
 }
-
-// DeleteVolumeParamsForce defines parameters for DeleteVolume.
-type DeleteVolumeParamsForce string
 
 // SpawnAppJSONRequestBody defines body for SpawnApp for application/json ContentType.
 type SpawnAppJSONRequestBody = SpawnRequest

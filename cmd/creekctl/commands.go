@@ -1238,7 +1238,7 @@ func writeAppEnvelope(w io.Writer, a *apitypes.App) error {
 		{"uid", a.Metadata.Uid.String()},
 		{"generation", fmt.Sprintf("%d", a.Metadata.Generation)},
 		{"resource_version", a.Metadata.ResourceVersion},
-		{"phase", string(a.Status.Phase)},
+		{"conditions", summarizeConditions(a.Status.Conditions)},
 		{"observed_generation", fmt.Sprintf("%d", a.Status.ObservedGeneration)},
 		{"pid", fmt.Sprintf("%d", a.Status.CurrentPid)},
 		{"port", fmt.Sprintf("%d", port)},
@@ -1257,6 +1257,21 @@ func writeAppEnvelope(w io.Writer, a *apitypes.App) error {
 		fmt.Fprintf(tw, "%s\t%s\n", f[0], f[1])
 	}
 	return tw.Flush()
+}
+
+// summarizeConditions renders the conditions slice as a single
+// "Ready=True Progressing=False ..." line for tabular human display.
+// Machine consumers should use --output=json which dumps the full
+// {type, status, lastTransitionTime, reason, message} tuple.
+func summarizeConditions(conds []apitypes.Condition) string {
+	if len(conds) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(conds))
+	for _, c := range conds {
+		parts = append(parts, fmt.Sprintf("%s=%s", c.Type, c.Status))
+	}
+	return strings.Join(parts, " ")
 }
 
 // --- pointer helpers for apitypes -----------------------------------

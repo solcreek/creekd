@@ -58,7 +58,13 @@ func (e *StorageCorruptedError) Error() string {
 // freshly-generated UUIDv7 and creationTimestamp = time.Now() at
 // migration time (best-effort; the true original creation moment is
 // lost). Migration writes v2 back to disk transparently.
-const FormatVersion = 2
+//
+// v2 → v3 (2026-05-24): adds per-app `releases[]` (Release ledger
+// per DESIGN-self-host-state.md §"The `Release` resource"). v2
+// files migrate forward with Releases=nil — existing apps simply
+// have no prior release history, which is the truthful state.
+// Migration writes v3 back transparently.
+const FormatVersion = 3
 
 // State is the on-disk shape of the persisted app set + volumes.
 // Volumes are restored BEFORE Apps on daemon start so VolumeMount
@@ -74,10 +80,12 @@ type State struct {
 // runtime state (modulo ephemeral fields like PID). AppMetadata is
 // the envelope-layer persistent identity (uid + generation + rv +
 // creationTimestamp) per DESIGN-self-host-state.md §"The interop-
-// bearing subset".
+// bearing subset". Releases is the persisted Release ledger; nil
+// or empty means no deploy has landed yet.
 type App struct {
 	Config   supervisor.Config `json:"config"`
 	Metadata AppMetadata       `json:"metadata"`
+	Releases []Release         `json:"releases,omitempty"`
 }
 
 // AppMetadata is the per-app envelope-layer persistent identity.
@@ -93,13 +101,19 @@ type AppMetadata struct {
 	// (AddApp on an existing ID). Does NOT bump on status writes
 	// or annotation/label changes.
 	Generation int64 `json:"generation"`
-	// ResourceVersion bumps on every spec write (AddApp on an existing
-	// or new ID). Currently never bumped for status changes because
-	// the Store has no status-write path yet — status persistence
-	// lands with status.conditions[] (subsequent stack PR). When it
-	// does, this counter will also bump on status writes, matching
-	// the K8s rv convention. Served to clients as a string per K8s
-	// wire convention. Clients MUST NOT do arithmetic on it.
+	// ObservedGeneration is the Generation value the deploy flow
+	// has converged to a healthy state on. In 0.0.x's synchronous
+	// DeployApp, observedGeneration moves in lockstep with
+	// Generation — AddApp writes them together. The async window
+	// (creek deploy --watch: 202 + background goroutine) introduces
+	// SetObservedGeneration as the late writer. The invariant
+	// ObservedGeneration ≤ Generation is enforced by the setter
+	// (monotonic guard — observedGeneration MUST NEVER decrease).
+	ObservedGeneration int64 `json:"observed_generation"`
+	// ResourceVersion bumps on every write (spec write via AddApp,
+	// status write via SetObservedGeneration / SetConditions).
+	// Served to clients as a string per K8s wire convention.
+	// Clients MUST NOT do arithmetic on it.
 	ResourceVersion uint64 `json:"resource_version"`
 	// CreationTimestamp is RFC3339 at first AddApp; immutable;
 	// preserved across restore.
@@ -145,6 +159,7 @@ type Store struct {
 
 	apps     map[string]supervisor.Config // appID → config
 	metadata map[string]AppMetadata       // appID → envelope metadata
+	releases map[string][]Release         // appID → release ledger (ordered by ReleaseSeq)
 	volumes  map[string]supervisor.Volume // volumeID → volume
 }
 
@@ -172,10 +187,11 @@ func newAppMetadata() (AppMetadata, error) {
 		return AppMetadata{}, fmt.Errorf("state: uuid v7: %w", err)
 	}
 	return AppMetadata{
-		UID:               u.String(),
-		Generation:        1,
-		ResourceVersion:   1,
-		CreationTimestamp: time.Now().UTC(),
+		UID:                u.String(),
+		Generation:         1,
+		ObservedGeneration: 1, // sync spawn → convergence is atomic
+		ResourceVersion:    1,
+		CreationTimestamp:  time.Now().UTC(),
 	}, nil
 }
 
@@ -198,6 +214,7 @@ func NewStore(path string) (*Store, error) {
 		locks:    NewLockManager(),
 		apps:     make(map[string]supervisor.Config),
 		metadata: make(map[string]AppMetadata),
+		releases: make(map[string][]Release),
 		volumes:  make(map[string]supervisor.Volume),
 	}
 	if err := s.load(); err != nil {
@@ -264,8 +281,9 @@ func (s *Store) replayWAL() error {
 	// maps are stale. Drop them and re-decode from the new payload.
 	s.apps = make(map[string]supervisor.Config)
 	s.metadata = make(map[string]AppMetadata)
+	s.releases = make(map[string][]Release)
 	s.volumes = make(map[string]supervisor.Volume)
-	if err := s.loadV2(payload); err != nil {
+	if err := s.loadV2OrV3(payload); err != nil {
 		return fmt.Errorf("state: replay decode payload: %w", err)
 	}
 
@@ -341,11 +359,19 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 	nextApps[cfg.ID] = supervisor.CloneConfig(cfg)
 	if hasMeta {
 		// Deploy / overwrite: preserve identity, bump versions.
+		// ObservedGeneration is bumped in lockstep with Generation
+		// because 0.0.x's DeployApp is synchronous: by the time
+		// AddApp lands, sup.Deploy has already converged. When #26
+		// flips DeployApp to 202 + background, the path will be
+		// "AddApp bumps Generation; SetObservedGeneration bumps
+		// observedGen later"; for now the invariant is
+		// Generation == ObservedGeneration on every successful Deploy.
 		nextMeta[cfg.ID] = AppMetadata{
-			UID:               existingMeta.UID,
-			CreationTimestamp: existingMeta.CreationTimestamp,
-			Generation:        existingMeta.Generation + 1,
-			ResourceVersion:   existingMeta.ResourceVersion + 1,
+			UID:                existingMeta.UID,
+			CreationTimestamp:  existingMeta.CreationTimestamp,
+			Generation:         existingMeta.Generation + 1,
+			ObservedGeneration: existingMeta.Generation + 1,
+			ResourceVersion:    existingMeta.ResourceVersion + 1,
 		}
 	} else {
 		meta, err := newAppMetadata()
@@ -383,17 +409,20 @@ func (s *Store) RemoveApp(id string) error {
 	}
 	nextApps := cloneMap(s.apps)
 	nextMeta := cloneMetadataMap(s.metadata)
+	nextReleases := cloneReleaseMap(s.releases)
 	currentVolumes := s.volumes
 	s.memMu.RUnlock()
 
 	delete(nextApps, id)
 	delete(nextMeta, id)
-	if err := s.flushFull(nextApps, nextMeta, currentVolumes); err != nil {
+	delete(nextReleases, id)
+	if err := s.flushFullWithReleases(nextApps, nextMeta, nextReleases, currentVolumes); err != nil {
 		return err
 	}
 	s.memMu.Lock()
 	s.apps = nextApps
 	s.metadata = nextMeta
+	s.releases = nextReleases
 	s.memMu.Unlock()
 	return nil
 }
@@ -439,20 +468,35 @@ func (s *Store) load() error {
 		if err := s.loadV1(data); err != nil {
 			return err
 		}
-		// Persist forward as v2 so subsequent boots take the v2 path.
-		// load() runs single-threaded during NewStore — no concurrent
-		// access possible — but flushBoth requires flushMu (PR #6's
-		// per-app-lock refactor separated this from s.mu) so acquire
-		// it explicitly to honour the contract.
+		// Persist forward as the current format so subsequent boots
+		// skip the migration path. load() runs single-threaded during
+		// NewStore — no concurrent access possible — but flushBoth
+		// requires flushMu (PR #6's per-app-lock refactor separated
+		// this from s.mu) so acquire it explicitly to honour the
+		// contract.
 		s.flushMu.Lock()
 		err := s.flushBoth(s.apps, s.volumes)
 		s.flushMu.Unlock()
 		if err != nil {
-			return fmt.Errorf("state: v1→v2 migration flush %s: %w", s.path, err)
+			return fmt.Errorf("state: v1→v%d migration flush %s: %w", FormatVersion, s.path, err)
+		}
+		return nil
+	case 2:
+		if err := s.loadV2OrV3(data); err != nil {
+			return err
+		}
+		// v2 → v3: no shape change beyond the new Releases field
+		// (which is omitempty + nil on load). Persist forward as v3
+		// transparently.
+		s.flushMu.Lock()
+		err := s.flushBoth(s.apps, s.volumes)
+		s.flushMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("state: v2→v3 migration flush %s: %w", s.path, err)
 		}
 		return nil
 	case FormatVersion:
-		return s.loadV2(data)
+		return s.loadV2OrV3(data)
 	default:
 		return fmt.Errorf("state: unsupported version %d in %s (want %d)",
 			head.Version, s.path, FormatVersion)
@@ -493,11 +537,14 @@ func (s *Store) loadV1(data []byte) error {
 	return nil
 }
 
-// loadV2 decodes the current State shape.
-func (s *Store) loadV2(data []byte) error {
+// loadV2OrV3 decodes the current State shape. v2 and v3 are
+// structurally identical except for the Releases field (omitempty
+// on v2 reads → nil slice, which is correct). Same decoder serves
+// both.
+func (s *Store) loadV2OrV3(data []byte) error {
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("state: decode v2 %s: %w", s.path, err)
+		return fmt.Errorf("state: decode v2/v3 %s: %w", s.path, err)
 	}
 	for _, v := range st.Volumes {
 		if v.Volume.ID == "" {
@@ -511,7 +558,7 @@ func (s *Store) loadV2(data []byte) error {
 			continue
 		}
 		s.apps[a.Config.ID] = a.Config
-		// Defensive: if a v2 file is missing metadata (shouldn't
+		// Defensive: if a v2/v3 file is missing metadata (shouldn't
 		// happen with our writer, but a hand-edited file might),
 		// fall back to a freshly-generated stamp.
 		if a.Metadata.UID == "" {
@@ -523,6 +570,11 @@ func (s *Store) loadV2(data []byte) error {
 			repaired = true
 		} else {
 			s.metadata[a.Config.ID] = a.Metadata
+		}
+		if len(a.Releases) > 0 {
+			clone := make([]Release, len(a.Releases))
+			copy(clone, a.Releases)
+			s.releases[a.Config.ID] = clone
 		}
 	}
 	// Persist any repaired metadata back to disk. Without this, every
@@ -654,7 +706,25 @@ func (s *Store) flushBoth(apps map[string]supervisor.Config, volumes map[string]
 // deterministic.
 //
 // Caller must hold s.flushMu.
+//
+// Releases are sourced from the Store's in-memory snapshot at
+// call time. Mutations to the release ledger (CreateRelease)
+// have their own flushFullWithReleases entry point that builds
+// the next-releases map; bare flushFull preserves the existing
+// ledger.
 func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string]AppMetadata, volumes map[string]supervisor.Volume) error {
+	s.memMu.RLock()
+	releasesSnapshot := s.releases
+	s.memMu.RUnlock()
+	return s.flushFullWithReleases(apps, metadata, releasesSnapshot, volumes)
+}
+
+// flushFullWithReleases is the underlying durability path,
+// accepting the full state quad (apps, metadata, releases,
+// volumes). flushFull wraps it for callers that don't touch the
+// release ledger; CreateRelease calls it directly with the
+// staged next-releases map.
+func (s *Store) flushFullWithReleases(apps map[string]supervisor.Config, metadata map[string]AppMetadata, releases map[string][]Release, volumes map[string]supervisor.Volume) error {
 	// Mode 0o700 / 0o600 — state.json contains every supervised
 	// app's full Config (env vars, commands, volume refs). World-
 	// readable defaults would leak tenant secrets to any local
@@ -683,6 +753,7 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 		st.Apps = append(st.Apps, App{
 			Config:   apps[id],
 			Metadata: metadata[id],
+			Releases: releases[id],
 		})
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
