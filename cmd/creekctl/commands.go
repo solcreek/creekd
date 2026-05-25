@@ -1211,18 +1211,12 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 		dPath = filepath.Join(filepath.Dir(ctlPath), "creekd")
 	}
 
-	// Swap both. creekd first — if it fails, creekctl is still the
-	// pre-upgrade binary and the user can retry without a
-	// version-mismatch surprise.
-	//
-	// To avoid leaving the system half-upgraded if the SECOND swap
-	// fails (typically disk-full or a permissions change between
-	// the two calls), copy the pre-upgrade creekd to a sibling
-	// stash file BEFORE the first swap. On creekctl failure, the
-	// stash is rolled back via a second SwapBinary call. Either
-	// both swaps land or the system ends up with the original pair.
+	// Stash the pre-upgrade creekd so creekctl-swap failure can
+	// roll creekd back. CopyFile prefers a hard link when the
+	// filesystem allows it — O(1) and zero extra disk space, with
+	// byte-copy fallback on EXDEV.
 	stashPath := dPath + ".pre-upgrade"
-	if err := copyFileForRollback(dPath, stashPath); err != nil {
+	if err := upgrade.CopyFile(dPath, stashPath); err != nil {
 		return fmt.Errorf("stash pre-upgrade creekd: %w", err)
 	}
 	defer os.Remove(stashPath)
@@ -1233,9 +1227,7 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	}
 	fmt.Fprintf(w, "==> replacing %s\n", ctlPath)
 	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekctl"), ctlPath); err != nil {
-		// Best-effort rollback of creekd to the stashed pre-upgrade
-		// binary. Report the rollback outcome but surface the
-		// ORIGINAL error so the operator sees the real cause.
+		// Best-effort rollback; surface the original error either way.
 		if rbErr := upgrade.SwapBinary(stashPath, dPath); rbErr != nil {
 			fmt.Fprintf(w, "WARN: creekctl upgrade failed AND rollback of %s also failed: %v\n", dPath, rbErr)
 		} else {
@@ -1246,30 +1238,6 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	fmt.Fprintf(w, "==> upgraded to %s\n", version)
 	_ = cf // commonFlags currently unused; reserved for future --json output
 	return nil
-}
-
-// copyFileForRollback duplicates src to dst, preserving mode. Used
-// to stash the pre-upgrade creekd so the self-upgrade flow can
-// roll back if the second swap fails.
-func copyFileForRollback(src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 // resolveLatestTag follows GitHub's /releases/latest redirect to
@@ -1348,19 +1316,13 @@ func downloadFile(url, dst string) error {
 	return nil
 }
 
-// extractTarGz untars src into dstDir. Skips entries that are not
-// regular files (we only want creekd + creekctl + the bundled
-// docs from goreleaser); writes them with their archived mode.
-//
-// Path traversal guard: filepath.Clean normalises ".." segments
-// and the HasPrefix check refuses any entry whose cleaned path
-// is outside dstDir. This handles absolute-path entries and ".."
-// traversal — but NOT pre-existing symlinks inside dstDir, since
-// the check operates on the path string, not the resolved inode.
-// Safe in this codebase because the caller always passes a fresh
-// MkdirTemp directory; do not reuse extractTarGz against a
-// caller-controlled or persistent dstDir without adding O_NOFOLLOW
-// + per-component lstat.
+// extractTarGz untars src into dstDir. Skips non-regular entries
+// (we only want creekd + creekctl + the bundled docs). The
+// HasPrefix(filepath.Clean(...)) check handles ".." and absolute
+// paths but NOT pre-existing symlinks inside dstDir — safe here
+// only because the caller always passes a fresh MkdirTemp; do not
+// reuse against a persistent dstDir without O_NOFOLLOW + per-
+// component lstat.
 func extractTarGz(src, dstDir string) error {
 	f, err := os.Open(src)
 	if err != nil {

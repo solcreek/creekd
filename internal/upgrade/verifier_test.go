@@ -9,7 +9,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
+
+// withCosignTimeoutForTest shortens cosignVerifyTimeout for the
+// duration of a test and returns a restore function suitable for
+// `defer`. Saves a 30s wall-clock penalty on timeout-path tests.
+func withCosignTimeoutForTest(d time.Duration) func() {
+	prev := cosignVerifyTimeout
+	cosignVerifyTimeout = d
+	return func() { cosignVerifyTimeout = prev }
+}
 
 // writeFakeCosign writes a shell script at path that exits with
 // the given code after echoing whatever message is passed via
@@ -176,6 +186,36 @@ func TestVerify_CosignNotExecutable(t *testing.T) {
 	}
 	if errors.Is(err, ErrSignatureInvalid) {
 		t.Errorf("non-executable cosign should NOT surface as ErrSignatureInvalid (setup error, not security): %v", err)
+	}
+}
+
+// TestVerify_CosignTimeoutNotSignatureRejection covers the
+// deadline path: a hung cosign (e.g. Rekor network black hole)
+// must surface as "unavailable", NOT as ErrSignatureInvalid. The
+// trap here is that exec.CommandContext kills the process via
+// SIGKILL on timeout, which produces an *exec.ExitError — easy to
+// mistake for a non-zero verdict if the classifier only checks
+// the type. The implementation guards by inspecting ctx.Err()
+// before falling through to the ExitError branch.
+func TestVerify_CosignTimeoutNotSignatureRejection(t *testing.T) {
+	dir := t.TempDir()
+	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
+
+	// Fake cosign that sleeps far longer than the test override.
+	cosign := filepath.Join(dir, "cosign")
+	if err := os.WriteFile(cosign, []byte("#!/bin/sh\nsleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer withCosignTimeoutForTest(200 * time.Millisecond)()
+
+	v := New()
+	v.CosignPath = cosign
+	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	if err == nil {
+		t.Fatal("hung cosign should error")
+	}
+	if errors.Is(err, ErrSignatureInvalid) {
+		t.Errorf("timeout should NOT surface as ErrSignatureInvalid (setup/availability error): %v", err)
 	}
 }
 

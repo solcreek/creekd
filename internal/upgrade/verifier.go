@@ -17,8 +17,10 @@ import (
 
 // cosignVerifyTimeout caps how long a single `cosign verify-blob`
 // call may run. cosign contacts Rekor + Fulcio, so a network black
-// hole would otherwise let self-upgrade hang indefinitely.
-const cosignVerifyTimeout = 30 * time.Second
+// hole would otherwise let self-upgrade hang indefinitely. var,
+// not const, so the timeout test can shorten it without a 30s
+// wall-clock penalty.
+var cosignVerifyTimeout = 30 * time.Second
 
 // ErrSignatureInvalid is returned by Verify when EITHER the cosign
 // signature on checksums.txt fails to verify against the expected
@@ -115,17 +117,14 @@ func (v *Verifier) verifyCosign(sigPath, certPath, checksumsPath string) error {
 	if err == nil {
 		return nil
 	}
-	// Classify the failure. Only an *exec.ExitError — cosign ran to
-	// completion and exited non-zero — is a real signature
-	// rejection. Everything else (binary not found, not executable,
-	// killed by signal, deadline exceeded, kernel exec failure) is
-	// a setup / environment problem the caller may want to handle
-	// differently (e.g. fall back to checksum-only, surface a
-	// "fix your install" message). Misclassifying these as
-	// ErrSignatureInvalid would let a chmod-broken cosign trigger
-	// the security failure path.
+	// Only a normal non-zero exit means cosign rejected the
+	// signature. Timeout-SIGKILL also surfaces as *exec.ExitError,
+	// so ctx.Err() and Exited() screen those out.
+	if ctx.Err() != nil {
+		return fmt.Errorf("upgrade: cosign unavailable (%s): timed out after %s: %w", bin, cosignVerifyTimeout, ctx.Err())
+	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if errors.As(err, &exitErr) && exitErr.Exited() {
 		return fmt.Errorf("%w: cosign verify-blob: %s", ErrSignatureInvalid, strings.TrimSpace(string(out)))
 	}
 	return fmt.Errorf("upgrade: cosign unavailable (%s): %w", bin, err)

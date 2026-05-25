@@ -31,34 +31,49 @@ func SwapBinary(src, dst string) error {
 		mode = 0o755
 	}
 
-	// Use os.CreateTemp in the destination directory so:
-	//   - the rename is on the same filesystem (cross-fs rename
-	//     is non-atomic on Linux and outright fails on some kernels),
-	//   - the tmp filename is randomised (avoids a symlink-clobber
-	//     race on a predictable sibling name),
-	//   - opening uses O_EXCL semantics so we never follow a
-	//     pre-existing file at the chosen path.
-	tmpFile, err := os.CreateTemp(filepath.Dir(dst), ".upgrade-*.tmp")
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("upgrade: open src %s: %w", src, err)
+	}
+	defer in.Close()
+
+	// os.CreateTemp: same-filesystem sibling (for an atomic rename),
+	// randomised name (no symlink-clobber race on a predictable
+	// path), and O_EXCL semantics (we never follow a pre-existing
+	// file at the chosen path).
+	out, err := os.CreateTemp(filepath.Dir(dst), ".upgrade-*.tmp")
 	if err != nil {
 		return fmt.Errorf("upgrade: create tmp in %s: %w", filepath.Dir(dst), err)
 	}
-	tmp := tmpFile.Name()
-	tmpFile.Close() // we'll reopen via copyFile with the right flags + mode
-	if err := copyFile(src, tmp, mode); err != nil {
-		_ = os.Remove(tmp)
-		return err
+	tmp := out.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("upgrade: copy %s → %s: %w", src, tmp, err)
+	}
+	if err := out.Chmod(mode); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("upgrade: chmod %s: %w", tmp, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("upgrade: sync %s: %w", tmp, err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("upgrade: close %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("upgrade: rename %s → %s: %w", tmp, dst, err)
 	}
-	// Best-effort fsync of the parent directory so the rename's
-	// entry hits disk before we return. Errors here are NOT fatal:
-	// the rename already succeeded, the binary on disk is correct,
-	// and failing the call would mislead callers into thinking the
-	// swap itself failed. A power loss in the millisecond before
-	// the kernel flushes is rare enough that best-effort matches
-	// what every other long-lived Unix tool does here.
+	committed = true
+	// Best-effort: the rename already succeeded, so fsync errors
+	// here are not fatal to the swap.
 	if dirFd, derr := os.Open(filepath.Dir(dst)); derr == nil {
 		_ = dirFd.Sync()
 		_ = dirFd.Close()
@@ -66,30 +81,32 @@ func SwapBinary(src, dst string) error {
 	return nil
 }
 
-func copyFile(src, dst string, mode os.FileMode) error {
+// CopyFile duplicates src to dst. Tries a hard link first (O(1),
+// shared inode, no extra disk space); on EXDEV / EPERM / FS that
+// doesn't support hard links, falls back to a byte copy.
+// Callers depending on dst being a DISTINCT inode from src must
+// not use this — use SwapBinary for the atomic-swap primitive
+// that always allocates a fresh inode.
+func CopyFile(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
 	in, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("upgrade: open src %s: %w", src, err)
+		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_TRUNC|os.O_WRONLY, mode)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
 	if err != nil {
-		return fmt.Errorf("upgrade: open dst %s: %w", dst, err)
-	}
-	if err := out.Chmod(mode); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("upgrade: chmod %s: %w", dst, err)
+		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
-		return fmt.Errorf("upgrade: copy %s → %s: %w", src, dst, err)
+		return err
 	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		return fmt.Errorf("upgrade: sync %s: %w", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("upgrade: close %s: %w", dst, err)
-	}
-	return nil
+	return out.Close()
 }
