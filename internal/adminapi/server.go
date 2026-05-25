@@ -250,8 +250,7 @@ func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 			if s.router != nil {
 				s.router.Remove(req.Id)
 			}
-			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
-				"state.AddApp: "+serr.Error())
+			writeStoreError(w, "state.AddApp", serr)
 			return
 		}
 	}
@@ -317,8 +316,7 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 	}
 	if s.store != nil {
 		if err := s.store.RemoveApp(id); err != nil {
-			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
-				"state.RemoveApp: "+err.Error())
+			writeStoreError(w, "state.RemoveApp", err)
 			return
 		}
 	}
@@ -360,8 +358,7 @@ func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.A
 	}
 	if s.store != nil {
 		if serr := s.store.AddApp(dcfg.Config); serr != nil {
-			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
-				"state.AddApp (deploy): "+serr.Error())
+			writeStoreError(w, "state.AddApp (deploy)", serr)
 			return
 		}
 	}
@@ -561,8 +558,7 @@ func (s *Server) RegisterVolume(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		if serr := s.store.AddVolume(stored); serr != nil {
 			_ = s.sup.UnregisterVolume(req.Id, true)
-			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
-				"state.AddVolume: "+serr.Error())
+			writeStoreError(w, "state.AddVolume", serr)
 			return
 		}
 	}
@@ -605,8 +601,7 @@ func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitype
 
 	if s.store != nil {
 		if err := s.store.RemoveVolume(id); err != nil {
-			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
-				"state.RemoveVolume: "+err.Error())
+			writeStoreError(w, "state.RemoveVolume", err)
 			return
 		}
 	}
@@ -654,4 +649,26 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, apitypes.ErrorResponse{Code: apitypes.ErrorCode(code), Error: msg})
+}
+
+// writeStoreError maps a state.Store mutation error to the right HTTP
+// status + ErrorCode. StorageCorruptedError surfaces as 503 with
+// `storage_corrupted` so clients know the daemon's persistence is in
+// a refusing-further-writes state. Anything else collapses to the
+// existing 500 / `internal` shape.
+//
+// UnsupportedFilesystemError is NOT handled here — it's raised by
+// NewStore at daemon startup, never at request time. The spec keeps
+// the code in the enum for completeness (any client doing schema
+// codegen will see both errors the daemon can produce); request-time
+// callers only ever see storage_corrupted.
+func writeStoreError(w http.ResponseWriter, prefix string, err error) {
+	var corrupt *state.StorageCorruptedError
+	if errors.As(err, &corrupt) {
+		writeError(w, http.StatusServiceUnavailable, string(apitypes.ErrorCodeStorageCorrupted),
+			prefix+": "+err.Error())
+		return
+	}
+	writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+		prefix+": "+err.Error())
 }
