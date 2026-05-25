@@ -1,6 +1,7 @@
 package adminapi
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -403,4 +404,109 @@ func TestAuditChain_RotationCursorMismatch(t *testing.T) {
 func sha256Sum(data []byte) []byte {
 	h := sha256.Sum256(data)
 	return h[:]
+}
+
+// TestAuditChain_LastHashHeldOnNilFile guards the contract that
+// lastHash only advances when the record actually lands on disk.
+// Without this, a Log() call after Close (or after a rotate() that
+// left a.file=nil) would advance the chain by hashing a record that
+// was never persisted, breaking PrevSHA256 references in any
+// subsequent record.
+func TestAuditChain_LastHashHeldOnNilFile(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.Log(AuditEntry{Timestamp: "t1", Action: "spawn"})
+	hashAfterFirst := logger.lastHash
+	if err := logger.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	logger.Log(AuditEntry{Timestamp: "t2", Action: "deploy"})
+	if logger.lastHash != hashAfterFirst {
+		t.Errorf("lastHash advanced after Log on closed logger: was %s, now %s", hashAfterFirst, logger.lastHash)
+	}
+}
+
+// TestAuditChain_MultiRotationVerify guards that VerifyAuditChain
+// stitches the chain across multiple rotation boundaries. Previously
+// the verifier consulted the rotation cursor (which only records the
+// MOST RECENT rotation), so audit.log.2, .3 ... were invisible to
+// verification — a tampered record there would pass.
+func TestAuditChain_MultiRotationVerify(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	// Force three rotations: t1 → rotate → t2 → rotate → t3 → rotate → t4.
+	// After this audit.log has t4, audit.log.1 has t3, .2 has t2, .3 has t1.
+	logger.Log(AuditEntry{Timestamp: "t1", Action: "spawn"})
+	logger.mu.Lock()
+	_ = logger.rotate()
+	logger.mu.Unlock()
+	logger.Log(AuditEntry{Timestamp: "t2", Action: "deploy"})
+	logger.mu.Lock()
+	_ = logger.rotate()
+	logger.mu.Unlock()
+	logger.Log(AuditEntry{Timestamp: "t3", Action: "stop"})
+	logger.mu.Lock()
+	_ = logger.rotate()
+	logger.mu.Unlock()
+	logger.Log(AuditEntry{Timestamp: "t4", Action: "restart"})
+	_ = logger.Close()
+
+	if err := VerifyAuditChain(dir); err != nil {
+		t.Fatalf("VerifyAuditChain on intact 3-rotation chain returned %v, want nil", err)
+	}
+
+	// Tamper with audit.log.2 — the OLDEST retained rotated file,
+	// previously invisible to cursor-only verification.
+	oldestPath := filepath.Join(dir, "audit.log.2")
+	rawOld, _ := os.ReadFile(oldestPath)
+	tampered := bytes.Replace(rawOld, []byte("deploy"), []byte("tamperd"), 1)
+	if bytes.Equal(rawOld, tampered) {
+		t.Fatal("test setup: expected to replace 'deploy' in audit.log.2 but no replacement happened")
+	}
+	if err := os.WriteFile(oldestPath, tampered, 0o600); err != nil {
+		t.Fatalf("write tampered file: %v", err)
+	}
+	err = VerifyAuditChain(dir)
+	var cb *AuditChainBrokenError
+	if !errors.As(err, &cb) {
+		t.Errorf("VerifyAuditChain after tamper of audit.log.2 returned %v, want AuditChainBrokenError", err)
+	}
+}
+
+// TestAuditChain_VerifyDetectsWhitespaceTamper guards the byte-level
+// tamper-detection promise of the chain. Previously verifyChainInFile
+// re-marshaled the parsed AuditEntry and hashed the canonical bytes,
+// which silently absorbed whitespace edits — the very byte-level
+// tampering the chain claims to detect. The fix hashes the raw
+// scanner-returned line bytes.
+func TestAuditChain_VerifyDetectsWhitespaceTamper(t *testing.T) {
+	dir := t.TempDir()
+	logger, err := NewAuditLogger(dir)
+	if err != nil {
+		t.Fatalf("NewAuditLogger: %v", err)
+	}
+	logger.Log(AuditEntry{Timestamp: "t1", Action: "spawn"})
+	logger.Log(AuditEntry{Timestamp: "t2", Action: "deploy"})
+	_ = logger.Close()
+
+	path := filepath.Join(dir, "audit.log")
+	raw, _ := os.ReadFile(path)
+	tampered := bytes.Replace(raw, []byte(`"action":"spawn"`), []byte(`"action":"spawn" `), 1)
+	if bytes.Equal(raw, tampered) {
+		t.Fatal("test setup: expected to inject whitespace but no substitution happened")
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatalf("write tampered file: %v", err)
+	}
+	err = VerifyAuditChain(dir)
+	var cb *AuditChainBrokenError
+	if !errors.As(err, &cb) {
+		t.Errorf("VerifyAuditChain after whitespace tamper returned %v, want AuditChainBrokenError", err)
+	}
 }

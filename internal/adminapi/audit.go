@@ -152,13 +152,20 @@ func (a *AuditLogger) Log(e AuditEntry) {
 	if err != nil {
 		return
 	}
-	if a.file != nil {
-		n, werr := a.file.Write(append(line, '\n'))
-		if werr != nil {
-			return
-		}
-		a.bytes += int64(n)
+	// lastHash only advances when bytes actually land on disk. If the
+	// file handle is nil (post-Close, or after a rotate() failure that
+	// left a.file=nil) or the Write errored, the record was NOT
+	// persisted — advancing lastHash anyway would make the next
+	// record's PrevSHA256 point at a hash whose bytes don't exist on
+	// disk, permanently breaking the chain.
+	if a.file == nil {
+		return
 	}
+	n, werr := a.file.Write(append(line, '\n'))
+	if werr != nil {
+		return
+	}
+	a.bytes += int64(n)
 	h := sha256.Sum256(line)
 	a.lastHash = hex.EncodeToString(h[:])
 
@@ -271,37 +278,38 @@ func (a *AuditLogger) Close() error {
 }
 
 // VerifyAuditChain re-hashes every record in the audit.log at dir
-// (and the most recent rotated file if a cursor is present) and
-// confirms each record's PrevSHA256 matches the prior record's
-// computed sha256. Returns nil when the chain is intact, or an
-// AuditChainBrokenError pointing at the first divergence.
+// plus all retained rotated files (audit.log.<N> down to audit.log.1)
+// and confirms each record's PrevSHA256 matches the prior record's
+// computed sha256. Returns nil when the chain is intact across all
+// files, or an AuditChainBrokenError pointing at the first divergence.
+//
+// Files are walked oldest → newest (highest .N first, then .N-1 ...
+// then .1, then audit.log). Each file's computed tip becomes the
+// next file's expectedPrev — that's how the chain stitches across
+// rotation boundaries. Missing rotated files are skipped (operator
+// may have set auditKeepRotated higher than the number of rotations
+// performed yet).
+//
+// The rotation cursor (written by rotate() for fast "what was the
+// most recent rotation" lookups) is NOT consulted here: it only
+// records ONE rotation, so a cursor-only verifier would silently
+// miss anything older. Walking the files is the source of truth.
 //
 // Used by the restore drill (when implemented) and `creek host
 // doctor --verify-audit` to detect tampering or accidental
 // corruption.
 func VerifyAuditChain(dir string) error {
-	path := filepath.Join(dir, "audit.log")
-	// First verify any rotated file (if cursor exists), then the
-	// current file with the rotated file's tip as the boundary.
-	cursorPath := filepath.Join(dir, "audit-rotation-cursor")
 	expectedPrev := auditGenesisHash
-	if data, err := os.ReadFile(cursorPath); err == nil {
-		var cur auditRotationCursor
-		if err := json.Unmarshal(data, &cur); err == nil && cur.RotatedPath != "" {
-			tip, err := verifyChainInFile(cur.RotatedPath, auditGenesisHash)
-			if err != nil {
-				return err
-			}
-			if tip != cur.TipSHA256 {
-				return &AuditChainBrokenError{
-					File:    cur.RotatedPath,
-					Reason:  fmt.Sprintf("computed tip %s does not match cursor's recorded tip %s", tip, cur.TipSHA256),
-				}
-			}
-			expectedPrev = tip
+	for n := auditKeepRotated; n >= 1; n-- {
+		rotPath := filepath.Join(dir, fmt.Sprintf("audit.log.%d", n))
+		tip, err := verifyChainInFile(rotPath, expectedPrev)
+		if err != nil {
+			return err
 		}
+		expectedPrev = tip
 	}
-	if _, err := verifyChainInFile(path, expectedPrev); err != nil {
+	currentPath := filepath.Join(dir, "audit.log")
+	if _, err := verifyChainInFile(currentPath, expectedPrev); err != nil {
 		return err
 	}
 	return nil
@@ -342,15 +350,14 @@ func verifyChainInFile(path string, expectedPrev string) (string, error) {
 			return "", &AuditChainBrokenError{File: path, Line: lineNum,
 				Reason: fmt.Sprintf("PrevSHA256=%s does not match prior record's computed sha256=%s", rec.PrevSHA256, prev)}
 		}
-		// Compute this record's sha256 over its full serialized
-		// bytes (matching the bytes Log wrote, NOT the bytes the
-		// scanner returned — the two should match since we use
-		// json.Marshal both places, but be explicit).
-		canonical, err := json.Marshal(rec)
-		if err != nil {
-			return "", fmt.Errorf("audit verify: re-marshal line %d: %w", lineNum, err)
-		}
-		h := sha256.Sum256(canonical)
+		// Hash the raw line bytes — exactly the bytes Log() wrote
+		// (sans the trailing newline that Log appended at write time;
+		// bufio.Scanner strips the newline before returning the line).
+		// Hashing re-marshaled bytes would canonicalize JSON, defeating
+		// the byte-level tamper-detection promise of the chain — a
+		// whitespace edit or field reordering on disk would survive
+		// re-marshal and pass verify silently.
+		h := sha256.Sum256(raw)
 		prev = hex.EncodeToString(h[:])
 	}
 	if err := scanner.Err(); err != nil {
