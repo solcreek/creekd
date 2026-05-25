@@ -87,23 +87,28 @@ type Store struct {
 }
 
 // newAppMetadata generates fresh envelope metadata for a brand-new
-// app. UUIDv7 (RFC 9562). Generation starts at 1 (the create write
-// counts); ResourceVersion starts at 1 likewise. CreationTimestamp
-// is the moment of creation in UTC.
-func newAppMetadata() AppMetadata {
+// app. UID is UUIDv7 (RFC 9562) — time-ordered. Generation starts at
+// 1 (the create write counts); ResourceVersion starts at 1 likewise.
+// CreationTimestamp is the moment of creation in UTC.
+//
+// Returns an error only if uuid.NewV7 fails, which only happens when
+// the system can't produce 6 bytes of randomness — i.e. crypto/rand
+// is broken. We deliberately do NOT fall back to v4 here: mixing v4
+// and v7 in the same store breaks the time-ordering invariant that
+// callers depend on (e.g. listing apps by UID approximates by-time).
+// If the host can't provide entropy, refusing AddApp is the honest
+// failure mode.
+func newAppMetadata() (AppMetadata, error) {
 	u, err := uuid.NewV7()
 	if err != nil {
-		// uuid.NewV7 only returns an error if the system can't
-		// produce 6 bytes of randomness — extraordinary. Fall back
-		// to v4 so the caller never panics on AddApp.
-		u = uuid.New()
+		return AppMetadata{}, fmt.Errorf("state: uuid v7: %w", err)
 	}
 	return AppMetadata{
 		UID:               u.String(),
 		Generation:        1,
 		ResourceVersion:   1,
 		CreationTimestamp: time.Now().UTC(),
-	}
+	}, nil
 }
 
 // NewStore opens (or creates) the state file at path. If the file
@@ -188,7 +193,11 @@ func (s *Store) AddApp(cfg supervisor.Config) error {
 			ResourceVersion:   existing.ResourceVersion + 1,
 		}
 	} else {
-		nextMeta[cfg.ID] = newAppMetadata()
+		meta, err := newAppMetadata()
+		if err != nil {
+			return err
+		}
+		nextMeta[cfg.ID] = meta
 	}
 	if err := s.flushFull(nextApps, nextMeta, s.volumes); err != nil {
 		return err
@@ -309,7 +318,11 @@ func (s *Store) loadV1(data []byte) error {
 			continue
 		}
 		s.apps[a.Config.ID] = a.Config
-		s.metadata[a.Config.ID] = newAppMetadata()
+		meta, err := newAppMetadata()
+		if err != nil {
+			return err
+		}
+		s.metadata[a.Config.ID] = meta
 	}
 	return nil
 }
@@ -335,7 +348,11 @@ func (s *Store) loadV2(data []byte) error {
 		// happen with our writer, but a hand-edited file might),
 		// fall back to a freshly-generated stamp.
 		if a.Metadata.UID == "" {
-			s.metadata[a.Config.ID] = newAppMetadata()
+			meta, err := newAppMetadata()
+			if err != nil {
+				return err
+			}
+			s.metadata[a.Config.ID] = meta
 		} else {
 			s.metadata[a.Config.ID] = a.Metadata
 		}
