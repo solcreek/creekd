@@ -137,17 +137,9 @@ func appendWAL(path string, rec walRecord) error {
 	if err != nil {
 		return fmt.Errorf("wal: open %s: %w", path, err)
 	}
-	// os.File.Write may return a short write with nil error in theory;
-	// treat n != len(line) as an error so partial NDJSON records can't
-	// silently corrupt the log.
-	n, err := f.Write(line)
-	if err != nil {
+	if err := writeAll(f, line); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("wal: write: %w", err)
-	}
-	if n != len(line) {
-		_ = f.Close()
-		return fmt.Errorf("wal: short write %d of %d bytes", n, len(line))
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()

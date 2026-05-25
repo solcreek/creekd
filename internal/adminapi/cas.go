@@ -74,13 +74,6 @@ func (s *Server) casMiddleware() apitypes.MiddlewareFunc {
 			// per app — otherwise two concurrent unconditional DELETEs
 			// on the same app would race, reintroducing the TOCTOU
 			// gap this middleware exists to close.
-			//
-			// Different apps' mutations proceed in parallel; same-app
-			// mutations serialise here. The previous global admin-API
-			// mutex is gone from this PR (#5b) onward.
-			//
-			// Only meaningful when a store is configured; without one
-			// there's no shared state for per-app locking to protect.
 			if s.store != nil {
 				appLock := s.store.Locks().AppLock(id)
 				appLock.Lock()

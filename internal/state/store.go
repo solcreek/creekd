@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -246,12 +247,16 @@ func (s *Store) replayWAL() error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("state: replay write+fsync: %w", err)
 	}
+	if err := fsyncDir(dir); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: replay fsync parent (pre-rename): %w", err)
+	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("state: replay rename: %w", err)
 	}
 	if err := fsyncDir(dir); err != nil {
-		return fmt.Errorf("state: replay fsync parent: %w", err)
+		return fmt.Errorf("state: replay fsync parent (post-rename): %w", err)
 	}
 
 	// Repopulate in-memory maps from the replayed payload — load()
@@ -780,29 +785,35 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 // writeFileAndFsync creates path (truncate if exists), writes data,
 // fsyncs the file descriptor, then closes. Mirrors os.WriteFile +
 // explicit fsync that os.WriteFile leaves to the kernel's whim.
-//
-// os.File.Write may return a short write with nil error; treat
-// n != len(data) as an error so partial state.json contents can't
-// silently ship through fsync.
 func writeFileAndFsync(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
-	n, err := f.Write(data)
-	if err != nil {
+	if err := writeAll(f, data); err != nil {
 		_ = f.Close()
 		return err
-	}
-	if n != len(data) {
-		_ = f.Close()
-		return fmt.Errorf("short write %d of %d bytes", n, len(data))
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return err
 	}
 	return f.Close()
+}
+
+// writeAll writes data to f and returns an error if Write fails or
+// short-writes. os.File.Write may return a short write with nil
+// error per the io.Writer contract; treating n != len(data) as an
+// error closes the silent-corruption path.
+func writeAll(f io.Writer, data []byte) error {
+	n, err := f.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return fmt.Errorf("short write %d of %d bytes", n, len(data))
+	}
+	return nil
 }
 
 // fsyncDir opens the directory and fsyncs it. On ext4/xfs this is
