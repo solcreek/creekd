@@ -75,6 +75,32 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Keyless cosign signing for checksums.txt. Signs the bytes that
+# pin every binary's SHA256 — verifying one signature transitively
+# covers every artifact in the release. Uses GitHub Actions OIDC
+# (no long-lived signing key); Fulcio + Rekor record the
+# attestation. install.sh (CREEKD_VERIFY_COSIGN env var; "1" to
+# hard-require, default soft-attempt) and the future
+# `creekctl self upgrade` check this chain against
+# https://github.com/solcreek/creekd/.github/workflows/release.yml
+# as the expected signer identity.
+#
+# COSIGN_EXPERIMENTAL=1 enables keyless mode. Required envs are
+# populated by the GitHub Actions runner.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: checksum
+    env:
+      - COSIGN_EXPERIMENTAL=1
+
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot+{{.ShortCommit}}"
 
