@@ -65,18 +65,57 @@ func generateAndPersistHostKey(path string) (*HostKey, error) {
 		return nil, fmt.Errorf("backup: generate hostkey: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, priv, hostKeyFileMode); err != nil {
-		return nil, fmt.Errorf("backup: write hostkey tmp: %w", err)
+	// os.WriteFile doesn't fsync the data before returning. A crash
+	// between WriteFile and rename can leave the renamed key file
+	// with missing or zeroed contents → all future backup manifest
+	// verifications fail. Follow the state-layer pattern: write tmp,
+	// fsync tmp, fsync parent dir before rename, rename, fsync parent
+	// dir after rename.
+	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, hostKeyFileMode)
+	if err != nil {
+		return nil, fmt.Errorf("backup: open hostkey tmp: %w", err)
+	}
+	if _, werr := f.Write(priv); werr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("backup: write hostkey tmp: %w", werr)
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("backup: fsync hostkey tmp: %w", serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("backup: close hostkey tmp: %w", cerr)
+	}
+	dir := filepath.Dir(path)
+	if derr := fsyncDir(dir); derr != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("backup: fsync dir (pre-rename): %w", derr)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("backup: rename hostkey: %w", err)
 	}
-	if dirFd, derr := os.Open(filepath.Dir(path)); derr == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if derr := fsyncDir(dir); derr != nil {
+		return nil, fmt.Errorf("backup: fsync dir (post-rename): %w", derr)
 	}
 	return &HostKey{Priv: priv, Pub: pub, Fingerprint: fingerprintPub(pub)}, nil
+}
+
+// fsyncDir opens dir and fsyncs it. On ext4/xfs this is what makes
+// rename(2) durable; on macOS/dev it's a best-effort no-op.
+func fsyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func fingerprintPub(pub ed25519.PublicKey) string {
