@@ -47,10 +47,20 @@ func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token stri
 		token:  token,
 		mux:    http.NewServeMux(),
 	}
-	// Wire the generated router with auth+audit middleware.
+	// Wire the generated router. Middleware execution order on the
+	// inbound path: audit → auth → cas → handler. Audit wraps the
+	// whole stack so it observes the final status (incl. 401 / 412);
+	// auth rejects unauthenticated requests before any state lookup;
+	// cas validates If-Match only after the caller is authenticated,
+	// so 412 responses don't leak resourceVersion to anonymous probes.
+	//
+	// oapi-codegen wraps in slice order — slice[0] becomes innermost,
+	// slice[len-1] becomes outermost. Execution = reversed slice. So
+	// to get audit→auth→cas→handler we list them in reverse:
+	// [cas, auth, audit].
 	apiHandler := apitypes.HandlerWithOptions(s, apitypes.StdHTTPServerOptions{
 		BaseRouter:       s.mux,
-		Middlewares:      []apitypes.MiddlewareFunc{s.authMiddleware(), s.auditMiddleware()},
+		Middlewares:      []apitypes.MiddlewareFunc{s.casMiddleware(), s.authMiddleware(), s.auditMiddleware()},
 		ErrorHandlerFunc: s.handleParamError,
 	})
 	_ = apiHandler // routes registered on s.mux
@@ -121,9 +131,44 @@ func (s *Server) auditMiddleware() apitypes.MiddlewareFunc {
 	}
 }
 
-// handleParamError handles parameter validation errors from the generated router.
-func (s *Server) handleParamError(w http.ResponseWriter, _ *http.Request, err error) {
+// handleParamError handles parameter validation errors from the
+// generated router. The wrapper parses path / header / query params
+// BEFORE the middleware chain runs, so a parse error (malformed id,
+// duplicated If-Match header, etc.) reaches us here without auth or
+// audit having had a chance to act. Mirror what those middlewares
+// would have done: enforce auth so anonymous probers get a 401 (not
+// a 400 that leaks endpoint existence), and emit an audit entry so
+// the attempt is logged for mutating verbs.
+func (s *Server) handleParamError(w http.ResponseWriter, r *http.Request, err error) {
+	if s.token != "" && !s.checkBearer(r) {
+		s.emitAuditOnEarlyError(r, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, string(apitypes.ErrorCodeUnauthorized),
+			"missing or invalid bearer token")
+		return
+	}
+	s.emitAuditOnEarlyError(r, http.StatusBadRequest)
 	writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+}
+
+// emitAuditOnEarlyError logs a request that failed wrapper-level
+// validation before the audit middleware ran. No-op when audit is not
+// configured or the verb is non-mutating (read-only param errors
+// don't warrant an audit entry).
+func (s *Server) emitAuditOnEarlyError(r *http.Request, statusCode int) {
+	if s.audit == nil || !isMutating(r.Method) {
+		return
+	}
+	s.audit.Log(AuditEntry{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		AppID:      extractAppID(r.URL.Path),
+		Action:     actionFromRequest(r.Method, r.URL.Path),
+		Actor:      hashToken(s.extractToken(r)),
+		StatusCode: statusCode,
+		DurationMS: 0,
+		SourceIP:   r.RemoteAddr,
+	})
 }
 
 // guardFunc wraps h with bearer-token check (for pprof/metrics, not API routes).
@@ -240,10 +285,25 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, appToView(app))
+	// Envelope refactor lands per-handler. GetApp is the first
+	// endpoint to expose the k8s-style {apiVersion, kind, metadata,
+	// spec, status} shape. Other handlers still return AppView until
+	// they're refactored individually.
+	//
+	// If store is not configured (some test paths) or the app
+	// predates the metadata era (in-memory-only spawn), fall back to
+	// a zero-metadata envelope rather than 500ing — the runtime
+	// state is still authoritative for status fields.
+	var meta state.AppMetadata
+	if s.store != nil {
+		if m, ok := s.store.Meta(id); ok {
+			meta = m
+		}
+	}
+	writeJSON(w, http.StatusOK, appToEnvelope(app, meta))
 }
 
-func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
+func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
 	if err := s.sup.Stop(id); err != nil {
 		if errors.Is(err, supervisor.ErrNotFound) {
 			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
@@ -265,7 +325,7 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
+func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, _ apitypes.DeployAppParams) {
 	var req apitypes.DeployRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())

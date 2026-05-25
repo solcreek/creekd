@@ -1,12 +1,16 @@
 package adminapi
 
 import (
+	"strconv"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/runtime"
 	"github.com/solcreek/creekd/internal/sandbox"
+	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
@@ -89,6 +93,63 @@ func appToView(app *supervisor.App) apitypes.AppView {
 		v.NetIp = &s
 	}
 	return v
+}
+
+// appToEnvelope converts a runtime supervisor.App + its persisted
+// state.AppMetadata into the k8s-style envelope (apitypes.App). Used
+// by GetApp as the first endpoint to expose the envelope shape.
+//
+// `phase` (status.phase) is the K8s 1.13-deprecated phase pattern;
+// kept here for the envelope-refactor calibration window. See
+// BACKLOG.md API-07: refactor to conditions array before broader
+// envelope rollout (or document the divergence in red-lines).
+func appToEnvelope(app *supervisor.App, meta state.AppMetadata) apitypes.App {
+	if app == nil {
+		return apitypes.App{}
+	}
+	// meta.UID is a UUIDv7 string written by state package; parse
+	// back into the wire-format UUID type. uuid.Parse error here
+	// means state was corrupted — we surface a zero UID rather than
+	// panic in a handler.
+	parsedUID, _ := uuid.Parse(meta.UID)
+
+	envelope := apitypes.App{
+		ApiVersion: apitypes.CreekDevv1alpha1,
+		Kind:       apitypes.AppKindApp,
+		Metadata: apitypes.AppMetadata{
+			Name:              app.ID,
+			Uid:               parsedUID,
+			Generation:        meta.Generation,
+			ResourceVersion:   strconv.FormatUint(meta.ResourceVersion, 10),
+			CreationTimestamp: meta.CreationTimestamp,
+		},
+		Spec: apitypes.AppSpec{},
+		Status: apitypes.AppStatus{
+			ObservedGeneration: meta.Generation,
+			Phase:              apitypes.AppStatusPhase(app.Status().String()),
+			CurrentPid:         app.PID(),
+			CurrentPort:        app.Port,
+			RestartCount:       app.RestartCount(),
+			HealthFailures:     app.HealthFailures(),
+			UptimeMs:           app.Uptime().Milliseconds(),
+		},
+	}
+	envelope.Spec.Port = ptr(app.Port)
+	envelope.Spec.Command = ptr(app.Command)
+	if rt := string(app.Runtime); rt != "" {
+		envelope.Spec.Runtime = &rt
+	}
+	if args := append([]string(nil), app.Args...); len(args) > 0 {
+		envelope.Spec.Args = &args
+	}
+	if env := app.Env(); len(env) > 0 {
+		envelope.Spec.Env = &env
+	}
+	if app.NetIP != nil {
+		s := app.NetIP.String()
+		envelope.Status.NetIp = &s
+	}
+	return envelope
 }
 
 // volumeToView converts a supervisor Volume to the spec VolumeView.

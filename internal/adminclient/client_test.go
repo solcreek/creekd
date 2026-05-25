@@ -96,8 +96,13 @@ func TestSpawnGetStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if fetched.Pid == 0 {
-		t.Errorf("Pid = 0, want > 0")
+	// Get now returns the k8s-style envelope (apitypes.App). PID
+	// moved under .Status.CurrentPid.
+	if fetched.Status.CurrentPid == 0 {
+		t.Errorf("Status.CurrentPid = 0, want > 0")
+	}
+	if fetched.Metadata.Name != "app1" {
+		t.Errorf("Metadata.Name = %q, want %q", fetched.Metadata.Name, "app1")
 	}
 
 	if err := c.Stop(context.Background(), "app1"); err != nil {

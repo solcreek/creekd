@@ -315,7 +315,7 @@ func runGet(ctx context.Context, w io.Writer, argv []string) error {
 		}
 		return writeJSON(w, app)
 	}
-	return writeAppDetail(w, app)
+	return writeAppEnvelope(w, app)
 }
 
 // --- up -----------------------------------------------------------
@@ -489,17 +489,21 @@ func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
 		return writeDryRun(w, "ensure", id, req, cf.json)
 	}
 	client := cf.client()
-	app, err := client.Spawn(ctx, req)
-	if err != nil && adminclient.IsAlreadyRunning(err) {
-		app, err = client.Get(ctx, id)
+	if _, serr := client.Spawn(ctx, req); serr != nil && !adminclient.IsAlreadyRunning(serr) {
+		return serr
 	}
-	if err != nil {
-		return err
+	// Whether the spawn succeeded or the app was already running, Get
+	// returns the envelope. ensure's output is therefore identical
+	// across both paths — important for --json automation, which used
+	// to receive an AppView on create vs an envelope on already-exists.
+	envelope, gerr := client.Get(ctx, id)
+	if gerr != nil {
+		return gerr
 	}
 	if cf.json {
-		return writeJSON(w, app)
+		return writeJSON(w, envelope)
 	}
-	return writeAppDetail(w, app)
+	return writeAppEnvelope(w, envelope)
 }
 
 // --- rm -----------------------------------------------------------
@@ -710,14 +714,19 @@ func runRelease(ctx context.Context, cf commonFlags, appID, command string, time
 	start := time.Now()
 	cmd := exec.CommandContext(timeoutCtx, "bash", "-c", command)
 
-	// Inherit app env vars via creekctl exec-style injection
+	// Inherit app env vars via creekctl exec-style injection. Get
+	// now returns the envelope shape; env + port live under .Spec.
 	client := cf.client()
 	app, err := client.Get(ctx, appID)
 	if err != nil {
 		return nil, fmt.Errorf("release: cannot get app env: %w", err)
 	}
-	cmd.Env = append(os.Environ(), derefSlice(app.Env)...)
-	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", app.Port))
+	cmd.Env = append(os.Environ(), derefSlice(app.Spec.Env)...)
+	port := 0
+	if app.Spec.Port != nil {
+		port = *app.Spec.Port
+	}
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", port))
 
 	out, err := cmd.CombinedOutput()
 	duration := time.Since(start).Milliseconds()
@@ -804,13 +813,24 @@ func runExec(ctx context.Context, w io.Writer, argv []string) error {
 		return fmt.Errorf("exec: missing command (e.g., creekctl exec -- rails console)")
 	}
 
-	// Get the app's env vars from the running supervisor
+	// Get the app's env vars from the running supervisor. Get
+	// returns the envelope shape (App); List returns []AppView. We
+	// project both into a (envVars, port) pair locally.
 	client := cf.client()
-	var app *apitypes.AppView
-	var err error
+	var (
+		appEnv []string
+		port   int
+	)
 
 	if *appID != "" {
-		app, err = client.Get(ctx, *appID)
+		envelope, gerr := client.Get(ctx, *appID)
+		if gerr != nil {
+			return gerr
+		}
+		appEnv = derefSlice(envelope.Spec.Env)
+		if envelope.Spec.Port != nil {
+			port = *envelope.Spec.Port
+		}
 	} else {
 		apps, listErr := client.List(ctx)
 		if listErr != nil {
@@ -819,16 +839,14 @@ func runExec(ctx context.Context, w io.Writer, argv []string) error {
 		if len(apps) == 0 {
 			return fmt.Errorf("exec: no apps running")
 		}
-		app = &apps[0]
-	}
-	if err != nil {
-		return err
+		appEnv = derefSlice(apps[0].Env)
+		port = apps[0].Port
 	}
 
 	// Build env: inherit current env + inject app env vars (DATABASE_URL, etc)
 	env := os.Environ()
-	env = append(env, derefSlice(app.Env)...)
-	env = append(env, fmt.Sprintf("PORT=%d", app.Port))
+	env = append(env, appEnv...)
+	env = append(env, fmt.Sprintf("PORT=%d", port))
 
 	// Execute the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -1191,6 +1209,46 @@ func writeAppDetail(w io.Writer, a *apitypes.AppView) error {
 		{"uptime_ms", fmt.Sprintf("%d", a.UptimeMs)},
 		{"restart_count", fmt.Sprintf("%d", a.RestartCount)},
 		{"health_failures", fmt.Sprintf("%d", a.HealthFailures)},
+	}
+	for _, f := range fields {
+		if f[1] == "" {
+			continue
+		}
+		fmt.Fprintf(tw, "%s\t%s\n", f[0], f[1])
+	}
+	return tw.Flush()
+}
+
+// writeAppEnvelope renders the k8s-style App envelope as a flat
+// human-readable table. Used by the GetApp CLI path (`creekctl get
+// <id>`) since that's the only handler currently returning the
+// envelope shape; other paths still flow through writeAppDetail.
+//
+// When more handlers move to the envelope (per implementation order)
+// this becomes the default and writeAppDetail can be retired.
+func writeAppEnvelope(w io.Writer, a *apitypes.App) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	command := derefStr(a.Spec.Command)
+	port := 0
+	if a.Spec.Port != nil {
+		port = *a.Spec.Port
+	}
+	fields := [][2]string{
+		{"name", a.Metadata.Name},
+		{"uid", a.Metadata.Uid.String()},
+		{"generation", fmt.Sprintf("%d", a.Metadata.Generation)},
+		{"resource_version", a.Metadata.ResourceVersion},
+		{"phase", string(a.Status.Phase)},
+		{"observed_generation", fmt.Sprintf("%d", a.Status.ObservedGeneration)},
+		{"pid", fmt.Sprintf("%d", a.Status.CurrentPid)},
+		{"port", fmt.Sprintf("%d", port)},
+		{"command", command},
+		{"args", strings.Join(derefSlice(a.Spec.Args), " ")},
+		{"runtime", derefStr(a.Spec.Runtime)},
+		{"net_ip", derefStr(a.Status.NetIp)},
+		{"uptime_ms", fmt.Sprintf("%d", a.Status.UptimeMs)},
+		{"restart_count", fmt.Sprintf("%d", a.Status.RestartCount)},
+		{"health_failures", fmt.Sprintf("%d", a.Status.HealthFailures)},
 	}
 	for _, f := range fields {
 		if f[1] == "" {

@@ -103,10 +103,18 @@ func TestExtractAppID(t *testing.T) {
 		want string
 	}{
 		{"/v1/apps", ""},
+		{"/v1/apps/", ""},
 		{"/v1/apps/my-app", "my-app"},
 		{"/v1/apps/my-app/deploy", "my-app"},
 		{"/v1/apps/my-app/restart", "my-app"},
 		{"/v1/apps/my-app/logs", "my-app"},
+		// Regression: an app legitimately named "apps" must still
+		// extract as "apps" — supervisor.ValidateID permits the name,
+		// and a CAS-eligible endpoint on it must not bypass the
+		// middleware just because the id collides with the collection
+		// segment.
+		{"/v1/apps/apps", "apps"},
+		{"/v1/apps/apps/deploy", "apps"},
 		{"/v1/volumes", ""},
 		{"/v1/volumes/vol-1", ""},
 	}

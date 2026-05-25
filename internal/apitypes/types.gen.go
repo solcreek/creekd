@@ -5,39 +5,104 @@ package apitypes
 
 import (
 	"time"
+
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 const (
 	BearerAuthScopes bearerAuthContextKey = "bearerAuth.Scopes"
 )
 
+// Defines values for AppApiVersion.
+const (
+	CreekDevv1alpha1 AppApiVersion = "creek.dev/v1alpha1"
+)
+
+// Valid indicates whether the value is a known member of the AppApiVersion enum.
+func (e AppApiVersion) Valid() bool {
+	switch e {
+	case CreekDevv1alpha1:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AppKind.
+const (
+	AppKindApp AppKind = "App"
+)
+
+// Valid indicates whether the value is a known member of the AppKind enum.
+func (e AppKind) Valid() bool {
+	switch e {
+	case AppKindApp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AppStatusPhase.
+const (
+	AppStatusPhaseCrashLooping AppStatusPhase = "crash-looping"
+	AppStatusPhaseCrashed      AppStatusPhase = "crashed"
+	AppStatusPhaseRunning      AppStatusPhase = "running"
+	AppStatusPhaseStarting     AppStatusPhase = "starting"
+	AppStatusPhaseStopped      AppStatusPhase = "stopped"
+	AppStatusPhaseUnhealthy    AppStatusPhase = "unhealthy"
+	AppStatusPhaseUnknown      AppStatusPhase = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the AppStatusPhase enum.
+func (e AppStatusPhase) Valid() bool {
+	switch e {
+	case AppStatusPhaseCrashLooping:
+		return true
+	case AppStatusPhaseCrashed:
+		return true
+	case AppStatusPhaseRunning:
+		return true
+	case AppStatusPhaseStarting:
+		return true
+	case AppStatusPhaseStopped:
+		return true
+	case AppStatusPhaseUnhealthy:
+		return true
+	case AppStatusPhaseUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AppViewStatus.
 const (
-	CrashLooping AppViewStatus = "crash-looping"
-	Crashed      AppViewStatus = "crashed"
-	Running      AppViewStatus = "running"
-	Starting     AppViewStatus = "starting"
-	Stopped      AppViewStatus = "stopped"
-	Unhealthy    AppViewStatus = "unhealthy"
-	Unknown      AppViewStatus = "unknown"
+	AppViewStatusCrashLooping AppViewStatus = "crash-looping"
+	AppViewStatusCrashed      AppViewStatus = "crashed"
+	AppViewStatusRunning      AppViewStatus = "running"
+	AppViewStatusStarting     AppViewStatus = "starting"
+	AppViewStatusStopped      AppViewStatus = "stopped"
+	AppViewStatusUnhealthy    AppViewStatus = "unhealthy"
+	AppViewStatusUnknown      AppViewStatus = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the AppViewStatus enum.
 func (e AppViewStatus) Valid() bool {
 	switch e {
-	case CrashLooping:
+	case AppViewStatusCrashLooping:
 		return true
-	case Crashed:
+	case AppViewStatusCrashed:
 		return true
-	case Running:
+	case AppViewStatusRunning:
 		return true
-	case Starting:
+	case AppViewStatusStarting:
 		return true
-	case Stopped:
+	case AppViewStatusStopped:
 		return true
-	case Unhealthy:
+	case AppViewStatusUnhealthy:
 		return true
-	case Unknown:
+	case AppViewStatusUnknown:
 		return true
 	default:
 		return false
@@ -46,16 +111,17 @@ func (e AppViewStatus) Valid() bool {
 
 // Defines values for ErrorCode.
 const (
-	ErrorCodeAlreadyRunning  ErrorCode = "already_running"
-	ErrorCodeBadRequest      ErrorCode = "bad_request"
-	ErrorCodeConflict        ErrorCode = "conflict"
-	ErrorCodeDeployUnhealthy ErrorCode = "deploy_unhealthy"
-	ErrorCodeInternal        ErrorCode = "internal"
-	ErrorCodeInvalidId       ErrorCode = "invalid_id"
-	ErrorCodeInvalidRuntime  ErrorCode = "invalid_runtime"
-	ErrorCodeNotFound        ErrorCode = "not_found"
-	ErrorCodePortConflict    ErrorCode = "port_conflict"
-	ErrorCodeUnauthorized    ErrorCode = "unauthorized"
+	ErrorCodeAlreadyRunning          ErrorCode = "already_running"
+	ErrorCodeBadRequest              ErrorCode = "bad_request"
+	ErrorCodeConflict                ErrorCode = "conflict"
+	ErrorCodeDeployUnhealthy         ErrorCode = "deploy_unhealthy"
+	ErrorCodeInternal                ErrorCode = "internal"
+	ErrorCodeInvalidId               ErrorCode = "invalid_id"
+	ErrorCodeInvalidRuntime          ErrorCode = "invalid_runtime"
+	ErrorCodeNotFound                ErrorCode = "not_found"
+	ErrorCodePortConflict            ErrorCode = "port_conflict"
+	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
+	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -78,6 +144,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeNotFound:
 		return true
 	case ErrorCodePortConflict:
+		return true
+	case ErrorCodeResourceVersionMismatch:
 		return true
 	case ErrorCodeUnauthorized:
 		return true
@@ -164,6 +232,26 @@ func (e DeleteVolumeParamsForce) Valid() bool {
 	}
 }
 
+// App K8s-style resource envelope. See DESIGN-self-host-state.md
+// "The interop-bearing subset" for the field semantics.
+type App struct {
+	ApiVersion AppApiVersion `json:"apiVersion"`
+	Kind       AppKind       `json:"kind"`
+	Metadata   AppMetadata   `json:"metadata"`
+
+	// Spec Desired state. Settable by clients.
+	Spec AppSpec `json:"spec"`
+
+	// Status Observed state. Server-written; clients receive 405 on writes.
+	Status AppStatus `json:"status"`
+}
+
+// AppApiVersion defines model for App.ApiVersion.
+type AppApiVersion string
+
+// AppKind defines model for App.Kind.
+type AppKind string
+
 // AppEvent defines model for AppEvent.
 type AppEvent struct {
 	AppId          string    `json:"app_id"`
@@ -176,6 +264,56 @@ type AppEvent struct {
 	Type           EventType `json:"type"`
 	Url            *string   `json:"url,omitempty"`
 }
+
+// AppMetadata defines model for AppMetadata.
+type AppMetadata struct {
+	// CreationTimestamp RFC3339. Immutable; preserved across restore.
+	CreationTimestamp time.Time `json:"creationTimestamp"`
+
+	// Generation Bumps on every successful spec write. NOT bumped on status, annotations, or labels.
+	Generation int64 `json:"generation"`
+
+	// Name Human-readable ID, [a-z0-9-] 1-63 chars.
+	Name string `json:"name"`
+
+	// ResourceVersion Opaque CAS token. Clients MUST NOT do arithmetic on it.
+	ResourceVersion string `json:"resourceVersion"`
+
+	// Uid UUIDv7. Stable across rename; never reused.
+	Uid openapi_types.UUID `json:"uid"`
+}
+
+// AppSpec Desired state. Settable by clients.
+type AppSpec struct {
+	Args    *[]string `json:"args,omitempty"`
+	Command *string   `json:"command,omitempty"`
+	Env     *[]string `json:"env,omitempty"`
+	Port    *int      `json:"port,omitempty"`
+	Runtime *string   `json:"runtime,omitempty"`
+}
+
+// AppStatus Observed state. Server-written; clients receive 405 on writes.
+type AppStatus struct {
+	CurrentPid     int     `json:"currentPid"`
+	CurrentPort    int     `json:"currentPort"`
+	HealthFailures int64   `json:"healthFailures"`
+	NetIp          *string `json:"netIp,omitempty"`
+
+	// ObservedGeneration Last spec generation the deploy flow has converged to a healthy state on.
+	ObservedGeneration int64 `json:"observedGeneration"`
+
+	// Phase Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
+	// here for the calibration PR while the Release ledger +
+	// conditions design lands separately. See BACKLOG.md API-07.
+	Phase        AppStatusPhase `json:"phase"`
+	RestartCount int            `json:"restartCount"`
+	UptimeMs     int64          `json:"uptimeMs"`
+}
+
+// AppStatusPhase Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
+// here for the calibration PR while the Release ledger +
+// conditions design lands separately. See BACKLOG.md API-07.
+type AppStatusPhase string
 
 // AppView defines model for AppView.
 type AppView struct {
@@ -329,11 +467,26 @@ type BadRequest = ErrorResponse
 // NotFound defines model for NotFound.
 type NotFound = ErrorResponse
 
+// PreconditionFailed defines model for PreconditionFailed.
+type PreconditionFailed = ErrorResponse
+
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = ErrorResponse
 
 // bearerAuthContextKey is the context key for bearerAuth security scheme
 type bearerAuthContextKey string
+
+// StopAppParams defines parameters for StopApp.
+type StopAppParams struct {
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
+
+// DeployAppParams defines parameters for DeployApp.
+type DeployAppParams struct {
+	// IfMatch Current resourceVersion (opaque). Mismatch yields 412.
+	IfMatch *string `json:"If-Match,omitempty"`
+}
 
 // GetAppLogsParams defines parameters for GetAppLogs.
 type GetAppLogsParams struct {

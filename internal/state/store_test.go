@@ -1,10 +1,14 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/sandbox"
@@ -486,4 +490,271 @@ func mkID(worker, iter int) string {
 	out[4] = byte('0' + (iter / 10 % 10))
 	out[5] = byte('0' + (iter % 10))
 	return string(out)
+}
+
+// --- AppMetadata tests (envelope v6 calibration) ----------------------
+
+func TestAddAppGeneratesMetadata(t *testing.T) {
+	s := newStore(t)
+	before := time.Now().UTC().Add(-time.Second) // 1s window for clock skew
+	if err := s.AddApp(supervisor.Config{ID: "foo", Command: "sleep", Args: []string{"1"}, Port: 8000}); err != nil {
+		t.Fatalf("AddApp: %v", err)
+	}
+	after := time.Now().UTC().Add(time.Second)
+
+	m, ok := s.Meta("foo")
+	if !ok {
+		t.Fatal("Meta(\"foo\") returned false; metadata not generated")
+	}
+	if m.UID == "" {
+		t.Errorf("Meta.UID = empty; want UUIDv7")
+	}
+	if u, err := uuid.Parse(m.UID); err != nil {
+		t.Errorf("Meta.UID = %q, not a parseable UUID: %v", m.UID, err)
+	} else if u.Version() != 7 {
+		t.Errorf("Meta.UID version = %d, want 7 (UUIDv7)", u.Version())
+	}
+	if m.Generation != 1 {
+		t.Errorf("Meta.Generation = %d, want 1 on first add", m.Generation)
+	}
+	if m.ResourceVersion != 1 {
+		t.Errorf("Meta.ResourceVersion = %d, want 1 on first add", m.ResourceVersion)
+	}
+	if m.CreationTimestamp.Before(before) || m.CreationTimestamp.After(after) {
+		t.Errorf("Meta.CreationTimestamp = %v, want within [%v, %v]",
+			m.CreationTimestamp, before, after)
+	}
+}
+
+func TestAddAppOverwritePreservesUIDAndBumpsGeneration(t *testing.T) {
+	s := newStore(t)
+	if err := s.AddApp(supervisor.Config{ID: "foo", Command: "sleep", Args: []string{"1"}, Port: 8000}); err != nil {
+		t.Fatalf("AddApp #1: %v", err)
+	}
+	m1, _ := s.Meta("foo")
+
+	// Wait a bit to ensure timestamp comparison would catch any
+	// accidental regeneration.
+	time.Sleep(10 * time.Millisecond)
+
+	if err := s.AddApp(supervisor.Config{ID: "foo", Command: "sleep", Args: []string{"2"}, Port: 8001}); err != nil {
+		t.Fatalf("AddApp #2 (deploy): %v", err)
+	}
+	m2, _ := s.Meta("foo")
+
+	if m2.UID != m1.UID {
+		t.Errorf("UID changed on overwrite: %q → %q (want preserved)", m1.UID, m2.UID)
+	}
+	if !m2.CreationTimestamp.Equal(m1.CreationTimestamp) {
+		t.Errorf("CreationTimestamp changed on overwrite: %v → %v (want preserved)",
+			m1.CreationTimestamp, m2.CreationTimestamp)
+	}
+	if m2.Generation != m1.Generation+1 {
+		t.Errorf("Generation = %d, want %d (bump by 1)", m2.Generation, m1.Generation+1)
+	}
+	if m2.ResourceVersion != m1.ResourceVersion+1 {
+		t.Errorf("ResourceVersion = %d, want %d (bump by 1)", m2.ResourceVersion, m1.ResourceVersion+1)
+	}
+}
+
+func TestRemoveAppDropsMetadata(t *testing.T) {
+	s := newStore(t)
+	if err := s.AddApp(supervisor.Config{ID: "ephemeral", Command: "sleep", Args: []string{"1"}, Port: 9000}); err != nil {
+		t.Fatalf("AddApp: %v", err)
+	}
+	if err := s.RemoveApp("ephemeral"); err != nil {
+		t.Fatalf("RemoveApp: %v", err)
+	}
+	if _, ok := s.Meta("ephemeral"); ok {
+		t.Error("Meta returned ok after RemoveApp; metadata should be dropped")
+	}
+
+	// Re-spawn with same name → fresh UID (delete-then-recreate
+	// breaks the chain per v5 design).
+	if err := s.AddApp(supervisor.Config{ID: "ephemeral", Command: "sleep", Args: []string{"1"}, Port: 9000}); err != nil {
+		t.Fatalf("AddApp re-spawn: %v", err)
+	}
+	m, ok := s.Meta("ephemeral")
+	if !ok {
+		t.Fatal("Meta returned false after re-spawn")
+	}
+	if m.Generation != 1 {
+		t.Errorf("Generation after re-spawn = %d, want 1 (fresh metadata)", m.Generation)
+	}
+}
+
+func TestMetadataPersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s1, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := s1.AddApp(supervisor.Config{ID: "persistent", Command: "sleep", Args: []string{"1"}, Port: 9100}); err != nil {
+		t.Fatalf("AddApp: %v", err)
+	}
+	want, _ := s1.Meta("persistent")
+
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (reload): %v", err)
+	}
+	got, ok := s2.Meta("persistent")
+	if !ok {
+		t.Fatal("Meta after reload returned false")
+	}
+	if got.UID != want.UID {
+		t.Errorf("UID after reload = %q, want %q", got.UID, want.UID)
+	}
+	if got.Generation != want.Generation {
+		t.Errorf("Generation after reload = %d, want %d", got.Generation, want.Generation)
+	}
+	if got.ResourceVersion != want.ResourceVersion {
+		t.Errorf("ResourceVersion after reload = %d, want %d", got.ResourceVersion, want.ResourceVersion)
+	}
+	if !got.CreationTimestamp.Equal(want.CreationTimestamp) {
+		t.Errorf("CreationTimestamp after reload = %v, want %v",
+			got.CreationTimestamp, want.CreationTimestamp)
+	}
+}
+
+func TestLoadV1MigratesForward(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	// Hand-craft a v1 file (no metadata block).
+	v1 := `{
+  "version": 1,
+  "apps": [
+    {"config": {"id": "legacy", "command": "sleep", "args": ["30"], "port": 9500, "env": ["KEY=val"]}}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatalf("write v1 file: %v", err)
+	}
+
+	before := time.Now().UTC().Add(-time.Second)
+	s, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore (load v1): %v", err)
+	}
+	after := time.Now().UTC().Add(time.Second)
+
+	// App content should round-trip.
+	apps := s.Apps()
+	if len(apps) != 1 || apps[0].ID != "legacy" {
+		t.Fatalf("Apps after v1 load = %+v, want one entry id=legacy", apps)
+	}
+
+	// Metadata should be freshly generated.
+	m, ok := s.Meta("legacy")
+	if !ok {
+		t.Fatal("Meta(\"legacy\") returned false after v1 migration")
+	}
+	if u, err := uuid.Parse(m.UID); err != nil {
+		t.Errorf("migrated UID %q is not a parseable UUID: %v", m.UID, err)
+	} else if u.Version() != 7 {
+		t.Errorf("migrated UID version = %d, want 7", u.Version())
+	}
+	if m.Generation != 1 || m.ResourceVersion != 1 {
+		t.Errorf("migrated metadata generation/rv = %d/%d, want 1/1", m.Generation, m.ResourceVersion)
+	}
+	if m.CreationTimestamp.Before(before) || m.CreationTimestamp.After(after) {
+		t.Errorf("migrated CreationTimestamp = %v, want within [%v, %v]",
+			m.CreationTimestamp, before, after)
+	}
+
+	// File should have been rewritten as v2.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read state.json: %v", err)
+	}
+	// Decode the v2 shape directly rather than substring-matching on
+	// "metadata" — the latter could pass spuriously if a Config field
+	// (env value, command, etc.) happened to contain the literal.
+	var migrated struct {
+		Version int   `json:"version"`
+		Apps    []App `json:"apps"`
+	}
+	if err := json.Unmarshal(data, &migrated); err != nil {
+		t.Fatalf("decode migrated file: %v", err)
+	}
+	if migrated.Version != FormatVersion {
+		t.Errorf("post-migration version = %d, want %d (current FormatVersion)", migrated.Version, FormatVersion)
+	}
+	if len(migrated.Apps) != 1 {
+		t.Fatalf("post-migration apps len = %d, want 1", len(migrated.Apps))
+	}
+	if _, err := uuid.Parse(migrated.Apps[0].Metadata.UID); err != nil {
+		t.Errorf("post-migration metadata.uid = %q, want a parseable UUID: %v", migrated.Apps[0].Metadata.UID, err)
+	}
+	if migrated.Apps[0].Metadata.ResourceVersion == 0 {
+		t.Error("post-migration metadata.resource_version is zero — migration should have set it to 1")
+	}
+}
+
+func TestLoadFutureVersionRefuses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte(`{"version": 999, "apps": []}`), 0o600); err != nil {
+		t.Fatalf("write future-version file: %v", err)
+	}
+	if _, err := NewStore(path); err == nil {
+		t.Error("NewStore accepted version=999; want error")
+	}
+}
+
+// TestLoadV2RepairsMissingMetadataAndPersists guards the contract that
+// UID + creationTimestamp are stable across restart even when the v2
+// file is hand-edited to drop the metadata block. loadV2 should
+// generate fresh metadata AND flush it back so the next restart picks
+// up the same identity.
+func TestLoadV2RepairsMissingMetadataAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	// v2 file shape with one app and no metadata block (simulates a
+	// hand-edit that stripped it or a partial write before metadata
+	// fields landed).
+	raw := `{
+  "version": 2,
+  "apps": [
+    {"config": {"id": "handedit", "command": "sleep", "args": ["30"], "port": 9700}}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write hand-edited v2 file: %v", err)
+	}
+
+	// First load — should synthesise metadata and persist it back.
+	s1, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("first NewStore: %v", err)
+	}
+	m1, ok := s1.Meta("handedit")
+	if !ok {
+		t.Fatal("Meta(handedit) returned false after repair")
+	}
+	if _, err := uuid.Parse(m1.UID); err != nil {
+		t.Fatalf("repaired UID %q is not parseable: %v", m1.UID, err)
+	}
+
+	// Second load from the same file — must surface the SAME UID.
+	// If the repair wasn't persisted, a fresh UID would be generated
+	// here and the assertion would fail.
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("second NewStore: %v", err)
+	}
+	m2, ok := s2.Meta("handedit")
+	if !ok {
+		t.Fatal("Meta(handedit) returned false on second load")
+	}
+	if m1.UID != m2.UID {
+		t.Errorf("UID changed across restart: first=%q second=%q (repair was not persisted)", m1.UID, m2.UID)
+	}
+	if !m1.CreationTimestamp.Equal(m2.CreationTimestamp) {
+		t.Errorf("CreationTimestamp changed across restart: first=%v second=%v", m1.CreationTimestamp, m2.CreationTimestamp)
+	}
 }

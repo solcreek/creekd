@@ -69,15 +69,22 @@ paths:
 
     get:
       operationId: getApp
-      summary: Get app details
+      summary: Get app details (k8s-style envelope)
+      description: |
+        Returns the App resource in the k8s wire-format envelope
+        `{apiVersion, kind, metadata, spec, status}`. This is the
+        first endpoint to use the envelope shape; SpawnApp + ListApps
+        still return the legacy AppView shape during the envelope
+        refactor (will land per-handler over subsequent PRs).
+        See DESIGN-self-host-state.md §"The interop-bearing subset".
       tags: [apps]
       responses:
         "200":
-          description: App details
+          description: App envelope
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AppView"
+                $ref: "#/components/schemas/App"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -86,7 +93,18 @@ paths:
     delete:
       operationId: stopApp
       summary: Stop and remove an app
+      description: |
+        Accepts optional `If-Match: <resourceVersion>` header.
+        Mismatch → 412 Precondition Failed with current rv in
+        response body. Missing header → unconditional delete, with
+        `Warning: 299 - "unconditional-write"` response header.
       tags: [apps]
+      parameters:
+        - in: header
+          name: If-Match
+          schema:
+            type: string
+          description: Current resourceVersion (opaque). Mismatch yields 412.
       responses:
         "204":
           description: App stopped
@@ -94,6 +112,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
 
   /v1/apps/{id}/deploy:
     parameters:
@@ -102,7 +122,18 @@ paths:
     post:
       operationId: deployApp
       summary: Blue-green deploy a new version
+      description: |
+        Accepts optional `If-Match: <resourceVersion>` header.
+        Mismatch → 412 Precondition Failed with current rv in
+        response body. Missing header → unconditional deploy, with
+        `Warning: 299 - "unconditional-write"` response header.
       tags: [apps]
+      parameters:
+        - in: header
+          name: If-Match
+          schema:
+            type: string
+          description: Current resourceVersion (opaque). Mismatch yields 412.
       requestBody:
         required: true
         content:
@@ -128,6 +159,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "412":
+          $ref: "#/components/responses/PreconditionFailed"
         "502":
           description: New version failed health check
           content:
@@ -405,6 +438,23 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    PreconditionFailed:
+      description: |
+        If-Match header did not match the current resourceVersion.
+        Response body includes the current resourceVersion so clients
+        can retry. First-party clients SHOULD send If-Match on
+        spec-mutating calls; missing header is allowed but emits a
+        `Warning: 299 - "unconditional-write"` response header.
+      headers:
+        ETag:
+          description: Current resourceVersion (opaque string) of the resource.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     Runtime:
       type: string
@@ -422,6 +472,7 @@ components:
         - invalid_id
         - invalid_runtime
         - deploy_unhealthy
+        - resource_version_mismatch
         - internal
 
     ErrorResponse:
@@ -574,6 +625,103 @@ components:
         timeout_ms:
           type: integer
           format: int64
+
+    App:
+      type: object
+      description: |
+        K8s-style resource envelope. See DESIGN-self-host-state.md
+        "The interop-bearing subset" for the field semantics.
+      required: [apiVersion, kind, metadata, spec, status]
+      properties:
+        apiVersion:
+          type: string
+          enum: ["creek.dev/v1alpha1"]
+        kind:
+          type: string
+          enum: ["App"]
+        metadata:
+          $ref: "#/components/schemas/AppMetadata"
+        spec:
+          $ref: "#/components/schemas/AppSpec"
+        status:
+          $ref: "#/components/schemas/AppStatus"
+
+    AppMetadata:
+      type: object
+      required: [name, uid, generation, resourceVersion, creationTimestamp]
+      properties:
+        name:
+          type: string
+          description: Human-readable ID, [a-z0-9-] 1-63 chars.
+        uid:
+          type: string
+          format: uuid
+          description: UUIDv7. Stable across rename; never reused.
+        generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Bumps on every successful spec write. NOT bumped on status, annotations, or labels.
+        resourceVersion:
+          type: string
+          description: Opaque CAS token. Clients MUST NOT do arithmetic on it.
+        creationTimestamp:
+          type: string
+          format: date-time
+          description: RFC3339. Immutable; preserved across restore.
+
+    AppSpec:
+      type: object
+      description: Desired state. Settable by clients.
+      properties:
+        runtime:
+          type: string
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: array
+          items:
+            type: string
+        port:
+          type: integer
+
+    AppStatus:
+      type: object
+      description: Observed state. Server-written; clients receive 405 on writes.
+      required: [observedGeneration, phase, currentPid, currentPort, restartCount, healthFailures, uptimeMs]
+      properties:
+        observedGeneration:
+          type: integer
+          format: int64
+          description: Last spec generation the deploy flow has converged to a healthy state on.
+        phase:
+          type: string
+          # Mirror supervisor.Status.String() output, same as AppView.status.
+          # See the comment on AppView.status for rationale (hyphenated
+          # crash-looping is the canonical wire format).
+          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
+          description: |
+            Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
+            here for the calibration PR while the Release ledger +
+            conditions design lands separately. See BACKLOG.md API-07.
+        currentPid:
+          type: integer
+        currentPort:
+          type: integer
+        restartCount:
+          type: integer
+        healthFailures:
+          type: integer
+          format: int64
+        uptimeMs:
+          type: integer
+          format: int64
+        netIp:
+          type: string
 
     AppView:
       type: object

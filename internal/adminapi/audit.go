@@ -76,9 +76,15 @@ func hashToken(token string) string {
 
 // extractAppID pulls the app ID from the URL path if present.
 // /v1/apps/my-app/deploy → "my-app"
+//
+// Returns "" when the URL is the collection root (/v1/apps or
+// /v1/apps/). Importantly, it does NOT special-case the literal
+// id "apps" — supervisor.ValidateID permits that name, and rejecting
+// it here previously created a CAS bypass for any app the user
+// happened to name "apps".
 func extractAppID(path string) string {
 	parts := strings.Split(strings.TrimPrefix(path, "/v1/apps/"), "/")
-	if len(parts) > 0 && parts[0] != "" && parts[0] != "apps" {
+	if len(parts) > 0 && parts[0] != "" {
 		return parts[0]
 	}
 	return ""
