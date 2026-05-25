@@ -1314,11 +1314,14 @@ func downloadFile(url, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	if _, err := io.Copy(out, resp.Body); err != nil {
+		_ = out.Close()
 		return err
 	}
-	return nil
+	// Explicit close to surface late flush errors (NFS commit,
+	// disk-full on buffered writes) — defer would discard the
+	// return value.
+	return out.Close()
 }
 
 // extractTarGz untars src into dstDir. Skips non-regular entries
@@ -1371,7 +1374,12 @@ func extractTarGz(src, dstDir string) error {
 			_ = w.Close()
 			return err
 		}
-		_ = w.Close()
+		// Surface late flush errors so a partially-written
+		// creekd/creekctl can't slip past extraction and into
+		// SwapBinary.
+		if err := w.Close(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
