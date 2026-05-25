@@ -126,7 +126,15 @@ func (v *Verifier) verifyCosign(parentCtx context.Context, sigPath, certPath, ch
 	// signature. Timeout-SIGKILL also surfaces as *exec.ExitError,
 	// so ctx.Err() and Exited() screen those out.
 	if ctx.Err() != nil {
-		return fmt.Errorf("upgrade: cosign unavailable (%s): timed out after %s: %w", bin, cosignVerifyTimeout, ctx.Err())
+		// context.DeadlineExceeded → bounded timeout fired (slow
+		// Rekor / Fulcio). context.Canceled → operator SIGINT
+		// propagated from the parent ctx. Both are availability,
+		// not security; the message distinguishes them so the
+		// operator knows whether to retry or fix the install.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("upgrade: cosign unavailable (%s): timed out after %s", bin, cosignVerifyTimeout)
+		}
+		return fmt.Errorf("upgrade: cosign unavailable (%s): %w", bin, ctx.Err())
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.Exited() {

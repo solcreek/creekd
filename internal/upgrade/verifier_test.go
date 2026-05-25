@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -286,23 +287,9 @@ exit 0
 		DefaultOIDCIssuer,
 		"verify-blob",
 	} {
-		if !contains(string(argv), must) {
+		if !strings.Contains(string(argv), must) {
 			t.Errorf("cosign argv missing %q: %s", must, argv)
 		}
 	}
 }
 
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) &&
-		(haystack == needle ||
-			indexOf(haystack, needle) >= 0)
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
-}

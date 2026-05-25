@@ -89,9 +89,19 @@ func makeFakeTarball(t *testing.T, path, content string) {
 			t.Fatal(err)
 		}
 	}
-	_ = tw.Close()
-	_ = gz.Close()
-	_ = f.Close()
+	// Close in reverse-construction order; each layer flushes a
+	// trailer / footer that can surface buffered-write errors.
+	// Discarding them would let a corrupt fixture proceed and make
+	// downstream test failures impossible to diagnose.
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar.Writer.Close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip.Writer.Close: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("file.Close: %v", err)
+	}
 }
 
 func sha256OfFile(t *testing.T, path string) string {
