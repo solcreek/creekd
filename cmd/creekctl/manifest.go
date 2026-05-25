@@ -39,7 +39,7 @@ func applyManifestTo(req *apitypes.SpawnRequest, m *manifest.Manifest, projectDi
 		env := append([]string(nil), m.Env...)
 		req.Env = &env
 	}
-	if req.HealthCheckPath == nil || *req.HealthCheckPath == "" {
+	if (req.HealthCheckPath == nil || *req.HealthCheckPath == "") && m.HealthCheckPath != "" {
 		req.HealthCheckPath = ptr(m.HealthCheckPath)
 	}
 }
@@ -67,7 +67,7 @@ func applyManifestToDeploy(req *apitypes.DeployRequest, m *manifest.Manifest, pr
 		env := append([]string(nil), m.Env...)
 		req.Env = &env
 	}
-	if req.HealthCheckPath == nil || *req.HealthCheckPath == "" {
+	if (req.HealthCheckPath == nil || *req.HealthCheckPath == "") && m.HealthCheckPath != "" {
 		req.HealthCheckPath = ptr(m.HealthCheckPath)
 	}
 }
