@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -671,17 +670,27 @@ func TestLoadV1MigratesForward(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-read state.json: %v", err)
 	}
-	var head struct {
-		Version int `json:"version"`
+	// Decode the v2 shape directly rather than substring-matching on
+	// "metadata" — the latter could pass spuriously if a Config field
+	// (env value, command, etc.) happened to contain the literal.
+	var migrated struct {
+		Version int   `json:"version"`
+		Apps    []App `json:"apps"`
 	}
-	if err := json.Unmarshal(data, &head); err != nil {
+	if err := json.Unmarshal(data, &migrated); err != nil {
 		t.Fatalf("decode migrated file: %v", err)
 	}
-	if head.Version != FormatVersion {
-		t.Errorf("post-migration version = %d, want %d (current FormatVersion)", head.Version, FormatVersion)
+	if migrated.Version != FormatVersion {
+		t.Errorf("post-migration version = %d, want %d (current FormatVersion)", migrated.Version, FormatVersion)
 	}
-	if !strings.Contains(string(data), `"metadata"`) {
-		t.Error("post-migration file does not contain a metadata block")
+	if len(migrated.Apps) != 1 {
+		t.Fatalf("post-migration apps len = %d, want 1", len(migrated.Apps))
+	}
+	if _, err := uuid.Parse(migrated.Apps[0].Metadata.UID); err != nil {
+		t.Errorf("post-migration metadata.uid = %q, want a parseable UUID: %v", migrated.Apps[0].Metadata.UID, err)
+	}
+	if migrated.Apps[0].Metadata.ResourceVersion == 0 {
+		t.Error("post-migration metadata.resource_version is zero — migration should have set it to 1")
 	}
 }
 

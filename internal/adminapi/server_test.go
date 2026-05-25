@@ -269,12 +269,13 @@ func TestListAndGet(t *testing.T) {
 		envelope.Status.Phase != apitypes.AppStatusPhase("starting") {
 		t.Errorf("status.phase = %q, want running|starting", envelope.Status.Phase)
 	}
-	// Test server lacks a store, so metadata is zero-valued. This
-	// path is documented behavior — the runtime status is still
-	// authoritative; metadata only carries identity. Once store is
-	// wired in for tests (see TestGetAppEnvelopeWithStore), uid and
-	// rv become non-zero. Phase is the K8s 1.13-deprecated pattern
-	// — see BACKLOG.md API-07.
+	// Test server lacks a store, so the identity fields of metadata
+	// (uid / generation / resourceVersion / creationTimestamp) are
+	// unset. metadata.name is still populated from the runtime app.
+	// This path is documented behavior — the runtime status is still
+	// authoritative. Once store is wired in for tests (see
+	// TestGetAppEnvelopeWithStore), the identity fields populate.
+	// Phase is the K8s 1.13-deprecated pattern — see BACKLOG.md API-07.
 }
 
 // TestGetAppEnvelopeWithStore verifies the full envelope shape when

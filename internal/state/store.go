@@ -257,7 +257,7 @@ func (s *Store) load() error {
 		Version int `json:"version"`
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
-		return fmt.Errorf("state: decode version header: %w", err)
+		return fmt.Errorf("state: decode version header %s: %w", s.path, err)
 	}
 	switch head.Version {
 	case 1:
@@ -273,14 +273,14 @@ func (s *Store) load() error {
 		err := s.flushBoth(s.apps, s.volumes)
 		s.mu.Unlock()
 		if err != nil {
-			return fmt.Errorf("state: v1→v2 migration flush: %w", err)
+			return fmt.Errorf("state: v1→v2 migration flush %s: %w", s.path, err)
 		}
 		return nil
 	case FormatVersion:
 		return s.loadV2(data)
 	default:
-		return fmt.Errorf("state: unsupported version %d (want %d)",
-			head.Version, FormatVersion)
+		return fmt.Errorf("state: unsupported version %d in %s (want %d)",
+			head.Version, s.path, FormatVersion)
 	}
 }
 
@@ -296,7 +296,7 @@ func (s *Store) loadV1(data []byte) error {
 		Apps    []appV1  `json:"apps"`
 	}
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("state: decode v1: %w", err)
+		return fmt.Errorf("state: decode v1 %s: %w", s.path, err)
 	}
 	for _, v := range st.Volumes {
 		if v.Volume.ID == "" {
@@ -318,7 +318,7 @@ func (s *Store) loadV1(data []byte) error {
 func (s *Store) loadV2(data []byte) error {
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("state: decode v2: %w", err)
+		return fmt.Errorf("state: decode v2 %s: %w", s.path, err)
 	}
 	for _, v := range st.Volumes {
 		if v.Volume.ID == "" {
