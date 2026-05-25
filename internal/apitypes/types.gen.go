@@ -121,7 +121,9 @@ const (
 	ErrorCodeNotFound                ErrorCode = "not_found"
 	ErrorCodePortConflict            ErrorCode = "port_conflict"
 	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
+	ErrorCodeStorageCorrupted        ErrorCode = "storage_corrupted"
 	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
+	ErrorCodeUnsupportedFilesystem   ErrorCode = "unsupported_filesystem"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -147,7 +149,11 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case ErrorCodeResourceVersionMismatch:
 		return true
+	case ErrorCodeStorageCorrupted:
+		return true
 	case ErrorCodeUnauthorized:
+		return true
+	case ErrorCodeUnsupportedFilesystem:
 		return true
 	default:
 		return false

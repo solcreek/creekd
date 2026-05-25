@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/state"
@@ -288,6 +289,111 @@ func TestCAS_RestartAndResetNotGated(t *testing.T) {
 	}
 }
 
+// TestCAS_SameAppMutationsSerialise proves the per-app lock wired
+// through CAS middleware actually serialises mutations against the
+// same app. Two concurrent DELETE requests against the same id must
+// observe one-at-a-time semantics: the first acquires, the second
+// blocks until release. Without the lock both could proceed in
+// parallel and race on the supervisor + store mutation.
+func TestCAS_SameAppMutationsSerialise(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	if status, _ := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "ser", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d", status)
+	}
+
+	// Fire two DELETE requests in parallel. The per-app lock ensures
+	// one runs to completion before the other starts. The expected
+	// outcome set is {204, 404}: the winner deletes (204) and the
+	// loser finds the resource already gone (404). Without
+	// serialisation we'd risk one of them seeing torn state (e.g. a
+	// supervisor 5xx mid-stop), so observing exactly one 204 + one
+	// 404 is the positive signal.
+	type result struct {
+		status int
+		body   string
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			status, body := ts.do(t, "DELETE", "/v1/apps/ser", nil, "")
+			results <- result{status: status, body: string(body)}
+		}()
+	}
+	var got204, got404, gotOther int
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-results:
+			switch r.status {
+			case http.StatusNoContent:
+				got204++
+			case http.StatusNotFound:
+				got404++
+			default:
+				gotOther++
+				t.Errorf("parallel DELETE saw unexpected status=%d body=%s", r.status, r.body)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("parallel DELETE deadlocked")
+		}
+	}
+	if got204 != 1 || got404 != 1 {
+		t.Errorf("parallel DELETE outcome: 204=%d, 404=%d, other=%d — want exactly one 204 + one 404 (proves serialisation)",
+			got204, got404, gotOther)
+	}
+}
+
+// TestCAS_DifferentAppMutationsParallel proves the per-app lock
+// does NOT block mutations against distinct apps from running
+// concurrently. Two parallel DELETEs against different ids should
+// finish in less wall-time than 2x a single DELETE's blocking
+// portion would imply if they serialised.
+func TestCAS_DifferentAppMutationsParallel(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port1, port2 := freeTCPPort(t), freeTCPPort(t)
+	for i, id := range []string{"par-1", "par-2"} {
+		p := port1
+		if i == 1 {
+			p = port2
+		}
+		if status, _ := ts.do(t, "POST", "/v1/apps",
+			apitypes.SpawnRequest{Id: id, Command: ptr("sleep"), Args: &[]string{"30"}, Port: p}, ""); status != http.StatusCreated {
+			t.Fatalf("spawn %s: status=%d", id, status)
+		}
+	}
+
+	done := make(chan int, 2)
+	for _, id := range []string{"par-1", "par-2"} {
+		go func(id string) {
+			status, _ := ts.do(t, "DELETE", "/v1/apps/"+id, nil, "")
+			done <- status
+		}(id)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case s := <-done:
+			if s != http.StatusNoContent {
+				t.Errorf("DELETE status = %d, want 204", s)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("parallel DELETE on different apps timed out — locks may be over-serialising")
+		}
+	}
+}
+
 // TestCAS_NoStoreSkipsValidation covers the early-boot path: if
 // SetStore was never called the middleware short-circuits so the
 // admin API stays usable for in-memory test scenarios.
@@ -449,5 +555,58 @@ func TestCAS_DuplicateIfMatchHeaderRequiresAuthFirst(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "If-Match") {
 		t.Errorf("response body leaks parsing detail to anonymous caller: %s", w.Body.String())
+	}
+}
+
+// TestCAS_PerAppLockHeldDuringUnconditionalWrite guards the contract
+// that the per-app lock serialises ALL casApplies mutations, not just
+// the If-Match-present subset. Without this property, two concurrent
+// unconditional DELETEs on the same app would race the store flush
+// step — the very TOCTOU window per-app locking was added to close.
+//
+// The test acquires the AppLock externally, then fires an
+// unconditional DELETE on a background goroutine, and observes that
+// the request blocks until the external lock is released.
+func TestCAS_PerAppLockHeldDuringUnconditionalWrite(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "lock-uncond", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("lock-uncond") })
+
+	// Hold the per-app lock externally. The middleware should block
+	// on this lock when the DELETE arrives — even though the DELETE
+	// carries no If-Match.
+	appLock := store.Locks().AppLock("lock-uncond")
+	appLock.Lock()
+
+	done := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest("DELETE", "/v1/apps/lock-uncond", nil)
+		rw := httptest.NewRecorder()
+		ts.srv.Handler().ServeHTTP(rw, req)
+		done <- rw.Code
+	}()
+
+	select {
+	case code := <-done:
+		t.Fatalf("DELETE completed (status=%d) without blocking on per-app lock — per-app lock is not held on the unconditional-write path", code)
+	case <-time.After(150 * time.Millisecond):
+		// expected
+	}
+
+	appLock.Unlock()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DELETE didn't complete after external lock released")
 	}
 }

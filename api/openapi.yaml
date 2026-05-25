@@ -473,6 +473,8 @@ components:
         - invalid_runtime
         - deploy_unhealthy
         - resource_version_mismatch
+        - unsupported_filesystem
+        - storage_corrupted
         - internal
 
     ErrorResponse:
