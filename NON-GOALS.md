@@ -118,7 +118,8 @@ on every language ecosystem.
 
 **Pick instead**: run your build pipeline elsewhere (GitHub
 Actions, GitLab CI, Buildkite, Drone) and deploy the resulting
-artifact via `creek deploy` or `creekctl deploy`.
+artifact via your existing release mechanism (rsync +
+`systemctl restart`, an ssh-driven script, etc.).
 
 ### N7. `kubectl`-compatible API surface
 

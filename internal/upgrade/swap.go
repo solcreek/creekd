@@ -14,9 +14,11 @@ import (
 // from the still-open file descriptor. The next exec sees the new
 // binary.
 //
-// mode preserved is whatever's on src (typically 0755 from
-// goreleaser's tarball). If src has no executable bit, SwapBinary
-// applies 0755 anyway — every release artifact should be runnable.
+// Mode follows src but is force-executable (0o111 OR'd in) and
+// capped at 0o755. Every release artifact must be runnable; we
+// never grant more than rwxr-xr-x. Note: this preserves src's
+// read/write bits — a src created with a restrictive umask
+// (e.g. 0600) becomes 0711, not 0755.
 //
 // On any error, dst is left untouched: the tmp file is removed and
 // the original binary remains in place. There is no half-upgrade

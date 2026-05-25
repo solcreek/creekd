@@ -23,15 +23,20 @@ generate:
 	cd api && $(OAPI_CODEGEN) --config cfg/types.yaml openapi.yaml
 	cd api && $(OAPI_CODEGEN) --config cfg/server.yaml openapi.yaml
 
-# build produces the production binary (no sandbox/lima code).
-# Use build-dev for the full binary with sandbox support.
+# build produces the production binaries at ./creekd + ./creekctl.
+# CGO_ENABLED=0 + -trimpath match the goreleaser config so a local
+# build has the same shape as a release artifact (CGO-free, no
+# host-path leakage). Use build-dev for the sandbox-enabled variant
+# used by the cgroup / lima tests.
 .PHONY: build
 build:
-	$(GO) build ./...
+	CGO_ENABLED=0 $(GO) build -trimpath -o creekd ./cmd/creekd
+	CGO_ENABLED=0 $(GO) build -trimpath -o creekctl ./cmd/creekctl
 
 .PHONY: build-dev
 build-dev:
-	$(GO) build -tags creekd_sandbox ./...
+	$(GO) build -tags creekd_sandbox -o creekd ./cmd/creekd
+	$(GO) build -tags creekd_sandbox -o creekctl ./cmd/creekctl
 
 .PHONY: test
 test:

@@ -35,9 +35,12 @@ pinned). A fork or hijacked pipeline cannot satisfy verification.
 1. Download the release tarball + `checksums.txt` (+ optionally
    `.sig` and `.pem`) from the [GitHub Releases page][releases]
    on a machine with internet, then transfer to the target host.
-2. Verify SHA256:
+2. Verify SHA256 (Linux uses `sha256sum`; macOS ships `shasum`):
    ```sh
+   # Linux
    sha256sum --check checksums.txt --ignore-missing
+   # macOS
+   shasum -a 256 -c checksums.txt --ignore-missing
    ```
 3. (Optional) verify cosign:
    ```sh
