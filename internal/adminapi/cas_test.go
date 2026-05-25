@@ -310,3 +310,49 @@ func TestCAS_NoStoreSkipsValidation(t *testing.T) {
 		t.Errorf("412 returned without store configured — middleware should skip when store is nil")
 	}
 }
+
+// TestCAS_AuthPrecedesCAS guards the middleware order: auth must run
+// before CAS so that an unauthenticated caller cannot read a 412 with
+// the current resourceVersion (which would leak both existence and
+// version of the resource).
+//
+// Regression: oapi-codegen wraps middlewares in slice order, making
+// slice[0] innermost and slice[len-1] outermost. Slice
+// [auth, cas, audit] therefore executes audit→cas→auth, with CAS
+// running before auth. The correct slice for audit→auth→cas is
+// [cas, auth, audit].
+func TestCAS_AuthPrecedesCAS(t *testing.T) {
+	ts := newTestServer(t, "secret")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	// Spawn an app so it has a real rv to leak.
+	port := freeTCPPort(t)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "guarded", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "secret"); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("guarded") })
+
+	// Unauthenticated DELETE with bogus If-Match. If CAS runs before
+	// auth, the response is 412 with the real rv in body + ETag header
+	// (information disclosure). With correct order it must be 401.
+	req := httptest.NewRequest("DELETE", "/v1/apps/guarded", nil)
+	req.Header.Set("If-Match", "99999")
+	// Deliberately no Authorization header.
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated request, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if w.Header().Get("ETag") != "" {
+		t.Errorf("ETag leaked to unauthenticated caller: %q", w.Header().Get("ETag"))
+	}
+	if strings.Contains(w.Body.String(), `"resource_version_mismatch"`) {
+		t.Errorf("CAS 412 body returned to unauthenticated caller: %s", w.Body.String())
+	}
+}

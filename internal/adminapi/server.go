@@ -47,13 +47,20 @@ func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token stri
 		token:  token,
 		mux:    http.NewServeMux(),
 	}
-	// Wire the generated router. Middleware order matters: auth runs
-	// first (reject unauthenticated requests before consulting state);
-	// CAS If-Match check next (cheap, deterministic); audit last so it
-	// observes the final status code including 401 / 412 paths.
+	// Wire the generated router. Middleware execution order on the
+	// inbound path: audit → auth → cas → handler. Audit wraps the
+	// whole stack so it observes the final status (incl. 401 / 412);
+	// auth rejects unauthenticated requests before any state lookup;
+	// cas validates If-Match only after the caller is authenticated,
+	// so 412 responses don't leak resourceVersion to anonymous probes.
+	//
+	// oapi-codegen wraps in slice order — slice[0] becomes innermost,
+	// slice[len-1] becomes outermost. Execution = reversed slice. So
+	// to get audit→auth→cas→handler we list them in reverse:
+	// [cas, auth, audit].
 	apiHandler := apitypes.HandlerWithOptions(s, apitypes.StdHTTPServerOptions{
 		BaseRouter:       s.mux,
-		Middlewares:      []apitypes.MiddlewareFunc{s.authMiddleware(), s.casMiddleware(), s.auditMiddleware()},
+		Middlewares:      []apitypes.MiddlewareFunc{s.casMiddleware(), s.authMiddleware(), s.auditMiddleware()},
 		ErrorHandlerFunc: s.handleParamError,
 	})
 	_ = apiHandler // routes registered on s.mux

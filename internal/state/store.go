@@ -265,7 +265,14 @@ func (s *Store) load() error {
 			return err
 		}
 		// Persist forward as v2 so subsequent boots take the v2 path.
-		if err := s.flushBoth(s.apps, s.volumes); err != nil {
+		// flushBoth requires s.mu held. load() runs from the
+		// constructor so there's currently no contention, but taking
+		// the lock keeps the documented contract honest in case
+		// load() is ever called from a reload context later.
+		s.mu.Lock()
+		err := s.flushBoth(s.apps, s.volumes)
+		s.mu.Unlock()
+		if err != nil {
 			return fmt.Errorf("state: v1→v2 migration flush: %w", err)
 		}
 		return nil
