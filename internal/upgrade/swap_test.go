@@ -60,9 +60,10 @@ func TestSwapBinary_PreservesExecutableBit(t *testing.T) {
 }
 
 // TestSwapBinary_NoTempLeftOnSuccess covers the cleanliness
-// contract: the .upgrade.tmp sibling file MUST be gone after a
+// contract: no .upgrade-*.tmp sibling file MUST remain after a
 // successful swap (rename consumes it). A leftover would confuse
-// the next upgrade attempt.
+// the next upgrade attempt and fill the destination directory
+// with stale tmp files over time.
 func TestSwapBinary_NoTempLeftOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "new")
@@ -76,8 +77,12 @@ func TestSwapBinary_NoTempLeftOnSuccess(t *testing.T) {
 	if err := SwapBinary(src, dst); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(dst + ".upgrade.tmp"); !os.IsNotExist(err) {
-		t.Errorf("tmp leftover: stat err = %v, want IsNotExist", err)
+	leftover, err := filepath.Glob(filepath.Join(dir, ".upgrade-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftover) != 0 {
+		t.Errorf("tmp leftover: %v, want none", leftover)
 	}
 }
 

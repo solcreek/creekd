@@ -31,10 +31,19 @@ func SwapBinary(src, dst string) error {
 		mode = 0o755
 	}
 
-	// Write the new bytes to a sibling of dst so the subsequent
-	// rename is on the same filesystem (cross-fs rename is
-	// non-atomic on Linux and outright fails on some kernels).
-	tmp := dst + ".upgrade.tmp"
+	// Use os.CreateTemp in the destination directory so:
+	//   - the rename is on the same filesystem (cross-fs rename
+	//     is non-atomic on Linux and outright fails on some kernels),
+	//   - the tmp filename is randomised (avoids a symlink-clobber
+	//     race on a predictable sibling name),
+	//   - opening uses O_EXCL semantics so we never follow a
+	//     pre-existing file at the chosen path.
+	tmpFile, err := os.CreateTemp(filepath.Dir(dst), ".upgrade-*.tmp")
+	if err != nil {
+		return fmt.Errorf("upgrade: create tmp in %s: %w", filepath.Dir(dst), err)
+	}
+	tmp := tmpFile.Name()
+	tmpFile.Close() // we'll reopen via copyFile with the right flags + mode
 	if err := copyFile(src, tmp, mode); err != nil {
 		_ = os.Remove(tmp)
 		return err
@@ -43,10 +52,13 @@ func SwapBinary(src, dst string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("upgrade: rename %s → %s: %w", tmp, dst, err)
 	}
-	// fsync the parent dir so the rename's directory entry hits
-	// disk before this function returns. A power loss between
-	// rename and the next sync would otherwise resurrect the old
-	// binary on next boot.
+	// Best-effort fsync of the parent directory so the rename's
+	// entry hits disk before we return. Errors here are NOT fatal:
+	// the rename already succeeded, the binary on disk is correct,
+	// and failing the call would mislead callers into thinking the
+	// swap itself failed. A power loss in the millisecond before
+	// the kernel flushes is rare enough that best-effort matches
+	// what every other long-lived Unix tool does here.
 	if dirFd, derr := os.Open(filepath.Dir(dst)); derr == nil {
 		_ = dirFd.Sync()
 		_ = dirFd.Close()
@@ -60,9 +72,13 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return fmt.Errorf("upgrade: open src %s: %w", src, err)
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	out, err := os.OpenFile(dst, os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return fmt.Errorf("upgrade: open dst %s: %w", dst, err)
+	}
+	if err := out.Chmod(mode); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("upgrade: chmod %s: %w", dst, err)
 	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()

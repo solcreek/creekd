@@ -24,7 +24,7 @@ Pick exactly one:
 
 ## Non-goals check
 
-- [ ] I have read [`NON-GOALS.md`](../NON-GOALS.md) and confirm
+- [ ] I have read [`NON-GOALS.md`](NON-GOALS.md) and confirm
       this PR does not implement a documented non-goal. If it
       does, link the ADR that revises the non-goal.
 

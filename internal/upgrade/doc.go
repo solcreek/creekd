@@ -1,6 +1,5 @@
 // Package upgrade verifies a release artifact's integrity before
-// `creekctl self upgrade` swaps it into place. Two-layer check
-// per DESIGN-self-host-state.md §"Supply chain":
+// `creekctl self-upgrade` swaps it into place. Two-layer check:
 //
 //  1. cosign keyless verification of checksums.txt against the
 //     pinned release-pipeline identity (Fulcio + Rekor). Proves

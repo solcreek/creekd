@@ -154,6 +154,31 @@ func TestVerify_CosignNotInstalled(t *testing.T) {
 	}
 }
 
+// TestVerify_CosignNotExecutable covers the EACCES path: cosign
+// exists on the configured path but is chmod -x. Like the
+// not-installed case, this is a setup problem (the operator's
+// install is broken), NOT a signature rejection — surfacing it as
+// ErrSignatureInvalid would point the operator at the wrong fix.
+func TestVerify_CosignNotExecutable(t *testing.T) {
+	dir := t.TempDir()
+	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
+	cosign := filepath.Join(dir, "cosign")
+	// Mode 0644: file exists, not executable.
+	if err := os.WriteFile(cosign, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	v := New()
+	v.CosignPath = cosign
+	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	if err == nil {
+		t.Fatal("non-executable cosign should error")
+	}
+	if errors.Is(err, ErrSignatureInvalid) {
+		t.Errorf("non-executable cosign should NOT surface as ErrSignatureInvalid (setup error, not security): %v", err)
+	}
+}
+
 // TestVerify_PassesPipelineIdentityToCosign covers the security
 // invariant that the cosign invocation actually pins the expected
 // identity regex — a regression that omitted --certificate-identity-regexp

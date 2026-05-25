@@ -2,17 +2,23 @@ package upgrade
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// cosignVerifyTimeout caps how long a single `cosign verify-blob`
+// call may run. cosign contacts Rekor + Fulcio, so a network black
+// hole would otherwise let self-upgrade hang indefinitely.
+const cosignVerifyTimeout = 30 * time.Second
 
 // ErrSignatureInvalid is returned by Verify when EITHER the cosign
 // signature on checksums.txt fails to verify against the expected
@@ -40,7 +46,9 @@ const DefaultOIDCIssuer = "https://token.actions.githubusercontent.com"
 // at a fake binary).
 type Verifier struct {
 	// CosignPath is the cosign binary used for verify-blob.
-	// Empty (the New default) resolves to "cosign" via PATH.
+	// New() defaults to "cosign", which is resolved through PATH
+	// at exec time. Set to a non-empty absolute path to bypass
+	// PATH lookup (commonly used in tests).
 	CosignPath string
 	// IdentityRegex pins the expected signing-pipeline identity.
 	// Defaults to DefaultIdentityRegex.
@@ -91,31 +99,36 @@ func (v *Verifier) verifyCosign(sigPath, certPath, checksumsPath string) error {
 		issuer = DefaultOIDCIssuer
 	}
 
-	// cosign verify-blob exit code carries the verdict.
-	cmd := exec.Command(bin, "verify-blob",
+	// Bound the cosign call: it queries Rekor + Fulcio over the
+	// network, so a connectivity black hole could otherwise wedge
+	// self-upgrade forever.
+	ctx, cancel := context.WithTimeout(context.Background(), cosignVerifyTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, "verify-blob",
 		"--certificate-identity-regexp", identity,
 		"--certificate-oidc-issuer", issuer,
 		"--certificate", certPath,
 		"--signature", sigPath,
 		checksumsPath)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		// Distinguish "cosign not installed / not executable" from
-		// "verification rejected". The former is a setup problem;
-		// the latter is the security signal we care about.
-		//
-		// "Not installed" surfaces as one of two error shapes
-		// depending on how the bin path resolves: *exec.Error when
-		// LookPath fails for a bare name, or fs.ErrNotExist
-		// (typically *fs.PathError wrapping ENOENT) when an
-		// absolute path's file is absent. Cover both.
-		var execErr *exec.Error
-		if errors.As(err, &execErr) || errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("upgrade: cosign unavailable (%s): %w", bin, err)
-		}
+	if err == nil {
+		return nil
+	}
+	// Classify the failure. Only an *exec.ExitError — cosign ran to
+	// completion and exited non-zero — is a real signature
+	// rejection. Everything else (binary not found, not executable,
+	// killed by signal, deadline exceeded, kernel exec failure) is
+	// a setup / environment problem the caller may want to handle
+	// differently (e.g. fall back to checksum-only, surface a
+	// "fix your install" message). Misclassifying these as
+	// ErrSignatureInvalid would let a chmod-broken cosign trigger
+	// the security failure path.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
 		return fmt.Errorf("%w: cosign verify-blob: %s", ErrSignatureInvalid, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return fmt.Errorf("upgrade: cosign unavailable (%s): %w", bin, err)
 }
 
 // verifyChecksum looks up tarballName in checksums.txt and

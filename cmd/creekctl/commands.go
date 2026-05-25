@@ -1214,17 +1214,62 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	// Swap both. creekd first — if it fails, creekctl is still the
 	// pre-upgrade binary and the user can retry without a
 	// version-mismatch surprise.
+	//
+	// To avoid leaving the system half-upgraded if the SECOND swap
+	// fails (typically disk-full or a permissions change between
+	// the two calls), copy the pre-upgrade creekd to a sibling
+	// stash file BEFORE the first swap. On creekctl failure, the
+	// stash is rolled back via a second SwapBinary call. Either
+	// both swaps land or the system ends up with the original pair.
+	stashPath := dPath + ".pre-upgrade"
+	if err := copyFileForRollback(dPath, stashPath); err != nil {
+		return fmt.Errorf("stash pre-upgrade creekd: %w", err)
+	}
+	defer os.Remove(stashPath)
+
 	fmt.Fprintf(w, "==> replacing %s\n", dPath)
 	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekd"), dPath); err != nil {
 		return err
 	}
 	fmt.Fprintf(w, "==> replacing %s\n", ctlPath)
 	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekctl"), ctlPath); err != nil {
+		// Best-effort rollback of creekd to the stashed pre-upgrade
+		// binary. Report the rollback outcome but surface the
+		// ORIGINAL error so the operator sees the real cause.
+		if rbErr := upgrade.SwapBinary(stashPath, dPath); rbErr != nil {
+			fmt.Fprintf(w, "WARN: creekctl upgrade failed AND rollback of %s also failed: %v\n", dPath, rbErr)
+		} else {
+			fmt.Fprintf(w, "==> creekctl swap failed; rolled back %s to pre-upgrade\n", dPath)
+		}
 		return err
 	}
 	fmt.Fprintf(w, "==> upgraded to %s\n", version)
 	_ = cf // commonFlags currently unused; reserved for future --json output
 	return nil
+}
+
+// copyFileForRollback duplicates src to dst, preserving mode. Used
+// to stash the pre-upgrade creekd so the self-upgrade flow can
+// roll back if the second swap fails.
+func copyFileForRollback(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // resolveLatestTag follows GitHub's /releases/latest redirect to
@@ -1278,8 +1323,13 @@ func detectOSArch() (string, string, error) {
 	return osName, arch, nil
 }
 
+// downloadFile fetches url into dst with a bounded timeout. Self-
+// upgrade artifacts are tens of MB so the cap is generous, but it
+// MUST exist — Go's default client has no timeout and a stalled
+// TCP connection would hang the upgrade forever.
 func downloadFile(url, dst string) error {
-	resp, err := http.Get(url)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
 	if err != nil {
 		return err
 	}
@@ -1301,8 +1351,16 @@ func downloadFile(url, dst string) error {
 // extractTarGz untars src into dstDir. Skips entries that are not
 // regular files (we only want creekd + creekctl + the bundled
 // docs from goreleaser); writes them with their archived mode.
-// Path traversal guard: any entry whose resolved path escapes
-// dstDir is refused.
+//
+// Path traversal guard: filepath.Clean normalises ".." segments
+// and the HasPrefix check refuses any entry whose cleaned path
+// is outside dstDir. This handles absolute-path entries and ".."
+// traversal — but NOT pre-existing symlinks inside dstDir, since
+// the check operates on the path string, not the resolved inode.
+// Safe in this codebase because the caller always passes a fresh
+// MkdirTemp directory; do not reuse extractTarGz against a
+// caller-controlled or persistent dstDir without adding O_NOFOLLOW
+// + per-component lstat.
 func extractTarGz(src, dstDir string) error {
 	f, err := os.Open(src)
 	if err != nil {
