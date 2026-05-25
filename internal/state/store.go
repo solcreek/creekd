@@ -703,9 +703,17 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 	// Anchor for the rollback-on-error path. Set rollbackOnErr =
 	// false right before returning success so the deferred rollback
 	// is a no-op on the happy path.
+	//
+	// Suppressed for StorageCorruptedError: when read-back verify
+	// fails we DON'T know whether the bytes on disk match `data` or
+	// not — fsync may have silently failed. Emitting a rollback would
+	// tell next-boot replay "this pending is closed", causing it to
+	// skip replaying the intended state. Leaving the pending orphan
+	// preserves the option to replay-forward.
 	rollbackOnErr := true
+	suppressRollback := false
 	defer func() {
-		if rollbackOnErr {
+		if rollbackOnErr && !suppressRollback {
 			// Best-effort rollback. If the WAL itself is broken
 			// here (e.g. disk full) the next boot will see an
 			// orphan pending and replay it — same outcome the
@@ -721,12 +729,22 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 		_ = os.Remove(tmp)
 		return fmt.Errorf("state: write+fsync %s: %w", tmp, err)
 	}
+	// fsync parent dir BEFORE rename so the tmp file's directory entry
+	// is durable. On ext4/xfs a freshly-created file's dirent isn't
+	// guaranteed durable until the directory itself is synced — without
+	// this, a crash between writeFileAndFsync and rename could leave the
+	// tmp file's contents on disk without an entry pointing to them.
+	if err := fsyncDir(dir); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("state: fsync parent %s (pre-rename): %w", dir, err)
+	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("state: rename %s → %s: %w", tmp, s.path, err)
 	}
+	// fsync parent dir AFTER rename so the rename itself is durable.
 	if err := fsyncDir(dir); err != nil {
-		return fmt.Errorf("state: fsync parent %s: %w", dir, err)
+		return fmt.Errorf("state: fsync parent %s (post-rename): %w", dir, err)
 	}
 
 	// Read-back verification. If the kernel silently dropped a dirty
@@ -740,6 +758,7 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 	gotHash := sha256.Sum256(gotData)
 	gotHex := hex.EncodeToString(gotHash[:])
 	if gotHex != wantHex {
+		suppressRollback = true
 		return &StorageCorruptedError{
 			Path:       s.path,
 			WantSHA256: wantHex,
@@ -761,14 +780,23 @@ func (s *Store) flushFull(apps map[string]supervisor.Config, metadata map[string
 // writeFileAndFsync creates path (truncate if exists), writes data,
 // fsyncs the file descriptor, then closes. Mirrors os.WriteFile +
 // explicit fsync that os.WriteFile leaves to the kernel's whim.
+//
+// os.File.Write may return a short write with nil error; treat
+// n != len(data) as an error so partial state.json contents can't
+// silently ship through fsync.
 func writeFileAndFsync(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	n, err := f.Write(data)
+	if err != nil {
 		_ = f.Close()
 		return err
+	}
+	if n != len(data) {
+		_ = f.Close()
+		return fmt.Errorf("short write %d of %d bytes", n, len(data))
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()

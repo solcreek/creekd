@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -124,13 +125,29 @@ func appendWAL(path string, rec walRecord) error {
 		return fmt.Errorf("wal: marshal: %w", err)
 	}
 	line = append(line, '\n')
+
+	// Detect first create so we can fsync the parent directory
+	// afterwards — on ext4/xfs a newly-created file's directory entry
+	// is not guaranteed durable until the directory itself is synced,
+	// so without this the first pending record can be lost on crash.
+	_, statErr := os.Stat(path)
+	firstCreate := os.IsNotExist(statErr)
+
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("wal: open %s: %w", path, err)
 	}
-	if _, err := f.Write(line); err != nil {
+	// os.File.Write may return a short write with nil error in theory;
+	// treat n != len(line) as an error so partial NDJSON records can't
+	// silently corrupt the log.
+	n, err := f.Write(line)
+	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("wal: write: %w", err)
+	}
+	if n != len(line) {
+		_ = f.Close()
+		return fmt.Errorf("wal: short write %d of %d bytes", n, len(line))
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
@@ -138,6 +155,11 @@ func appendWAL(path string, rec walRecord) error {
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("wal: close: %w", err)
+	}
+	if firstCreate {
+		if err := fsyncDir(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("wal: fsync dir after first create: %w", err)
+		}
 	}
 	return nil
 }
@@ -160,13 +182,15 @@ func scanOrphanPending(path string) ([]walRecord, error) {
 	defer f.Close()
 
 	// pendings keyed by token + append-order index so we can
-	// reconstruct order when filtering out committed ones.
+	// reconstruct order in the final result. Drop entries from the
+	// map on commit/rollback so memory tracks orphan count, not total
+	// WAL line count — important because each pending carries the
+	// full base64'd state.json payload (multi-MB on busy hosts).
 	type pendingWithOrder struct {
 		rec   walRecord
 		order int
 	}
 	pendings := make(map[string]pendingWithOrder)
-	committed := make(map[string]bool)
 
 	scanner := bufio.NewScanner(f)
 	// Allow up to 16 MB per line (pending records carry full
@@ -187,8 +211,9 @@ func scanOrphanPending(path string) ([]walRecord, error) {
 		case walTypeCommit, walTypeRollback:
 			// Both close the orphan tracking — commit means the
 			// change landed, rollback means the daemon revoked it.
-			// Either way the pending is no longer a replay candidate.
-			committed[rec.Token] = true
+			// Drop the pending entry so its payload (potentially MB
+			// of base64'd state) is GC-eligible immediately.
+			delete(pendings, rec.Token)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -196,10 +221,7 @@ func scanOrphanPending(path string) ([]walRecord, error) {
 	}
 
 	out := make([]pendingWithOrder, 0, len(pendings))
-	for token, p := range pendings {
-		if committed[token] {
-			continue
-		}
+	for _, p := range pendings {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].order < out[j].order })
