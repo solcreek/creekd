@@ -582,7 +582,7 @@ components:
         id:
           type: string
         runtime:
-          type: string
+          $ref: "#/components/schemas/Runtime"
         command:
           type: string
         args:

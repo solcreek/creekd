@@ -75,7 +75,8 @@ func appToView(app *supervisor.App) apitypes.AppView {
 		HealthFailures: app.HealthFailures(),
 	}
 	if rt := string(app.Runtime); rt != "" {
-		v.Runtime = &rt
+		r := apitypes.Runtime(rt)
+		v.Runtime = &r
 	}
 	if args := append([]string(nil), app.Args...); len(args) > 0 {
 		v.Args = &args

@@ -1186,7 +1186,7 @@ func writeAppDetail(w io.Writer, a *apitypes.AppView) error {
 		{"port", fmt.Sprintf("%d", a.Port)},
 		{"command", a.Command},
 		{"args", strings.Join(derefSlice(a.Args), " ")},
-		{"runtime", derefStr(a.Runtime)},
+		{"runtime", derefRuntimeStr(a.Runtime)},
 		{"net_ip", derefStr(a.NetIp)},
 		{"uptime_ms", fmt.Sprintf("%d", a.UptimeMs)},
 		{"restart_count", fmt.Sprintf("%d", a.RestartCount)},

@@ -182,7 +182,7 @@ type AppView struct {
 	Pid            int           `json:"pid"`
 	Port           int           `json:"port"`
 	RestartCount   int           `json:"restart_count"`
-	Runtime        *string       `json:"runtime,omitempty"`
+	Runtime        *Runtime      `json:"runtime,omitempty"`
 	Status         AppViewStatus `json:"status"`
 	UptimeMs       int64         `json:"uptime_ms"`
 }
