@@ -33,6 +33,17 @@ func SwapBinary(src, dst string) error {
 		mode = 0o755
 	}
 
+	// Refuse to swap through a symlink. Package-manager installs
+	// commonly symlink /usr/local/bin/creekd → /opt/<vendor>/creekd
+	// or similar; rename(2) would replace the symlink with a fresh
+	// regular file, leaving the package manager's tracked path
+	// stale and breaking its next update. Operator must either
+	// upgrade through that tool, or pass --creekd / --creekctl
+	// pointing at the real target.
+	if dstInfo, lerr := os.Lstat(dst); lerr == nil && dstInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("upgrade: %s is a symlink; upgrade via your package manager or pass --creekd/--creekctl at the real path", dst)
+	}
+
 	in, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("upgrade: open src %s: %w", src, err)

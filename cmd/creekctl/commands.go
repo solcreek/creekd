@@ -1220,14 +1220,20 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	}
 
 	// Stash the pre-upgrade creekd so creekctl-swap failure can
-	// roll creekd back. CopyFile prefers a hard link when the
-	// filesystem allows it — O(1) and zero extra disk space, with
-	// byte-copy fallback on EXDEV.
-	stashPath := dPath + ".pre-upgrade"
+	// roll creekd back. Reserve a unique stash path via CreateTemp
+	// (a predictable name would silently clobber any operator file
+	// at that path), then populate it with CopyFile — hard link
+	// fast path on the common case, byte-copy fallback otherwise.
+	stashFile, err := os.CreateTemp(filepath.Dir(dPath), filepath.Base(dPath)+".pre-upgrade-*")
+	if err != nil {
+		return fmt.Errorf("reserve stash path: %w", err)
+	}
+	stashPath := stashFile.Name()
+	stashFile.Close()
+	defer os.Remove(stashPath)
 	if err := upgrade.CopyFile(dPath, stashPath); err != nil {
 		return fmt.Errorf("stash pre-upgrade creekd: %w", err)
 	}
-	defer os.Remove(stashPath)
 
 	fmt.Fprintf(w, "==> replacing %s\n", dPath)
 	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekd"), dPath); err != nil {

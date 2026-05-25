@@ -86,6 +86,38 @@ func TestSwapBinary_NoTempLeftOnSuccess(t *testing.T) {
 	}
 }
 
+// TestSwapBinary_RefusesSymlinkedDst covers the package-manager
+// safety check: when dst is a symlink (the common shape for
+// brew / apt / etc. installs), SwapBinary must error rather than
+// silently replace the symlink with a regular file and leave the
+// package manager's tracked path stale.
+func TestSwapBinary_RefusesSymlinkedDst(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "new")
+	if err := os.WriteFile(src, []byte("new-bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "vendor-creekd")
+	if err := os.WriteFile(real, []byte("vendor-bytes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "creekd")
+	if err := os.Symlink(real, dst); err != nil {
+		t.Fatal(err)
+	}
+	err := SwapBinary(src, dst)
+	if err == nil {
+		t.Fatal("SwapBinary on symlink dst should error")
+	}
+	// Symlink and vendor target both untouched.
+	if got, _ := os.Lstat(dst); got == nil || got.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("dst no longer a symlink after refused swap")
+	}
+	if got, _ := os.ReadFile(real); string(got) != "vendor-bytes" {
+		t.Errorf("vendor target clobbered: %q", got)
+	}
+}
+
 // TestCopyFile_DoesNotFollowSymlink covers the byte-copy fallback's
 // symlink-safety: if dst points at a symlink to some other path,
 // CopyFile MUST NOT follow it through and overwrite the target.
