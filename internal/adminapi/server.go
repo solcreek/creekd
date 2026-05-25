@@ -131,9 +131,44 @@ func (s *Server) auditMiddleware() apitypes.MiddlewareFunc {
 	}
 }
 
-// handleParamError handles parameter validation errors from the generated router.
-func (s *Server) handleParamError(w http.ResponseWriter, _ *http.Request, err error) {
+// handleParamError handles parameter validation errors from the
+// generated router. The wrapper parses path / header / query params
+// BEFORE the middleware chain runs, so a parse error (malformed id,
+// duplicated If-Match header, etc.) reaches us here without auth or
+// audit having had a chance to act. Mirror what those middlewares
+// would have done: enforce auth so anonymous probers get a 401 (not
+// a 400 that leaks endpoint existence), and emit an audit entry so
+// the attempt is logged for mutating verbs.
+func (s *Server) handleParamError(w http.ResponseWriter, r *http.Request, err error) {
+	if s.token != "" && !s.checkBearer(r) {
+		s.emitAuditOnEarlyError(r, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, string(apitypes.ErrorCodeUnauthorized),
+			"missing or invalid bearer token")
+		return
+	}
+	s.emitAuditOnEarlyError(r, http.StatusBadRequest)
 	writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+}
+
+// emitAuditOnEarlyError logs a request that failed wrapper-level
+// validation before the audit middleware ran. No-op when audit is not
+// configured or the verb is non-mutating (read-only param errors
+// don't warrant an audit entry).
+func (s *Server) emitAuditOnEarlyError(r *http.Request, statusCode int) {
+	if s.audit == nil || !isMutating(r.Method) {
+		return
+	}
+	s.audit.Log(AuditEntry{
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		AppID:      extractAppID(r.URL.Path),
+		Action:     actionFromRequest(r.Method, r.URL.Path),
+		Actor:      hashToken(s.extractToken(r)),
+		StatusCode: statusCode,
+		DurationMS: 0,
+		SourceIP:   r.RemoteAddr,
+	})
 }
 
 // guardFunc wraps h with bearer-token check (for pprof/metrics, not API routes).

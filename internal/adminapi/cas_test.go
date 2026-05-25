@@ -413,3 +413,41 @@ func TestCAS_AppNamedAppsIsNotBypassed(t *testing.T) {
 		t.Fatalf("expected 412 for bogus If-Match on app named \"apps\", got %d (body=%s)", w.Code, w.Body.String())
 	}
 }
+
+// TestCAS_DuplicateIfMatchHeaderRequiresAuthFirst guards the wrapper-
+// level header-parameter parsing path. oapi-codegen parses path /
+// header / query params before the middleware chain runs, so any
+// parse error (e.g. two If-Match values when the schema permits at
+// most one) reaches handleParamError without auth/audit having acted.
+//
+// Without the fix in handleParamError, an unauthenticated caller
+// would receive a 400 (leaking that the endpoint exists and accepts
+// If-Match) instead of a 401, and the probe wouldn't be audited.
+func TestCAS_DuplicateIfMatchHeaderRequiresAuthFirst(t *testing.T) {
+	ts := newTestServer(t, "secret")
+
+	// Spawn an app so the path-id parse succeeds and we land on the
+	// header-parameter parse step.
+	port := freeTCPPort(t)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "guarded-param", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "secret"); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("guarded-param") })
+
+	req := httptest.NewRequest("DELETE", "/v1/apps/guarded-param", nil)
+	// Two If-Match values — the spec permits at most one, so the
+	// wrapper calls ErrorHandlerFunc before the middleware chain.
+	req.Header.Add("If-Match", "1")
+	req.Header.Add("If-Match", "2")
+	// Deliberately no Authorization header.
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated duplicate-If-Match request, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "If-Match") {
+		t.Errorf("response body leaks parsing detail to anonymous caller: %s", w.Body.String())
+	}
+}
