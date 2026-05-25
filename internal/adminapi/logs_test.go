@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/solcreek/creekd/internal/apitypes"
 )
 
 // writeLogFile writes a current.log file at <dir>/<appID>/ containing
@@ -34,37 +36,6 @@ func writeLogFile(t *testing.T, dir, appID string, lines []string) string {
 		t.Fatalf("write: %v", err)
 	}
 	return path
-}
-
-func TestParseTailValidation(t *testing.T) {
-	cases := []struct {
-		raw     string
-		want    int
-		wantErr bool
-	}{
-		{"", defaultTail, false},
-		{"50", 50, false},
-		{"0", 0, false},
-		{"-1", 0, true},
-		{"99999", 0, true}, // > maxTail
-		{"abc", 0, true},
-	}
-	for _, c := range cases {
-		got, err := parseTail(c.raw)
-		if c.wantErr {
-			if err == nil {
-				t.Errorf("parseTail(%q) want error, got %d", c.raw, got)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("parseTail(%q): %v", c.raw, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("parseTail(%q) = %d, want %d", c.raw, got, c.want)
-		}
-	}
 }
 
 func TestReadTailReturnsRequestedSlice(t *testing.T) {
@@ -134,7 +105,7 @@ func TestLogsEndpointTailMode(t *testing.T) {
 	// Spawn an app first so the path is recognised.
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "logged", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "logged", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("logged") })
 
 	// Pre-seed the log file (the sleep child won't emit anything itself).
@@ -163,7 +134,7 @@ func TestLogsEndpointDefaultTail(t *testing.T) {
 
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "dflt", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "dflt", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("dflt") })
 
 	// 250 lines — more than defaultTail (100).
@@ -204,7 +175,7 @@ func TestLogsCaptureDisabledReturns400(t *testing.T) {
 	// LogDir intentionally empty.
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "nolog", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "nolog", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("nolog") })
 
 	status, body := ts.do(t, "GET", "/v1/apps/nolog/logs", nil, "")
@@ -218,7 +189,7 @@ func TestLogsRejectsBadTailParam(t *testing.T) {
 	ts.sup.LogDir = t.TempDir()
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "x", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("x") })
 
 	status, _ := ts.do(t, "GET", "/v1/apps/x/logs?tail=abc", nil, "")
@@ -240,7 +211,7 @@ func TestLogsFollowModeStreamsAppendedLines(t *testing.T) {
 	ts.sup.LogDir = t.TempDir()
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
-		SpawnRequest{ID: "follow", Command: "sleep", Args: []string{"30"}, Port: port}, "")
+		apitypes.SpawnRequest{Id: "follow", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
 	t.Cleanup(func() { _ = ts.sup.Stop("follow") })
 
 	// Pre-existing tail.

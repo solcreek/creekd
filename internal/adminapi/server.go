@@ -11,10 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
+
+// Compile-time check that Server implements the generated interface.
+var _ apitypes.ServerInterface = (*Server)(nil)
 
 // Server is the HTTP/JSON admin handler. Construct with New; obtain
 // the http.Handler via Handler.
@@ -22,27 +26,20 @@ type Server struct {
 	sup    *supervisor.Supervisor
 	router *dispatch.Router
 	token  string
-	store  *state.Store   // optional; set via SetStore to enable persistence
-	audit  *AuditLogger   // optional; set via SetAuditLogger to enable audit logging
+	store  *state.Store
+	audit  *AuditLogger
 
 	mux *http.ServeMux
 }
 
-// SetStore wires a persistence Store into the server. Every
-// successful Spawn / Deploy / Stop call writes through the store so
-// the daemon's restart logic can restore the same app set. nil
-// disables persistence (the default; only safe for ephemeral test
-// runs).
+// SetStore wires a persistence Store into the server.
 func (s *Server) SetStore(st *state.Store) { s.store = st }
 
 // SetAuditLogger enables structured audit logging for all mutating
-// API operations (spawn, stop, deploy, restart, reset).
+// API operations.
 func (s *Server) SetAuditLogger(a *AuditLogger) { s.audit = a }
 
-// New returns a Server backed by sup. dispatchRouter, when non-nil,
-// is updated on spawn/stop so that registered apps are reachable
-// through the data-plane router. token, when non-empty, gates every
-// endpoint behind an Authorization: Bearer <token> header.
+// New returns a Server backed by sup.
 func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token string) *Server {
 	s := &Server{
 		sup:    sup,
@@ -50,94 +47,65 @@ func New(sup *supervisor.Supervisor, dispatchRouter *dispatch.Router, token stri
 		token:  token,
 		mux:    http.NewServeMux(),
 	}
-	s.routes()
+	// Wire the generated router with auth+audit middleware.
+	apiHandler := apitypes.HandlerWithOptions(s, apitypes.StdHTTPServerOptions{
+		BaseRouter:       s.mux,
+		Middlewares:      []apitypes.MiddlewareFunc{s.authMiddleware(), s.auditMiddleware()},
+		ErrorHandlerFunc: s.handleParamError,
+	})
+	_ = apiHandler // routes registered on s.mux
 	return s
 }
 
-// Handler returns the configured http.Handler. Auth + JSON
-// content-type are applied in middleware.
+// Handler returns the configured http.Handler.
 func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
-// EnablePprof mounts net/http/pprof's standard handlers under
-// /debug/pprof/, gated by the server's bearer-token guard. Opt-in
-// because pprof endpoints leak detailed memory contents and CPU
-// profiling traces — exposing them unconditionally on a public
-// listener would be a footgun. The main binary wires this in
-// response to CREEKD_DEBUG_PPROF=1.
-//
-// Available routes (all GET):
-//
-//	/debug/pprof/         index — lists every profile
-//	/debug/pprof/<name>   heap / goroutine / block / mutex / allocs
-//	/debug/pprof/cmdline  process argv
-//	/debug/pprof/profile  cpu profile (?seconds=N)
-//	/debug/pprof/symbol   symbol resolution
-//	/debug/pprof/trace    runtime trace (?seconds=N)
+// EnablePprof mounts net/http/pprof handlers gated by bearer token.
 func (s *Server) EnablePprof() {
-	s.mux.HandleFunc("GET /debug/pprof/", s.guard(pprof.Index))
-	s.mux.HandleFunc("GET /debug/pprof/cmdline", s.guard(pprof.Cmdline))
-	s.mux.HandleFunc("GET /debug/pprof/profile", s.guard(pprof.Profile))
-	s.mux.HandleFunc("GET /debug/pprof/symbol", s.guard(pprof.Symbol))
-	s.mux.HandleFunc("GET /debug/pprof/trace", s.guard(pprof.Trace))
+	s.mux.HandleFunc("GET /debug/pprof/", s.guardFunc(pprof.Index))
+	s.mux.HandleFunc("GET /debug/pprof/cmdline", s.guardFunc(pprof.Cmdline))
+	s.mux.HandleFunc("GET /debug/pprof/profile", s.guardFunc(pprof.Profile))
+	s.mux.HandleFunc("GET /debug/pprof/symbol", s.guardFunc(pprof.Symbol))
+	s.mux.HandleFunc("GET /debug/pprof/trace", s.guardFunc(pprof.Trace))
 }
 
-// SetMetricsHandler mounts a Prometheus-format /metrics endpoint
-// gated by the same bearer-token guard as the rest of the admin
-// surface. Pass nil to leave it unmounted (the default). The handler
-// is typically the output of internal/metrics.Metrics.Handler().
-//
-// Why guarded: per-app stats include process IDs, restart counts,
-// memory pressure — operationally sensitive enough that we don't
-// want an unauthenticated reader pulling them from a public address.
-// Scraper-side: Prom config supports bearer tokens via the
-// authorization stanza; OTel collector via the http_config block.
+// SetMetricsHandler mounts a Prometheus-format /metrics endpoint.
 func (s *Server) SetMetricsHandler(h http.Handler) {
 	if h == nil {
 		return
 	}
-	s.mux.Handle("GET /metrics", s.guard(h.ServeHTTP))
+	s.mux.Handle("GET /metrics", s.guardFunc(h.ServeHTTP))
 }
 
-// routes wires URL patterns to handlers.
-func (s *Server) routes() {
-	// Go 1.22's pattern syntax lets us mix methods and path variables
-	// in one pattern string.
-	s.mux.HandleFunc("POST /v1/apps", s.guard(s.handleSpawn))
-	s.mux.HandleFunc("GET /v1/apps", s.guard(s.handleList))
-	s.mux.HandleFunc("GET /v1/apps/{id}", s.guard(s.handleGet))
-	s.mux.HandleFunc("DELETE /v1/apps/{id}", s.guard(s.handleStop))
-	s.mux.HandleFunc("POST /v1/apps/{id}/deploy", s.guard(s.handleDeploy))
-	s.mux.HandleFunc("POST /v1/apps/{id}/reset", s.guard(s.handleReset))
-	s.mux.HandleFunc("POST /v1/apps/{id}/restart", s.guard(s.handleRestart))
-	s.mux.HandleFunc("GET /v1/apps/{id}/logs", s.guard(s.handleLogs))
-	s.mux.HandleFunc("GET /v1/apps/{id}/events", s.guard(s.handleEvents))
-	s.mux.HandleFunc("GET /v1/apps/{id}/stats", s.guard(s.handleStats))
+// --- Middleware ---
 
-	s.mux.HandleFunc("POST /v1/volumes", s.guard(s.handleVolumeRegister))
-	s.mux.HandleFunc("GET /v1/volumes", s.guard(s.handleVolumesList))
-	s.mux.HandleFunc("GET /v1/volumes/{id}", s.guard(s.handleVolumeGet))
-	s.mux.HandleFunc("DELETE /v1/volumes/{id}", s.guard(s.handleVolumeDelete))
-}
-
-// guard wraps h with the bearer-token check. When s.token is empty
-// the guard is a passthrough.
-func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token != "" {
-			if !s.checkBearer(r) {
-				writeError(w, http.StatusUnauthorized, CodeUnauthorized,
+// authMiddleware returns a MiddlewareFunc that checks the bearer token.
+func (s *Server) authMiddleware() apitypes.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.token != "" && !s.checkBearer(r) {
+				writeError(w, http.StatusUnauthorized, string(apitypes.ErrorCodeUnauthorized),
 					"missing or invalid bearer token")
 				return
 			}
-		}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
-		// Audit mutating operations
-		if s.audit != nil && isMutating(r.Method) {
+// auditMiddleware returns a MiddlewareFunc that logs mutating operations.
+func (s *Server) auditMiddleware() apitypes.MiddlewareFunc {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.audit == nil || !isMutating(r.Method) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			start := time.Now()
 			aw := &auditResponseWriter{ResponseWriter: w, statusCode: 200}
-			h(aw, r)
+			next.ServeHTTP(aw, r)
 			s.audit.Log(AuditEntry{
 				Timestamp:  start.UTC().Format(time.RFC3339),
 				Method:     r.Method,
@@ -149,14 +117,27 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 				DurationMS: time.Since(start).Milliseconds(),
 				SourceIP:   r.RemoteAddr,
 			})
+		})
+	}
+}
+
+// handleParamError handles parameter validation errors from the generated router.
+func (s *Server) handleParamError(w http.ResponseWriter, _ *http.Request, err error) {
+	writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+}
+
+// guardFunc wraps h with bearer-token check (for pprof/metrics, not API routes).
+func (s *Server) guardFunc(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.token != "" && !s.checkBearer(r) {
+			writeError(w, http.StatusUnauthorized, string(apitypes.ErrorCodeUnauthorized),
+				"missing or invalid bearer token")
 			return
 		}
-
 		h(w, r)
 	}
 }
 
-// extractToken returns the raw bearer token from the request (for hashing).
 func (s *Server) extractToken(r *http.Request) string {
 	const prefix = "Bearer "
 	got := r.Header.Get("Authorization")
@@ -166,8 +147,6 @@ func (s *Server) extractToken(r *http.Request) string {
 	return ""
 }
 
-// checkBearer returns true if the Authorization header carries the
-// configured bearer token. Uses a constant-time comparison.
 func (s *Server) checkBearer(r *http.Request) bool {
 	const prefix = "Bearer "
 	got := r.Header.Get("Authorization")
@@ -178,41 +157,27 @@ func (s *Server) checkBearer(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) == 1
 }
 
-// handleSpawn handles POST /v1/apps.
-func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
-	var req SpawnRequest
+// --- ServerInterface implementation ---
+
+func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.SpawnRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
-	if err := supervisor.ValidateID(req.ID); err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+	if err := supervisor.ValidateID(req.Id); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, "port is required")
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
 		return
 	}
 
-	rt, err := parseRuntime(req.Runtime)
+	cfg, err := spawnToConfig(req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
-	}
-
-	cfg := supervisor.Config{
-		ID:              req.ID,
-		Runtime:         rt,
-		Entry:           req.Entry,
-		Command:         req.Command,
-		Args:            req.Args,
-		Port:            req.Port,
-		Env:             req.Env,
-		CgroupLimits:    req.Limits.toCgroupLimits(),
-		NetIsolation:    req.NetIsolation,
-		Sandbox:         req.Sandbox.toSandboxSpec(),
-		HealthCheckPath: req.HealthCheckPath,
-		VolumeMounts:    toSupervisorVolumeMounts(req.VolumeMounts),
 	}
 
 	app, err := s.sup.Spawn(cfg)
@@ -222,18 +187,13 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.router != nil {
-		// Route via the container IP when net isolation is on so
-		// dispatch traffic crosses the bridge; otherwise fall back to
-		// the default loopback host.
 		host := ""
 		if app.NetIP != nil {
 			host = app.NetIP.String()
 		}
-		if rerr := s.router.SetAddr(req.ID, host, req.Port); rerr != nil {
-			// Roll back the spawn — half-registered apps are worse
-			// than a clean failure.
-			_ = s.sup.Stop(req.ID)
-			writeError(w, http.StatusBadRequest, CodeBadRequest,
+		if rerr := s.router.SetAddr(req.Id, host, req.Port); rerr != nil {
+			_ = s.sup.Stop(req.Id)
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest),
 				"dispatch.SetAddr: "+rerr.Error())
 			return
 		}
@@ -241,76 +201,63 @@ func (s *Server) handleSpawn(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		if serr := s.store.AddApp(cfg); serr != nil {
-			// Persistence failure → roll back the in-memory state so
-			// the operator sees a clean failure rather than a state
-			// where the daemon restart would forget this app.
-			_ = s.sup.Stop(req.ID)
+			_ = s.sup.Stop(req.Id)
 			if s.router != nil {
-				s.router.Remove(req.ID)
+				s.router.Remove(req.Id)
 			}
-			writeError(w, http.StatusInternalServerError, CodeInternal,
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
 				"state.AddApp: "+serr.Error())
 			return
 		}
 	}
 
-	writeJSON(w, http.StatusCreated, viewOf(app))
+	writeJSON(w, http.StatusCreated, appToView(app))
 }
 
-// mapSpawnError translates supervisor.Spawn errors into HTTP codes.
 func (s *Server) mapSpawnError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, supervisor.ErrAlreadyRunning):
-		writeError(w, http.StatusConflict, CodeAlreadyRunning, err.Error())
+		writeError(w, http.StatusConflict, string(apitypes.ErrorCodeAlreadyRunning), err.Error())
 	case errors.Is(err, supervisor.ErrInvalidID):
-		writeError(w, http.StatusBadRequest, CodeInvalidID, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeInvalidId), err.Error())
 	default:
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 	}
 }
 
-// handleList handles GET /v1/apps.
-func (s *Server) handleList(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) ListApps(w http.ResponseWriter, _ *http.Request) {
 	apps := s.sup.List()
-	views := make([]AppView, 0, len(apps))
+	views := make([]apitypes.AppView, 0, len(apps))
 	for _, a := range apps {
-		views = append(views, viewOf(a))
+		views = append(views, appToView(a))
 	}
-	writeJSON(w, http.StatusOK, ListResponse{Apps: views})
+	writeJSON(w, http.StatusOK, apitypes.ListAppsResponse{Apps: views})
 }
 
-// handleGet handles GET /v1/apps/{id}.
-func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
 	app := s.sup.Get(id)
 	if app == nil {
-		writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, viewOf(app))
+	writeJSON(w, http.StatusOK, appToView(app))
 }
 
-// handleStop handles DELETE /v1/apps/{id}.
-func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
 	if err := s.sup.Stop(id); err != nil {
 		if errors.Is(err, supervisor.ErrNotFound) {
-			writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal), err.Error())
 		return
 	}
 	if s.router != nil {
 		s.router.Remove(id)
 	}
 	if s.store != nil {
-		// Best-effort: a flush failure here means the next daemon
-		// restart will re-spawn an app the operator just stopped.
-		// Surfacing 500 to the operator gives them a chance to
-		// retry. The process is already gone either way.
 		if err := s.store.RemoveApp(id); err != nil {
-			writeError(w, http.StatusInternalServerError, CodeInternal,
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
 				"state.RemoveApp: "+err.Error())
 			return
 		}
@@ -318,134 +265,99 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleDeploy handles POST /v1/apps/{id}/deploy.
-func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var req DeployRequest
+func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
+	var req apitypes.DeployRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, "port is required")
-		return
-	}
-	rt, err := parseRuntime(req.Runtime)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
 		return
 	}
 
-	dcfg := supervisor.DeployConfig{
-		Config: supervisor.Config{
-			ID:              id,
-			Runtime:         rt,
-			Entry:           req.Entry,
-			Command:         req.Command,
-			Args:            req.Args,
-			Port:            req.Port,
-			Env:             req.Env,
-			CgroupLimits:    req.Limits.toCgroupLimits(),
-			NetIsolation:    req.NetIsolation,
-			Sandbox:         req.Sandbox.toSandboxSpec(),
-			HealthCheckPath: req.HealthCheckPath,
-			VolumeMounts:    toSupervisorVolumeMounts(req.VolumeMounts),
-		},
-		ReadyTimeout:      msOr(req.ReadyTimeoutMS, 0),
-		PollInterval:      msOr(req.PollIntervalMS, 0),
-		GracefulV1Timeout: msOr(req.GracefulV1MS, 0),
+	dcfg, err := deployToConfig(id, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		return
 	}
 
 	app, err := s.sup.Deploy(r.Context(), s.router, dcfg)
 	if err != nil {
 		switch {
 		case errors.Is(err, supervisor.ErrNotFound):
-			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), err.Error())
 		case errors.Is(err, supervisor.ErrPortConflict):
-			writeError(w, http.StatusConflict, CodePortConflict, err.Error())
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodePortConflict), err.Error())
 		case errors.Is(err, supervisor.ErrDeployUnhealthy):
-			writeError(w, http.StatusBadGateway, CodeUnhealthy, err.Error())
+			writeError(w, http.StatusBadGateway, string(apitypes.ErrorCodeDeployUnhealthy), err.Error())
 		case errors.Is(err, supervisor.ErrDeployConflict):
-			writeError(w, http.StatusConflict, CodeConflict, err.Error())
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodeConflict), err.Error())
 		default:
-			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		}
 		return
 	}
 	if s.store != nil {
-		// Deploy replaces the previous config (different port, env,
-		// runtime, etc). AddApp idempotently overwrites.
 		if serr := s.store.AddApp(dcfg.Config); serr != nil {
-			// Deploy has already swapped in-memory state to v2; we
-			// cannot meaningfully roll back without re-deploying v1.
-			// Log loudly via the response.
-			writeError(w, http.StatusInternalServerError, CodeInternal,
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
 				"state.AddApp (deploy): "+serr.Error())
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, viewOf(app))
+	writeJSON(w, http.StatusOK, appToView(app))
 }
 
-// handleRestart handles POST /v1/apps/{id}/restart. Body is optional;
-// an empty or "{}" body defaults timeout_ms to 0 (supervisor uses 10s).
-func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var req RestartRequest
+func (s *Server) RestartApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
+	var req apitypes.RestartRequest
 	if r.ContentLength > 0 || r.Body != http.NoBody {
 		if err := decodeJSONAllowEmpty(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 			return
 		}
 	}
 
-	app, err := s.sup.Restart(id, msOr(req.TimeoutMS, 0))
+	app, err := s.sup.Restart(id, msOrDuration(req.TimeoutMs, 0))
 	if err != nil {
 		if errors.Is(err, supervisor.ErrNotFound) {
-			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal), err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, viewOf(app))
+	writeJSON(w, http.StatusOK, appToView(app))
 }
 
-// handleReset handles POST /v1/apps/{id}/reset.
-func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) ResetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
 	if err := s.sup.Reset(id); err != nil {
 		switch {
 		case errors.Is(err, supervisor.ErrNotFound):
-			writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		case errors.Is(err, supervisor.ErrNotCrashLooping):
-			writeError(w, http.StatusConflict, CodeConflict, err.Error())
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodeConflict), err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal), err.Error())
 		}
 		return
 	}
 	if app := s.sup.Get(id); app != nil {
-		writeJSON(w, http.StatusOK, viewOf(app))
+		writeJSON(w, http.StatusOK, appToView(app))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleEvents handles GET /v1/apps/{id}/events. SSE stream of app
-// state transitions. The connection stays open until the client
-// disconnects or the request context is cancelled.
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) GetAppEvents(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
 	app := s.sup.Get(id)
 	if app == nil {
-		writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeError(w, http.StatusInternalServerError, CodeInternal, "streaming not supported")
+		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal), "streaming not supported")
 		return
 	}
 
@@ -478,19 +390,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleStats handles GET /v1/apps/{id}/stats. Returns a StatsView
-// with cgroup-tracked counters when the app was spawned with
-// CgroupLimits; otherwise CgroupEnabled is false and the response
-// carries only the ID + flag (caller can still read uptime /
-// restart_count from the AppView returned by Get).
-func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+func (s *Server) GetAppStats(w http.ResponseWriter, _ *http.Request, id apitypes.AppID) {
 	app := s.sup.Get(id)
 	if app == nil {
-		writeError(w, http.StatusNotFound, CodeNotFound, "app not found")
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
 		return
 	}
-	v := StatsView{ID: id}
+	v := apitypes.StatsView{Id: id}
 	cg := app.Cgroup()
 	if cg == nil {
 		writeJSON(w, http.StatusOK, v)
@@ -498,71 +404,168 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	v.CgroupEnabled = true
 
-	// Each read can fail independently (file missing during a
-	// brief restart window, transient permission). Collect the
-	// first error but keep going so the response surfaces whatever
-	// was readable.
 	var firstErr error
 	if cur, err := cg.MemoryCurrent(); err == nil {
-		v.MemoryCurrentBytes = cur
+		v.MemoryCurrentBytes = &cur
 	} else if firstErr == nil {
 		firstErr = err
 	}
 	if max, err := cg.MemoryMax(); err == nil {
-		v.MemoryMaxBytes = max
+		v.MemoryMaxBytes = &max
 	} else if firstErr == nil {
 		firstErr = err
 	}
 	if pc, err := cg.PidsCurrent(); err == nil {
-		v.PidsCurrent = pc
+		v.PidsCurrent = &pc
 	} else if firstErr == nil {
 		firstErr = err
 	}
 	if usec, err := cg.CPUUsageMicros(); err == nil {
-		v.CPUUsageUsec = usec
+		v.CpuUsageUsec = &usec
 	} else if firstErr == nil {
 		firstErr = err
 	}
 	if st, err := cg.Stats(); err == nil {
-		v.OOMKills = st.OOMKill
+		v.OomKills = &st.OOMKill
 	} else if firstErr == nil {
 		firstErr = err
 	}
 	if firstErr != nil {
-		v.ReadErr = firstErr.Error()
+		s := firstErr.Error()
+		v.ReadErr = &s
 	}
 	writeJSON(w, http.StatusOK, v)
 }
 
-// MaxRequestBodyBytes caps request body size at the decoder. Set to
-// 64 KiB — well above any realistic SpawnRequest (~few KiB for
-// command + args + env + volume_mounts) and far below what a single
-// slow-body attacker can use to OOM the daemon. Pentest review (H4):
-// without this cap, an attacker with admin token can stream a 10GiB
-// body and OOM creekd.
+func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.AppID, params apitypes.GetAppLogsParams) {
+	if app := s.sup.Get(id); app == nil {
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "app not found")
+		return
+	}
+
+	logPath := s.sup.AppLogPath(id)
+	if logPath == "" {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest),
+			"log capture disabled (set Supervisor.LogDir)")
+		return
+	}
+
+	tail := defaultTail
+	if params.Tail != nil {
+		if *params.Tail < 0 {
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "tail: must be >= 0")
+			return
+		}
+		if *params.Tail > maxTail {
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest),
+				fmt.Sprintf("tail: must be <= %d", maxTail))
+			return
+		}
+		tail = *params.Tail
+	}
+
+	follow := params.Follow != nil && *params.Follow == apitypes.GetAppLogsParamsFollowTrue
+
+	if follow {
+		streamLogs(w, r, logPath, tail)
+		return
+	}
+	tailLogs(w, logPath, tail)
+}
+
+func (s *Server) RegisterVolume(w http.ResponseWriter, r *http.Request) {
+	var req apitypes.VolumeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "decode: "+err.Error())
+		return
+	}
+	v := supervisor.Volume{
+		ID:          req.Id,
+		BackingPath: req.BackingPath,
+		ReadOnly:    derefBool(req.ReadOnly),
+	}
+	if err := s.sup.RegisterVolume(v); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrVolumeAlreadyExists):
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodeConflict), err.Error())
+		case errors.Is(err, supervisor.ErrVolumeBackingMissing),
+			errors.Is(err, supervisor.ErrVolumeRootRequired):
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		}
+		return
+	}
+	stored, _ := s.sup.Volume(req.Id)
+
+	if s.store != nil {
+		if serr := s.store.AddVolume(stored); serr != nil {
+			_ = s.sup.UnregisterVolume(req.Id, true)
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+				"state.AddVolume: "+serr.Error())
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, volumeToView(stored))
+}
+
+func (s *Server) ListVolumes(w http.ResponseWriter, _ *http.Request) {
+	vols := s.sup.Volumes()
+	out := apitypes.ListVolumesResponse{Volumes: make([]apitypes.VolumeView, 0, len(vols))}
+	for _, v := range vols {
+		out.Volumes = append(out.Volumes, volumeToView(v))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) GetVolume(w http.ResponseWriter, _ *http.Request, id apitypes.VolumeID) {
+	v, ok := s.sup.Volume(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), "volume not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeToView(v))
+}
+
+func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitypes.VolumeID, params apitypes.DeleteVolumeParams) {
+	force := params.Force != nil && *params.Force == apitypes.DeleteVolumeParamsForceTrue
+
+	if err := s.sup.UnregisterVolume(id, force); err != nil {
+		switch {
+		case errors.Is(err, supervisor.ErrVolumeNotFound):
+			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), err.Error())
+		case errors.Is(err, supervisor.ErrVolumeInUse):
+			writeError(w, http.StatusConflict, string(apitypes.ErrorCodeConflict), err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal), err.Error())
+		}
+		return
+	}
+
+	if s.store != nil {
+		if err := s.store.RemoveVolume(id); err != nil {
+			writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
+				"state.RemoveVolume: "+err.Error())
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- shared helpers ---
+
 const MaxRequestBodyBytes = 64 << 10
 
-// decodeJSON reads and JSON-decodes the request body into dst.
-// Rejects unknown fields so typos in client payloads surface as 400
-// rather than silent drops. Body is capped at MaxRequestBodyBytes
-// via http.MaxBytesReader so a slow / oversized body cannot OOM
-// the daemon.
 func decodeJSON(r *http.Request, dst any) error {
 	return decodeJSONInner(nil, r, dst, false)
 }
 
-// decodeJSONAllowEmpty is like decodeJSON but tolerates an empty body
-// — leaves dst at its zero value. Used by handlers (e.g. restart)
-// where the body is optional.
 func decodeJSONAllowEmpty(r *http.Request, dst any) error {
 	return decodeJSONInner(nil, r, dst, true)
 }
 
-// decodeJSONInner is the shared implementation. w is optional; when
-// non-nil http.MaxBytesReader wires the limit into the response
-// hijacker for a clean 413 surface. When nil (most current call
-// sites), the limit is still enforced — the caller just sees a
-// generic decode error on overflow.
 func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool) error {
 	if r.Body == nil {
 		if allowEmpty {
@@ -583,111 +586,12 @@ func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty
 	return nil
 }
 
-// handleVolumeRegister implements POST /v1/volumes.
-//
-// On success the supervisor has pinned an O_PATH fd of the backing
-// directory under VolumeRoot and applied MS_PRIVATE propagation.
-// The Volume is also persisted via state.Store so a daemon restart
-// re-registers it before any app re-spawn can reference it.
-func (s *Server) handleVolumeRegister(w http.ResponseWriter, r *http.Request) {
-	var req VolumeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, CodeBadRequest, "decode: "+err.Error())
-		return
-	}
-	v := supervisor.Volume{
-		ID:          req.ID,
-		BackingPath: req.BackingPath,
-		ReadOnly:    req.ReadOnly,
-	}
-	if err := s.sup.RegisterVolume(v); err != nil {
-		switch {
-		case errors.Is(err, supervisor.ErrVolumeAlreadyExists):
-			writeError(w, http.StatusConflict, CodeConflict, err.Error())
-		case errors.Is(err, supervisor.ErrVolumeBackingMissing),
-			errors.Is(err, supervisor.ErrVolumeRootRequired):
-			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
-		default:
-			writeError(w, http.StatusBadRequest, CodeBadRequest, err.Error())
-		}
-		return
-	}
-	stored, _ := s.sup.Volume(req.ID)
-
-	if s.store != nil {
-		if serr := s.store.AddVolume(stored); serr != nil {
-			_ = s.sup.UnregisterVolume(req.ID, true)
-			writeError(w, http.StatusInternalServerError, CodeInternal,
-				"state.AddVolume: "+serr.Error())
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusCreated, volumeViewOf(stored))
-}
-
-// handleVolumesList implements GET /v1/volumes.
-func (s *Server) handleVolumesList(w http.ResponseWriter, _ *http.Request) {
-	vols := s.sup.Volumes()
-	out := VolumesListResponse{Volumes: make([]VolumeView, 0, len(vols))}
-	for _, v := range vols {
-		out.Volumes = append(out.Volumes, volumeViewOf(v))
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// handleVolumeGet implements GET /v1/volumes/{id}.
-func (s *Server) handleVolumeGet(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	v, ok := s.sup.Volume(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, CodeNotFound, "volume not found")
-		return
-	}
-	writeJSON(w, http.StatusOK, volumeViewOf(v))
-}
-
-// handleVolumeDelete implements DELETE /v1/volumes/{id}. Refuses
-// when any registered app still references the volume; pass
-// ?force=true to override (the operator's "I know what I'm doing"
-// switch — does NOT unmount existing binds, those persist by
-// design).
-func (s *Server) handleVolumeDelete(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	force := r.URL.Query().Get("force") == "true"
-
-	if err := s.sup.UnregisterVolume(id, force); err != nil {
-		switch {
-		case errors.Is(err, supervisor.ErrVolumeNotFound):
-			writeError(w, http.StatusNotFound, CodeNotFound, err.Error())
-		case errors.Is(err, supervisor.ErrVolumeInUse):
-			writeError(w, http.StatusConflict, CodeConflict, err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, CodeInternal, err.Error())
-		}
-		return
-	}
-
-	if s.store != nil {
-		if err := s.store.RemoveVolume(id); err != nil {
-			writeError(w, http.StatusInternalServerError, CodeInternal,
-				"state.RemoveVolume: "+err.Error())
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// writeJSON writes status + JSON body.
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// writeError writes a JSON error response with the given status, code,
-// and message.
 func writeError(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, ErrorResponse{Code: code, Message: msg})
+	writeJSON(w, status, apitypes.ErrorResponse{Code: apitypes.ErrorCode(code), Error: msg})
 }

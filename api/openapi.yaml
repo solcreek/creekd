@@ -1,0 +1,713 @@
+openapi: "3.0.3"
+info:
+  title: creekd Admin API
+  version: 0.1.0
+  description: |
+    Process supervisor admin API for creekd.
+    All endpoints require Bearer token authentication when CREEKD_ADMIN_TOKEN is set.
+
+servers:
+  - url: http://localhost:9080
+    description: Default local admin address
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: apps
+    description: Application lifecycle management
+  - name: volumes
+    description: Persistent volume management
+
+paths:
+  /v1/apps:
+    post:
+      operationId: spawnApp
+      summary: Spawn a new supervised app
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpawnRequest"
+      responses:
+        "201":
+          description: App spawned successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: App already running or port conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listApps
+      summary: List all supervised apps
+      tags: [apps]
+      responses:
+        "200":
+          description: List of apps
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListAppsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/apps/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    get:
+      operationId: getApp
+      summary: Get app details
+      tags: [apps]
+      responses:
+        "200":
+          description: App details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: stopApp
+      summary: Stop and remove an app
+      tags: [apps]
+      responses:
+        "204":
+          description: App stopped
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/apps/{id}/deploy:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    post:
+      operationId: deployApp
+      summary: Blue-green deploy a new version
+      tags: [apps]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployRequest"
+      responses:
+        "200":
+          description: Deploy complete, new version live
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Port conflict or deploy already in progress
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: New version failed health check
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/apps/{id}/restart:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    post:
+      operationId: restartApp
+      summary: Restart an app
+      tags: [apps]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestartRequest"
+      responses:
+        "200":
+          description: App restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/apps/{id}/reset:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    post:
+      operationId: resetApp
+      summary: Reset a crash-looping app
+      tags: [apps]
+      responses:
+        "200":
+          description: App reset and restarted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppView"
+        "204":
+          description: Reset succeeded but app is no longer present
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: App is not crash-looping
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/apps/{id}/logs:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    get:
+      operationId: getAppLogs
+      summary: Read app log output
+      tags: [apps]
+      parameters:
+        - name: tail
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+            default: 100
+          description: Number of lines from the end
+        - name: follow
+          in: query
+          schema:
+            type: string
+            enum: ["true"]
+          description: Stream new lines as SSE events
+      responses:
+        "200":
+          description: |
+            Without follow: text/plain with the last N lines.
+            With follow=true: text/event-stream with initial tail then live updates.
+          content:
+            text/plain:
+              schema:
+                type: string
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/apps/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    get:
+      operationId: getAppEvents
+      summary: SSE stream of app state transitions
+      tags: [apps]
+      responses:
+        "200":
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/AppEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/apps/{id}/stats:
+    parameters:
+      - $ref: "#/components/parameters/AppID"
+
+    get:
+      operationId: getAppStats
+      summary: Get cgroup resource stats
+      tags: [apps]
+      responses:
+        "200":
+          description: Resource stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/volumes:
+    post:
+      operationId: registerVolume
+      summary: Register a persistent volume
+      tags: [volumes]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VolumeRequest"
+      responses:
+        "201":
+          description: Volume registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VolumeView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Volume already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    get:
+      operationId: listVolumes
+      summary: List all registered volumes
+      tags: [volumes]
+      responses:
+        "200":
+          description: List of volumes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListVolumesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/volumes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/VolumeID"
+
+    get:
+      operationId: getVolume
+      summary: Get volume details
+      tags: [volumes]
+      responses:
+        "200":
+          description: Volume details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VolumeView"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      operationId: deleteVolume
+      summary: Delete a volume
+      tags: [volumes]
+      parameters:
+        - name: force
+          in: query
+          schema:
+            type: string
+            enum: ["true"]
+          description: Force delete even if apps reference this volume
+      responses:
+        "204":
+          description: Volume deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Volume in use by running apps
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: CREEKD_ADMIN_TOKEN
+
+  parameters:
+    AppID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+        minLength: 2
+        maxLength: 63
+      description: App identifier (DNS-label format)
+
+    VolumeID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Volume identifier
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Runtime:
+      type: string
+      enum: [bun, node, deno]
+
+    ErrorCode:
+      type: string
+      enum:
+        - bad_request
+        - unauthorized
+        - not_found
+        - conflict
+        - already_running
+        - port_conflict
+        - invalid_id
+        - invalid_runtime
+        - deploy_unhealthy
+        - internal
+
+    ErrorResponse:
+      type: object
+      required: [code, error]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        error:
+          type: string
+
+    Limits:
+      type: object
+      properties:
+        memory_high_bytes:
+          type: integer
+          format: int64
+        memory_max_bytes:
+          type: integer
+          format: int64
+        pids_max:
+          type: integer
+          format: int64
+        cpu_quota_us:
+          type: integer
+          format: int64
+        cpu_period_us:
+          type: integer
+          format: int64
+
+    Sandbox:
+      type: object
+      properties:
+        pid_namespace:
+          type: boolean
+        uts_namespace:
+          type: boolean
+        ipc_namespace:
+          type: boolean
+        mount_namespace:
+          type: boolean
+        user_namespace:
+          type: boolean
+        no_new_privs:
+          type: boolean
+        chroot:
+          type: string
+
+    VolumeMount:
+      type: object
+      required: [volume_id, target]
+      properties:
+        volume_id:
+          type: string
+        sub_path:
+          type: string
+        target:
+          type: string
+        read_only:
+          type: boolean
+
+    SpawnRequest:
+      type: object
+      required: [id, port]
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+          minLength: 2
+          maxLength: 63
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+        entry:
+          type: string
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        env:
+          type: array
+          items:
+            type: string
+          description: "KEY=VALUE pairs"
+        limits:
+          $ref: "#/components/schemas/Limits"
+        net_isolation:
+          type: boolean
+        sandbox:
+          $ref: "#/components/schemas/Sandbox"
+        health_check_path:
+          type: string
+        volume_mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeMount"
+
+    DeployRequest:
+      type: object
+      required: [port]
+      properties:
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+        entry:
+          type: string
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        env:
+          type: array
+          items:
+            type: string
+        limits:
+          $ref: "#/components/schemas/Limits"
+        net_isolation:
+          type: boolean
+        sandbox:
+          $ref: "#/components/schemas/Sandbox"
+        health_check_path:
+          type: string
+        volume_mounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeMount"
+        ready_timeout_ms:
+          type: integer
+          format: int64
+        poll_interval_ms:
+          type: integer
+          format: int64
+        graceful_v1_ms:
+          type: integer
+          format: int64
+
+    RestartRequest:
+      type: object
+      properties:
+        timeout_ms:
+          type: integer
+          format: int64
+
+    AppView:
+      type: object
+      required: [id, command, port, status, pid, uptime_ms, restart_count, health_failures]
+      properties:
+        id:
+          type: string
+        runtime:
+          $ref: "#/components/schemas/Runtime"
+        command:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        env:
+          type: array
+          items:
+            type: string
+        port:
+          type: integer
+        status:
+          type: string
+          # Values mirror supervisor.Status.String() output. The
+          # crash-looping spelling (hyphen) is the wire format already
+          # used by Prometheus metrics and the audit log; the spec
+          # follows the code rather than the other way around.
+          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
+        pid:
+          type: integer
+        uptime_ms:
+          type: integer
+          format: int64
+        restart_count:
+          type: integer
+        health_failures:
+          type: integer
+          format: int64
+        net_ip:
+          type: string
+
+    ListAppsResponse:
+      type: object
+      required: [apps]
+      properties:
+        apps:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppView"
+
+    StatsView:
+      type: object
+      required: [id, cgroup_enabled]
+      properties:
+        id:
+          type: string
+        cgroup_enabled:
+          type: boolean
+        memory_current_bytes:
+          type: integer
+          format: int64
+        memory_max_bytes:
+          type: integer
+          format: int64
+        pids_current:
+          type: integer
+          format: int64
+        cpu_usage_usec:
+          type: integer
+          format: int64
+        oom_kills:
+          type: integer
+          format: int64
+        read_err:
+          type: string
+
+    EventType:
+      type: string
+      enum: [status_changed, ready, health_failure, restart, oom_kill]
+
+    AppEvent:
+      type: object
+      required: [type, app_id, ts]
+      properties:
+        type:
+          $ref: "#/components/schemas/EventType"
+        app_id:
+          type: string
+        status:
+          type: string
+        pid:
+          type: integer
+        port:
+          type: integer
+        url:
+          type: string
+        restart_count:
+          type: integer
+        health_failures:
+          type: integer
+          format: int64
+        ts:
+          type: string
+          format: date-time
+
+    VolumeRequest:
+      type: object
+      required: [id, backing_path]
+      properties:
+        id:
+          type: string
+        backing_path:
+          type: string
+        read_only:
+          type: boolean
+
+    VolumeView:
+      type: object
+      required: [id, backing_path]
+      properties:
+        id:
+          type: string
+        backing_path:
+          type: string
+        read_only:
+          type: boolean
+        fs_type:
+          type: string
+
+    ListVolumesResponse:
+      type: object
+      required: [volumes]
+      properties:
+        volumes:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeView"

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/apitypes"
 )
 
 // DefaultServer is used when Config.Server is empty.
@@ -27,15 +27,8 @@ const DefaultTimeout = 30 * time.Second
 // Config bundles the runtime knobs for a Client. All fields are
 // optional; New() fills in defaults.
 type Config struct {
-	// Server is the base URL of the admin endpoint, e.g.
-	// "http://127.0.0.1:9080". Trailing slashes are stripped.
-	Server string
-	// Token is the bearer token. Empty disables the Authorization
-	// header — only safe against an unauthenticated localhost
-	// listener.
-	Token string
-	// HTTPClient lets callers swap in a custom transport (TLS pinning,
-	// proxy config). Defaults to a stdlib client with DefaultTimeout.
+	Server     string
+	Token      string
 	HTTPClient *http.Client
 }
 
@@ -88,12 +81,12 @@ func IsNotFound(err error) bool {
 // IsAlreadyRunning reports whether err indicates the app already exists.
 func IsAlreadyRunning(err error) bool {
 	var ae *APIError
-	return errors.As(err, &ae) && ae.Code == "already_running"
+	return errors.As(err, &ae) && ae.Code == string(apitypes.ErrorCodeAlreadyRunning)
 }
 
 // List fetches all registered apps.
-func (c *Client) List(ctx context.Context) ([]adminapi.AppView, error) {
-	var resp adminapi.ListResponse
+func (c *Client) List(ctx context.Context) ([]apitypes.AppView, error) {
+	var resp apitypes.ListAppsResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/apps", nil, &resp); err != nil {
 		return nil, err
 	}
@@ -101,8 +94,8 @@ func (c *Client) List(ctx context.Context) ([]adminapi.AppView, error) {
 }
 
 // Get fetches one app by ID.
-func (c *Client) Get(ctx context.Context, id string) (*adminapi.AppView, error) {
-	var v adminapi.AppView
+func (c *Client) Get(ctx context.Context, id string) (*apitypes.AppView, error) {
+	var v apitypes.AppView
 	if err := c.do(ctx, http.MethodGet, "/v1/apps/"+url.PathEscape(id), nil, &v); err != nil {
 		return nil, err
 	}
@@ -110,23 +103,22 @@ func (c *Client) Get(ctx context.Context, id string) (*adminapi.AppView, error) 
 }
 
 // Spawn creates a new app. Returns the AppView from the 201 response.
-func (c *Client) Spawn(ctx context.Context, req adminapi.SpawnRequest) (*adminapi.AppView, error) {
-	var v adminapi.AppView
+func (c *Client) Spawn(ctx context.Context, req apitypes.SpawnRequest) (*apitypes.AppView, error) {
+	var v apitypes.AppView
 	if err := c.do(ctx, http.MethodPost, "/v1/apps", req, &v); err != nil {
 		return nil, err
 	}
 	return &v, nil
 }
 
-// Stop deletes an app. Server returns 204 No Content; the client
-// surfaces success as nil error.
+// Stop deletes an app.
 func (c *Client) Stop(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/apps/"+url.PathEscape(id), nil, nil)
 }
 
 // Deploy issues a blue-green deployment for an existing app.
-func (c *Client) Deploy(ctx context.Context, id string, req adminapi.DeployRequest) (*adminapi.AppView, error) {
-	var v adminapi.AppView
+func (c *Client) Deploy(ctx context.Context, id string, req apitypes.DeployRequest) (*apitypes.AppView, error) {
+	var v apitypes.AppView
 	if err := c.do(ctx, http.MethodPost,
 		"/v1/apps/"+url.PathEscape(id)+"/deploy", req, &v); err != nil {
 		return nil, err
@@ -135,8 +127,8 @@ func (c *Client) Deploy(ctx context.Context, id string, req adminapi.DeployReque
 }
 
 // Restart cycles an app's process in place.
-func (c *Client) Restart(ctx context.Context, id string, req adminapi.RestartRequest) (*adminapi.AppView, error) {
-	var v adminapi.AppView
+func (c *Client) Restart(ctx context.Context, id string, req apitypes.RestartRequest) (*apitypes.AppView, error) {
+	var v apitypes.AppView
 	if err := c.do(ctx, http.MethodPost,
 		"/v1/apps/"+url.PathEscape(id)+"/restart", req, &v); err != nil {
 		return nil, err
@@ -145,8 +137,8 @@ func (c *Client) Restart(ctx context.Context, id string, req adminapi.RestartReq
 }
 
 // Reset clears the crash-loop state of a suspended app.
-func (c *Client) Reset(ctx context.Context, id string) (*adminapi.AppView, error) {
-	var v adminapi.AppView
+func (c *Client) Reset(ctx context.Context, id string) (*apitypes.AppView, error) {
+	var v apitypes.AppView
 	if err := c.do(ctx, http.MethodPost,
 		"/v1/apps/"+url.PathEscape(id)+"/reset", struct{}{}, &v); err != nil {
 		return nil, err
@@ -154,12 +146,9 @@ func (c *Client) Reset(ctx context.Context, id string) (*adminapi.AppView, error
 	return &v, nil
 }
 
-// Stats fetches the per-app resource snapshot — cgroup-tracked
-// memory/CPU/pids counters plus the OOM kill counter when cgroup
-// enforcement is on. Apps spawned without CgroupLimits get
-// CgroupEnabled=false with zeroed counters.
-func (c *Client) Stats(ctx context.Context, id string) (*adminapi.StatsView, error) {
-	var v adminapi.StatsView
+// Stats fetches the per-app resource snapshot.
+func (c *Client) Stats(ctx context.Context, id string) (*apitypes.StatsView, error) {
+	var v apitypes.StatsView
 	if err := c.do(ctx, http.MethodGet,
 		"/v1/apps/"+url.PathEscape(id)+"/stats", nil, &v); err != nil {
 		return nil, err
@@ -168,7 +157,6 @@ func (c *Client) Stats(ctx context.Context, id string) (*adminapi.StatsView, err
 }
 
 // LogsTail fetches the last n lines of an app's log as plain text.
-// Returns the raw response body, one JSON record per line.
 func (c *Client) LogsTail(ctx context.Context, id string, n int) (string, error) {
 	q := url.Values{}
 	if n > 0 {
@@ -197,8 +185,6 @@ func (c *Client) LogsTail(ctx context.Context, id string, n int) (string, error)
 	return string(body), nil
 }
 
-// do is the common request path: marshal body → send → check status
-// → unmarshal into out (or skip if out is nil / 204).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
@@ -225,8 +211,6 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
-// newRequest builds an *http.Request, marshalling body to JSON when
-// non-nil and attaching the bearer token + Content-Type headers.
 func (c *Client) newRequest(ctx context.Context, method, path string, body any) (*http.Request, error) {
 	var reader io.Reader
 	if body != nil {
@@ -249,9 +233,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 	return req, nil
 }
 
-// Events opens an SSE connection to /v1/apps/{id}/events and calls fn
-// for each event. Blocks until the context is cancelled or the server
-// closes the connection. Returns nil on clean context cancellation.
+// Events opens an SSE connection to /v1/apps/{id}/events.
 func (c *Client) Events(ctx context.Context, id string, fn func(line []byte) error) error {
 	req, err := c.newRequest(ctx, "GET", "/v1/apps/"+url.PathEscape(id)+"/events", nil)
 	if err != nil {
@@ -286,12 +268,10 @@ func (c *Client) Events(ctx context.Context, id string, fn func(line []byte) err
 	return nil
 }
 
-// parseAPIError unmarshals the server's ErrorResponse if possible;
-// otherwise wraps the raw body.
 func parseAPIError(status int, body []byte) error {
-	var er adminapi.ErrorResponse
-	if json.Unmarshal(body, &er) == nil && (er.Code != "" || er.Message != "") {
-		return &APIError{Status: status, Code: er.Code, Message: er.Message}
+	var er apitypes.ErrorResponse
+	if json.Unmarshal(body, &er) == nil && (er.Code != "" || er.Error != "") {
+		return &APIError{Status: status, Code: string(er.Code), Message: er.Error}
 	}
 	return &APIError{Status: status, Message: strings.TrimSpace(string(body))}
 }

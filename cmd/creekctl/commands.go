@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/solcreek/creekd/api/manifest"
-	"github.com/solcreek/creekd/internal/adminapi"
 	"github.com/solcreek/creekd/internal/adminclient"
+	"github.com/solcreek/creekd/internal/apitypes"
 )
 
 // subcommand is one CLI verb. Run parses argv (minus the verb itself)
@@ -137,7 +137,7 @@ func (lf *limitsFlags) register(fs *flag.FlagSet) {
 
 // toAPI returns the wire-format Limits, or nil when every field is
 // zero/unset (which the API treats as "no cgroup at all").
-func (lf *limitsFlags) toAPI() (*adminapi.Limits, error) {
+func (lf *limitsFlags) toAPI() (*apitypes.Limits, error) {
 	memHigh, err := parseSize(lf.memoryHigh)
 	if err != nil {
 		return nil, fmt.Errorf("--memory-high: %w", err)
@@ -149,12 +149,12 @@ func (lf *limitsFlags) toAPI() (*adminapi.Limits, error) {
 	if memHigh == 0 && memMax == 0 && lf.pidsMax == 0 && lf.cpuQuota == 0 {
 		return nil, nil
 	}
-	return &adminapi.Limits{
-		MemoryHighBytes: memHigh,
-		MemoryMaxBytes:  memMax,
-		PidsMax:         lf.pidsMax,
-		CPUQuotaUS:      lf.cpuQuota,
-		CPUPeriodUS:     lf.cpuPeriod,
+	return &apitypes.Limits{
+		MemoryHighBytes: ptr(memHigh),
+		MemoryMaxBytes:  ptr(memMax),
+		PidsMax:         ptr(lf.pidsMax),
+		CpuQuotaUs:      ptr(lf.cpuQuota),
+		CpuPeriodUs:     ptr(lf.cpuPeriod),
 	}, nil
 }
 
@@ -181,18 +181,18 @@ func (sf *sandboxFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&sf.chroot, "chroot", "", "chroot the child into this directory (path must be absolute)")
 }
 
-func (sf *sandboxFlags) toAPI() *adminapi.Sandbox {
+func (sf *sandboxFlags) toAPI() *apitypes.Sandbox {
 	if !sf.pid && !sf.uts && !sf.ipc && !sf.mount && !sf.user && !sf.noNewPrivs && sf.chroot == "" {
 		return nil
 	}
-	return &adminapi.Sandbox{
-		PIDNamespace:   sf.pid,
-		UTSNamespace:   sf.uts,
-		IPCNamespace:   sf.ipc,
-		MountNamespace: sf.mount,
-		UserNamespace:  sf.user,
-		NoNewPrivs:     sf.noNewPrivs,
-		Chroot:         sf.chroot,
+	return &apitypes.Sandbox{
+		PidNamespace:   ptr(sf.pid),
+		UtsNamespace:   ptr(sf.uts),
+		IpcNamespace:   ptr(sf.ipc),
+		MountNamespace: ptr(sf.mount),
+		UserNamespace:  ptr(sf.user),
+		NoNewPrivs:     ptr(sf.noNewPrivs),
+		Chroot:         ptr(sf.chroot),
 	}
 }
 
@@ -356,29 +356,29 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	var req adminapi.SpawnRequest
+	var req apitypes.SpawnRequest
 	if *jsonInput != "" {
 		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
 			return fmt.Errorf("--json-input: %w", err)
 		}
-		req.ID = id
+		req.Id = id
 	} else {
 		limits, err := lf.toAPI()
 		if err != nil {
 			return err
 		}
-		req = adminapi.SpawnRequest{
-			ID:              id,
-			Command:         *command,
-			Entry:           *entry,
-			Runtime:         *runtimeArg,
-			Args:            args,
-			Env:             env,
+		req = apitypes.SpawnRequest{
+			Id:              id,
+			Command:         ptr(*command),
+			Entry:           ptr(*entry),
+			Runtime:         ptrRuntime(*runtimeArg),
+			Args:            ptrSlice(args),
+			Env:             ptrSlice(env),
 			Port:            *port,
 			Limits:          limits,
-			NetIsolation:    *netIso,
+			NetIsolation:    ptr(*netIso),
 			Sandbox:         sf.toAPI(),
-			HealthCheckPath: *healthPath,
+			HealthCheckPath: ptr(*healthPath),
 		}
 		if *fromPath != "" {
 			m, projectDir, err := manifest.Load(*fromPath)
@@ -389,10 +389,10 @@ func runUp(ctx context.Context, w io.Writer, argv []string) error {
 		}
 	}
 	if err := validateStringInputs(
-		"command", req.Command,
-		"entry", req.Entry,
-		"runtime", req.Runtime,
-		"health-path", req.HealthCheckPath,
+		"command", derefStr(req.Command),
+		"entry", derefStr(req.Entry),
+		"runtime", derefRuntimeStr(req.Runtime),
+		"health-path", derefStr(req.HealthCheckPath),
 	); err != nil {
 		return err
 	}
@@ -444,29 +444,29 @@ func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	var req adminapi.SpawnRequest
+	var req apitypes.SpawnRequest
 	if *jsonInput != "" {
 		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
 			return fmt.Errorf("--json-input: %w", err)
 		}
-		req.ID = id
+		req.Id = id
 	} else {
 		limits, err := lf.toAPI()
 		if err != nil {
 			return err
 		}
-		req = adminapi.SpawnRequest{
-			ID:              id,
-			Command:         *command,
-			Entry:           *entry,
-			Runtime:         *runtimeArg,
-			Args:            args,
-			Env:             env,
+		req = apitypes.SpawnRequest{
+			Id:              id,
+			Command:         ptr(*command),
+			Entry:           ptr(*entry),
+			Runtime:         ptrRuntime(*runtimeArg),
+			Args:            ptrSlice(args),
+			Env:             ptrSlice(env),
 			Port:            *port,
 			Limits:          limits,
-			NetIsolation:    *netIso,
+			NetIsolation:    ptr(*netIso),
 			Sandbox:         sf.toAPI(),
-			HealthCheckPath: *healthPath,
+			HealthCheckPath: ptr(*healthPath),
 		}
 		if *fromPath != "" {
 			m, projectDir, err := manifest.Load(*fromPath)
@@ -477,10 +477,10 @@ func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
 		}
 	}
 	if err := validateStringInputs(
-		"command", req.Command,
-		"entry", req.Entry,
-		"runtime", req.Runtime,
-		"health-path", req.HealthCheckPath,
+		"command", derefStr(req.Command),
+		"entry", derefStr(req.Entry),
+		"runtime", derefRuntimeStr(req.Runtime),
+		"health-path", derefStr(req.HealthCheckPath),
 	); err != nil {
 		return err
 	}
@@ -541,7 +541,7 @@ func runRestart(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	cf.resolveJSON()
-	app, err := cf.client().Restart(ctx, id, adminapi.RestartRequest{TimeoutMS: *timeoutMS})
+	app, err := cf.client().Restart(ctx, id, apitypes.RestartRequest{TimeoutMs: ptr(*timeoutMS)})
 	if err != nil {
 		return err
 	}
@@ -609,7 +609,7 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
-	var req adminapi.DeployRequest
+	var req apitypes.DeployRequest
 	if *jsonInput != "" {
 		if err := json.Unmarshal([]byte(*jsonInput), &req); err != nil {
 			return fmt.Errorf("--json-input: %w", err)
@@ -619,18 +619,18 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		if err != nil {
 			return err
 		}
-		req = adminapi.DeployRequest{
-			Command:         *command,
-			Entry:           *entry,
-			Runtime:         *runtimeArg,
-			Args:            args,
-			Env:             env,
+		req = apitypes.DeployRequest{
+			Command:         ptr(*command),
+			Entry:           ptr(*entry),
+			Runtime:         ptrRuntime(*runtimeArg),
+			Args:            ptrSlice(args),
+			Env:             ptrSlice(env),
 			Port:            *port,
 			Limits:          limits,
-			ReadyTimeoutMS:  *readyMS,
-			NetIsolation:    *netIso,
+			ReadyTimeoutMs:  ptr(*readyMS),
+			NetIsolation:    ptr(*netIso),
 			Sandbox:         sf.toAPI(),
-			HealthCheckPath: *healthPath,
+			HealthCheckPath: ptr(*healthPath),
 		}
 		if *fromPath != "" {
 			m, projectDir, err := manifest.Load(*fromPath)
@@ -641,10 +641,10 @@ func runDeploy(ctx context.Context, w io.Writer, argv []string) error {
 		}
 	}
 	if err := validateStringInputs(
-		"command", req.Command,
-		"entry", req.Entry,
-		"runtime", req.Runtime,
-		"health-path", req.HealthCheckPath,
+		"command", derefStr(req.Command),
+		"entry", derefStr(req.Entry),
+		"runtime", derefRuntimeStr(req.Runtime),
+		"health-path", derefStr(req.HealthCheckPath),
 	); err != nil {
 		return err
 	}
@@ -716,7 +716,7 @@ func runRelease(ctx context.Context, cf commonFlags, appID, command string, time
 	if err != nil {
 		return nil, fmt.Errorf("release: cannot get app env: %w", err)
 	}
-	cmd.Env = append(os.Environ(), app.Env...)
+	cmd.Env = append(os.Environ(), derefSlice(app.Env)...)
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PORT=%d", app.Port))
 
 	out, err := cmd.CombinedOutput()
@@ -806,7 +806,7 @@ func runExec(ctx context.Context, w io.Writer, argv []string) error {
 
 	// Get the app's env vars from the running supervisor
 	client := cf.client()
-	var app *adminapi.AppView
+	var app *apitypes.AppView
 	var err error
 
 	if *appID != "" {
@@ -827,7 +827,7 @@ func runExec(ctx context.Context, w io.Writer, argv []string) error {
 
 	// Build env: inherit current env + inject app env vars (DATABASE_URL, etc)
 	env := os.Environ()
-	env = append(env, app.Env...)
+	env = append(env, derefSlice(app.Env)...)
 	env = append(env, fmt.Sprintf("PORT=%d", app.Port))
 
 	// Execute the command
@@ -1106,17 +1106,17 @@ func writeJSON(w io.Writer, v any) error {
 }
 
 // writeAppTable renders a list of apps as a tab-aligned table.
-func writeAppTable(w io.Writer, apps []adminapi.AppView) error {
+func writeAppTable(w io.Writer, apps []apitypes.AppView) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tSTATUS\tPID\tPORT\tNET_IP\tUPTIME_MS\tRESTARTS\tHEALTH_FAILS")
 	for _, a := range apps {
-		netIP := a.NetIP
+		netIP := derefStr(a.NetIp)
 		if netIP == "" {
 			netIP = "-"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%d\t%d\t%d\n",
-			a.ID, a.Status, a.PID, a.Port, netIP,
-			a.UptimeMS, a.RestartCount, a.HealthFailures)
+			a.Id, a.Status, a.Pid, a.Port, netIP,
+			a.UptimeMs, a.RestartCount, a.HealthFailures)
 	}
 	return tw.Flush()
 }
@@ -1124,26 +1124,27 @@ func writeAppTable(w io.Writer, apps []adminapi.AppView) error {
 // writeStatsDetail renders a StatsView as aligned key/value pairs.
 // Bytes are shown in MiB and CPU usage in milliseconds for human
 // readability; the JSON form still carries raw integers for tools.
-func writeStatsDetail(w io.Writer, s *adminapi.StatsView) error {
+func writeStatsDetail(w io.Writer, s *apitypes.StatsView) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "id\t%s\n", s.ID)
+	fmt.Fprintf(tw, "id\t%s\n", s.Id)
 	fmt.Fprintf(tw, "cgroup_enabled\t%t\n", s.CgroupEnabled)
 	if !s.CgroupEnabled {
 		fmt.Fprintln(tw, "note\t(spawn the app with cgroup limits to see resource counters)")
 		return tw.Flush()
 	}
-	if s.MemoryMaxBytes > 0 {
+	memMax := derefInt64(s.MemoryMaxBytes)
+	if memMax > 0 {
 		fmt.Fprintf(tw, "memory_used\t%s / %s\n",
-			humanBytes(s.MemoryCurrentBytes), humanBytes(s.MemoryMaxBytes))
+			humanBytes(derefInt64(s.MemoryCurrentBytes)), humanBytes(memMax))
 	} else {
 		fmt.Fprintf(tw, "memory_used\t%s (unlimited)\n",
-			humanBytes(s.MemoryCurrentBytes))
+			humanBytes(derefInt64(s.MemoryCurrentBytes)))
 	}
-	fmt.Fprintf(tw, "pids_current\t%d\n", s.PidsCurrent)
-	fmt.Fprintf(tw, "cpu_total\t%s\n", humanMicros(s.CPUUsageUsec))
-	fmt.Fprintf(tw, "oom_kills\t%d\n", s.OOMKills)
-	if s.ReadErr != "" {
-		fmt.Fprintf(tw, "read_err\t%s\n", s.ReadErr)
+	fmt.Fprintf(tw, "pids_current\t%d\n", derefInt64(s.PidsCurrent))
+	fmt.Fprintf(tw, "cpu_total\t%s\n", humanMicros(derefInt64(s.CpuUsageUsec)))
+	fmt.Fprintf(tw, "oom_kills\t%d\n", derefInt64(s.OomKills))
+	if readErr := derefStr(s.ReadErr); readErr != "" {
+		fmt.Fprintf(tw, "read_err\t%s\n", readErr)
 	}
 	return tw.Flush()
 }
@@ -1176,18 +1177,18 @@ func humanMicros(us int64) string {
 }
 
 // writeAppDetail renders a single app as aligned key/value pairs.
-func writeAppDetail(w io.Writer, a *adminapi.AppView) error {
+func writeAppDetail(w io.Writer, a *apitypes.AppView) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fields := [][2]string{
-		{"id", a.ID},
-		{"status", a.Status},
-		{"pid", fmt.Sprintf("%d", a.PID)},
+		{"id", a.Id},
+		{"status", string(a.Status)},
+		{"pid", fmt.Sprintf("%d", a.Pid)},
 		{"port", fmt.Sprintf("%d", a.Port)},
 		{"command", a.Command},
-		{"args", strings.Join(a.Args, " ")},
-		{"runtime", a.Runtime},
-		{"net_ip", a.NetIP},
-		{"uptime_ms", fmt.Sprintf("%d", a.UptimeMS)},
+		{"args", strings.Join(derefSlice(a.Args), " ")},
+		{"runtime", derefRuntimeStr(a.Runtime)},
+		{"net_ip", derefStr(a.NetIp)},
+		{"uptime_ms", fmt.Sprintf("%d", a.UptimeMs)},
 		{"restart_count", fmt.Sprintf("%d", a.RestartCount)},
 		{"health_failures", fmt.Sprintf("%d", a.HealthFailures)},
 	}
@@ -1198,4 +1199,60 @@ func writeAppDetail(w io.Writer, a *adminapi.AppView) error {
 		fmt.Fprintf(tw, "%s\t%s\n", f[0], f[1])
 	}
 	return tw.Flush()
+}
+
+// --- pointer helpers for apitypes -----------------------------------
+
+// ptr returns a pointer to v.
+func ptr[T any](v T) *T { return &v }
+
+// ptrSlice returns a *[]string from a []string. Returns nil for empty/nil
+// slices so omitempty works as expected.
+func ptrSlice(s []string) *[]string {
+	if len(s) == 0 {
+		return nil
+	}
+	return &s
+}
+
+// ptrRuntime converts a raw runtime string to *apitypes.Runtime.
+// Returns nil for empty strings so omitempty elides the field.
+func ptrRuntime(s string) *apitypes.Runtime {
+	if s == "" {
+		return nil
+	}
+	r := apitypes.Runtime(s)
+	return &r
+}
+
+// derefStr returns the string behind p, or "" if p is nil.
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// derefRuntimeStr converts *apitypes.Runtime to a plain string.
+func derefRuntimeStr(p *apitypes.Runtime) string {
+	if p == nil {
+		return ""
+	}
+	return string(*p)
+}
+
+// derefInt64 returns the int64 behind p, or 0 if p is nil.
+func derefInt64(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// derefSlice returns the []string behind p, or nil if p is nil.
+func derefSlice(p *[]string) []string {
+	if p == nil {
+		return nil
+	}
+	return *p
 }

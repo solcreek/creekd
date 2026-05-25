@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/solcreek/creekd/api/manifest"
-	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/apitypes"
 )
 
 // applyManifestTo seeds the SpawnRequest from a manifest. CLI flags
@@ -23,21 +23,24 @@ import (
 //
 // projectDir is the manifest's project root, used to resolve the
 // relative `entrypoint` into an absolute path.
-func applyManifestTo(req *adminapi.SpawnRequest, m *manifest.Manifest, projectDir string) {
-	if req.Runtime == "" {
-		req.Runtime = string(m.Runtime)
+func applyManifestTo(req *apitypes.SpawnRequest, m *manifest.Manifest, projectDir string) {
+	if req.Runtime == nil || string(*req.Runtime) == "" {
+		r := apitypes.Runtime(m.Runtime)
+		req.Runtime = &r
 	}
-	if req.Entry == "" {
-		req.Entry = filepath.Join(projectDir, m.Entrypoint)
+	if req.Entry == nil || *req.Entry == "" {
+		entry := filepath.Join(projectDir, m.Entrypoint)
+		req.Entry = &entry
 	}
 	if req.Port == 0 {
 		req.Port = m.Port
 	}
-	if len(req.Env) == 0 && len(m.Env) > 0 {
-		req.Env = append([]string(nil), m.Env...)
+	if (req.Env == nil || len(*req.Env) == 0) && len(m.Env) > 0 {
+		env := append([]string(nil), m.Env...)
+		req.Env = &env
 	}
-	if req.HealthCheckPath == "" {
-		req.HealthCheckPath = m.HealthCheckPath
+	if (req.HealthCheckPath == nil || *req.HealthCheckPath == "") && m.HealthCheckPath != "" {
+		req.HealthCheckPath = ptr(m.HealthCheckPath)
 	}
 }
 
@@ -48,20 +51,23 @@ func applyManifestTo(req *adminapi.SpawnRequest, m *manifest.Manifest, projectDi
 // instead of a generic over both request types because the
 // duplication is six lines and avoiding it would require an
 // interface or a wrapper that obscures the CLI flag precedence rule.
-func applyManifestToDeploy(req *adminapi.DeployRequest, m *manifest.Manifest, projectDir string) {
-	if req.Runtime == "" {
-		req.Runtime = string(m.Runtime)
+func applyManifestToDeploy(req *apitypes.DeployRequest, m *manifest.Manifest, projectDir string) {
+	if req.Runtime == nil || string(*req.Runtime) == "" {
+		r := apitypes.Runtime(m.Runtime)
+		req.Runtime = &r
 	}
-	if req.Entry == "" {
-		req.Entry = filepath.Join(projectDir, m.Entrypoint)
+	if req.Entry == nil || *req.Entry == "" {
+		entry := filepath.Join(projectDir, m.Entrypoint)
+		req.Entry = &entry
 	}
 	if req.Port == 0 {
 		req.Port = m.Port
 	}
-	if len(req.Env) == 0 && len(m.Env) > 0 {
-		req.Env = append([]string(nil), m.Env...)
+	if (req.Env == nil || len(*req.Env) == 0) && len(m.Env) > 0 {
+		env := append([]string(nil), m.Env...)
+		req.Env = &env
 	}
-	if req.HealthCheckPath == "" {
-		req.HealthCheckPath = m.HealthCheckPath
+	if (req.HealthCheckPath == nil || *req.HealthCheckPath == "") && m.HealthCheckPath != "" {
+		req.HealthCheckPath = ptr(m.HealthCheckPath)
 	}
 }

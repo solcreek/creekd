@@ -13,13 +13,11 @@ import (
 	"time"
 
 	"github.com/solcreek/creekd/internal/adminapi"
+	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/dispatch"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
-// newTestStack wires the same supervisor + adminapi the daemon uses,
-// fronted by httptest.NewServer so the client can issue real HTTP
-// calls. Returns the client + supervisor (for assertions) + cleanup.
 func newTestStack(t *testing.T, token string) (*Client, *supervisor.Supervisor, *httptest.Server) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -42,7 +40,6 @@ func newTestStack(t *testing.T, token string) (*Client, *supervisor.Supervisor, 
 	return client, sup, httpSrv
 }
 
-// freeTCPPort returns an OS-allocated free port.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -52,6 +49,8 @@ func freeTCPPort(t *testing.T) int {
 	defer l.Close()
 	return l.Addr().(*net.TCPAddr).Port
 }
+
+func ptr[T any](v T) *T { return &v }
 
 func TestNewAppliesDefaults(t *testing.T) {
 	c := New(Config{})
@@ -82,13 +81,13 @@ func TestSpawnGetStop(t *testing.T) {
 	c, sup, _ := newTestStack(t, "")
 	port := freeTCPPort(t)
 
-	got, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "app1", Command: "sleep", Args: []string{"30"}, Port: port,
+	got, err := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "app1", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
-	if got.ID != "app1" || got.Port != port {
+	if got.Id != "app1" || got.Port != port {
 		t.Errorf("Spawn view = %+v", got)
 	}
 	t.Cleanup(func() { _ = sup.Stop("app1") })
@@ -97,8 +96,8 @@ func TestSpawnGetStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if fetched.PID == 0 {
-		t.Errorf("PID = 0, want > 0")
+	if fetched.Pid == 0 {
+		t.Errorf("Pid = 0, want > 0")
 	}
 
 	if err := c.Stop(context.Background(), "app1"); err != nil {
@@ -112,15 +111,15 @@ func TestSpawnGetStop(t *testing.T) {
 func TestSpawnDuplicateReturnsAPIError(t *testing.T) {
 	c, sup, _ := newTestStack(t, "")
 	port := freeTCPPort(t)
-	if _, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "dup", Command: "sleep", Args: []string{"30"}, Port: port,
+	if _, err := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "dup", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	}); err != nil {
 		t.Fatalf("first spawn: %v", err)
 	}
 	t.Cleanup(func() { _ = sup.Stop("dup") })
 
-	_, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "dup", Command: "sleep", Args: []string{"30"}, Port: port,
+	_, err := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "dup", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	})
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
@@ -129,8 +128,8 @@ func TestSpawnDuplicateReturnsAPIError(t *testing.T) {
 	if apiErr.Status != http.StatusConflict {
 		t.Errorf("Status = %d, want 409", apiErr.Status)
 	}
-	if apiErr.Code != adminapi.CodeAlreadyRunning {
-		t.Errorf("Code = %q, want %q", apiErr.Code, adminapi.CodeAlreadyRunning)
+	if apiErr.Code != string(apitypes.ErrorCodeAlreadyRunning) {
+		t.Errorf("Code = %q, want %q", apiErr.Code, apitypes.ErrorCodeAlreadyRunning)
 	}
 }
 
@@ -143,7 +142,6 @@ func TestGetUnknownIsNotFound(t *testing.T) {
 }
 
 func TestAuthFailureSurfaces401(t *testing.T) {
-	// Server requires "secret"; client sends nothing.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sup := supervisor.New(logger)
 	sup.HealthCheckInterval = 0
@@ -151,7 +149,7 @@ func TestAuthFailureSurfaces401(t *testing.T) {
 	httpSrv := httptest.NewServer(srv.Handler())
 	defer httpSrv.Close()
 
-	c := New(Config{Server: httpSrv.URL}) // no token
+	c := New(Config{Server: httpSrv.URL})
 	_, err := c.List(context.Background())
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusUnauthorized {
@@ -165,17 +163,17 @@ func TestRestartHappyPath(t *testing.T) {
 	sup.MaxBackoff = 20 * time.Millisecond
 
 	port := freeTCPPort(t)
-	first, _ := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "rs", Command: "sleep", Args: []string{"30"}, Port: port,
+	first, _ := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "rs", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	})
 	t.Cleanup(func() { _ = sup.Stop("rs") })
 
-	v, err := c.Restart(context.Background(), "rs", adminapi.RestartRequest{TimeoutMS: 3000})
+	v, err := c.Restart(context.Background(), "rs", apitypes.RestartRequest{TimeoutMs: ptr(int64(3000))})
 	if err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if v.PID == 0 || v.PID == first.PID {
-		t.Errorf("PID = %d, want new non-zero PID (was %d)", v.PID, first.PID)
+	if v.Pid == 0 || v.Pid == first.Pid {
+		t.Errorf("Pid = %d, want new non-zero PID (was %d)", v.Pid, first.Pid)
 	}
 }
 
@@ -184,13 +182,12 @@ func TestLogsTailReturnsLines(t *testing.T) {
 	sup.LogDir = t.TempDir()
 
 	port := freeTCPPort(t)
-	_, _ = c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "logtail", Command: "sh", Args: []string{"-c", "echo hello-tail; sleep 30"},
+	_, _ = c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "logtail", Command: ptr("sh"), Args: &[]string{"-c", "echo hello-tail; sleep 30"},
 		Port: port,
 	})
 	t.Cleanup(func() { _ = sup.Stop("logtail") })
 
-	// Give the child a moment to print.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		body, err := c.LogsTail(context.Background(), "logtail", 10)
@@ -206,8 +203,8 @@ func TestLogsTailReturnsLines(t *testing.T) {
 func TestResetOnHealthyReturns409(t *testing.T) {
 	c, sup, _ := newTestStack(t, "")
 	port := freeTCPPort(t)
-	if _, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "h", Command: "sleep", Args: []string{"30"}, Port: port,
+	if _, err := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "h", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	}); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -223,8 +220,8 @@ func TestResetOnHealthyReturns409(t *testing.T) {
 func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
 	c, sup, _ := newTestStack(t, "")
 	port := freeTCPPort(t)
-	if _, err := c.Spawn(context.Background(), adminapi.SpawnRequest{
-		ID: "s", Command: "sleep", Args: []string{"30"}, Port: port,
+	if _, err := c.Spawn(context.Background(), apitypes.SpawnRequest{
+		Id: "s", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port,
 	}); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -234,8 +231,8 @@ func TestStatsWithoutCgroupReturnsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if v.ID != "s" {
-		t.Errorf("ID = %q, want s", v.ID)
+	if v.Id != "s" {
+		t.Errorf("Id = %q, want s", v.Id)
 	}
 	if v.CgroupEnabled {
 		t.Errorf("CgroupEnabled true on non-cgroup app")

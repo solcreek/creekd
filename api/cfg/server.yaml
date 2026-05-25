@@ -1,0 +1,8 @@
+package: apitypes
+generate:
+  std-http-server: true
+  models: false
+  embedded-spec: true
+output: ../internal/apitypes/server.gen.go
+output-options:
+  skip-prune: true
