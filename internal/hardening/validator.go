@@ -14,8 +14,11 @@ type Drift struct {
 	Key string
 	// Want is the expected value per DESIGN.
 	Want string
-	// Got is the on-disk value. Empty string means the directive
-	// is absent entirely.
+	// Got is the on-disk value when the directive is present.
+	// Distinguish "directive is absent" from "directive is present
+	// but has an empty value" via Reason — Reason == "missing" means
+	// the parser never saw the key, anything else means the value
+	// was parsed (possibly to "").
 	Got string
 	// Reason summarises the failure mode in one line: "missing",
 	// "weakened", or a more specific note for the few directives
@@ -24,7 +27,7 @@ type Drift struct {
 }
 
 func (d Drift) String() string {
-	if d.Got == "" {
+	if d.Reason == "missing" {
 		return fmt.Sprintf("%s: %s (want %q)", d.Key, d.Reason, d.Want)
 	}
 	return fmt.Sprintf("%s: %s (got %q, want %q)", d.Key, d.Reason, d.Got, d.Want)
@@ -113,8 +116,11 @@ func matchSyscallFilter(want, got string) bool {
 // Directives appearing OUTSIDE the [Service] section are ignored —
 // a value of NoNewPrivileges under [Unit] would not be honoured by
 // systemd, so the validator should not honour it either.
-func Validate(unitContent string) []Drift {
-	parsed := parseServiceSection(unitContent)
+func Validate(unitContent string) ([]Drift, error) {
+	parsed, err := parseServiceSection(unitContent)
+	if err != nil {
+		return nil, err
+	}
 	var out []Drift
 	for _, r := range RequiredDirectives() {
 		got, ok := parsed[r.Key]
@@ -126,7 +132,7 @@ func Validate(unitContent string) []Drift {
 			out = append(out, Drift{Key: r.Key, Want: r.Want, Got: got, Reason: "weakened"})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // parseServiceSection walks the unit content line by line, tracks
@@ -134,9 +140,14 @@ func Validate(unitContent string) []Drift {
 // from [Service]. systemd allows repeated keys (later wins for
 // scalar directives); we follow that rule. Comments and blanks
 // are skipped.
-func parseServiceSection(unitContent string) map[string]string {
+func parseServiceSection(unitContent string) (map[string]string, error) {
 	out := map[string]string{}
 	scanner := bufio.NewScanner(strings.NewReader(unitContent))
+	// systemd directive values can be long (e.g. SystemCallFilter with
+	// many tokens) — bump the buffer past the default 64KB so the
+	// scanner doesn't silently truncate a directive and make the
+	// validator report bogus drift.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	section := ""
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -158,5 +169,8 @@ func parseServiceSection(unitContent string) map[string]string {
 		val := strings.TrimSpace(line[eq+1:])
 		out[key] = val
 	}
-	return out
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("hardening: parse unit: %w", err)
+	}
+	return out, nil
 }

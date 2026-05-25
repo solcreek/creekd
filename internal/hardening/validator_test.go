@@ -26,7 +26,7 @@ func minimalHardenedUnit() string {
 // TestValidate_AcceptsCanonicalUnit covers the happy path: the
 // canonical hardening set yields zero drift.
 func TestValidate_AcceptsCanonicalUnit(t *testing.T) {
-	got := Validate(minimalHardenedUnit())
+	got := mustValidate(t, minimalHardenedUnit())
 	if len(got) != 0 {
 		t.Errorf("canonical unit produced %d drift entries: %v", len(got), got)
 	}
@@ -41,7 +41,7 @@ func TestValidate_ReportsMissingDirective(t *testing.T) {
 	if mutated == body {
 		t.Fatal("test setup: failed to strip NoNewPrivileges")
 	}
-	drift := Validate(mutated)
+	drift := mustValidate(t, mutated)
 	if !containsDriftFor(drift, "NoNewPrivileges") {
 		t.Errorf("missing NoNewPrivileges not reported: %v", drift)
 	}
@@ -58,7 +58,7 @@ func TestValidate_ReportsWeakenedDirective(t *testing.T) {
 	body := strings.Replace(minimalHardenedUnit(),
 		"ProtectSystem=strict",
 		"ProtectSystem=basic", 1)
-	drift := Validate(body)
+	drift := mustValidate(t, body)
 	d := findDrift(drift, "ProtectSystem")
 	if d.Reason != "weakened" {
 		t.Errorf("ProtectSystem weakened: reason = %q, want weakened", d.Reason)
@@ -81,7 +81,7 @@ func TestValidate_IgnoresDirectivesOutsideServiceSection(t *testing.T) {
 	body = "[Unit]\nNoNewPrivileges=true\n[Service]\n" + minimalHardenedUnit()[len("[Service]\n"):]
 	body = strings.Replace(body, "[Service]\nNoNewPrivileges=true\n", "[Service]\n", 1)
 
-	drift := Validate(body)
+	drift := mustValidate(t, body)
 	if !containsDriftFor(drift, "NoNewPrivileges") {
 		t.Error("NoNewPrivileges under [Unit] should not satisfy the requirement; want drift, got none")
 	}
@@ -94,9 +94,9 @@ func TestValidate_SystemCallFilterOrderInsensitive(t *testing.T) {
 	body := strings.Replace(minimalHardenedUnit(),
 		"SystemCallFilter=@system-service ~@privileged ~@resources",
 		"SystemCallFilter=~@resources @system-service ~@privileged", 1)
-	drift := Validate(body)
-	if d := findDrift(drift, "SystemCallFilter"); d.Reason != "" {
-		t.Errorf("SystemCallFilter reordered triggered drift: %+v", d)
+	drift := mustValidate(t, body)
+	if len(drift) != 0 {
+		t.Errorf("SystemCallFilter reordered triggered drift: %v", drift)
 	}
 }
 
@@ -106,7 +106,7 @@ func TestValidate_SystemCallFilterOrderInsensitive(t *testing.T) {
 func TestValidate_IgnoresCommentsAndBlankLines(t *testing.T) {
 	body := "# top-level comment\n\n[Service]\n# inline comment\n; alt-comment\n\n" +
 		strings.TrimPrefix(minimalHardenedUnit(), "[Service]\n")
-	if drift := Validate(body); len(drift) != 0 {
+	if drift := mustValidate(t, body); len(drift) != 0 {
 		t.Errorf("commented unit produced drift: %v", drift)
 	}
 }
@@ -115,7 +115,7 @@ func TestValidate_IgnoresCommentsAndBlankLines(t *testing.T) {
 // failure spectrum: an empty unit body must flag every required
 // directive as missing.
 func TestValidate_EmptyUnitReportsAllMissing(t *testing.T) {
-	drift := Validate("")
+	drift := mustValidate(t, "")
 	if len(drift) != len(RequiredDirectives()) {
 		t.Errorf("empty unit drift count = %d, want %d (all required)",
 			len(drift), len(RequiredDirectives()))
@@ -135,13 +135,22 @@ func TestShippedUnitValidatesClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read shipped unit: %v", err)
 	}
-	if drift := Validate(string(data)); len(drift) != 0 {
+	if drift := mustValidate(t, string(data)); len(drift) != 0 {
 		t.Errorf("shipped init/creekd.service has drift:\n  %s",
 			strings.Join(driftStrings(drift), "\n  "))
 	}
 }
 
 // --- helpers ----------------------------------------------------
+
+func mustValidate(t *testing.T, body string) []Drift {
+	t.Helper()
+	out, err := Validate(body)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	return out
+}
 
 func containsDriftFor(drift []Drift, key string) bool {
 	for _, d := range drift {

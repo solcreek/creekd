@@ -1069,7 +1069,10 @@ func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	drift := hardening.Validate(string(data))
+	drift, err := hardening.Validate(string(data))
+	if err != nil {
+		return err
+	}
 	if cf.json {
 		if err := writeJSON(w, drift); err != nil {
 			return err

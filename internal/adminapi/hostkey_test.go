@@ -2,7 +2,6 @@ package adminapi
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"net/http"
 	"testing"
@@ -11,26 +10,16 @@ import (
 	"github.com/solcreek/creekd/internal/backup"
 )
 
+// newTestHostkey builds a HostKey via the production LoadOrCreateHostKey
+// path so the fingerprint formatting matches what the server emits —
+// the backup package's fingerprint helper is unexported, so going
+// through the public path is the only way to keep test + prod aligned.
 func newTestHostkey(t *testing.T) *backup.HostKey {
 	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("ed25519.GenerateKey: %v", err)
-	}
-	// Build a HostKey by going through LoadOrCreateHostKey on a
-	// tmp path so the fingerprint computation matches production —
-	// guarantees test + prod agree on the formatting rules.
-	hk := &backup.HostKey{Priv: priv, Pub: pub}
-	// Re-derive fingerprint via the public path: easiest is to
-	// LoadOrCreate against a tmp file we control. Skip — the
-	// backup package's fingerprint helper is unexported. Use a
-	// LoadOrCreateHostKey round-trip below.
-	tmp := t.TempDir() + "/k"
-	got, err := backup.LoadOrCreateHostKey(tmp)
+	hk, err := backup.LoadOrCreateHostKey(t.TempDir() + "/k")
 	if err != nil {
 		t.Fatalf("LoadOrCreateHostKey: %v", err)
 	}
-	hk = got
 	return hk
 }
 
