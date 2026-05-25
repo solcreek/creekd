@@ -77,8 +77,44 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`.
 - For bugs: minimum reproducer
 - For features: motivating use case
 
+## Before opening an issue or PR
+
+- Read [`NON-GOALS.md`](NON-GOALS.md) — confirm your proposal
+  isn't documented as outside the project's scope. If it is and
+  you believe the reasoning has changed, open an ADR
+  (see [`docs/adr/`](docs/adr/)) proposing the revision instead.
+- Read [`MAINTAINERS.md`](MAINTAINERS.md) for the decision-making
+  process (lazy consensus, 72h silent = approved) and the PR
+  review SLA (first triage within 7 days, full review within 14).
+
+## Code of conduct
+
+Participation in this project is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md) (Contributor Covenant 2.1).
+By contributing, you agree to abide by its terms.
+
+## DCO sign-off
+
+Every commit must carry a Developer Certificate of Origin
+sign-off — the trailing `Signed-off-by: Name <email>` line. This
+is the project's lightweight alternative to a CLA: by signing off,
+you certify (per [developercertificate.org](https://developercertificate.org))
+that you wrote the change OR have the right to submit it under
+the project's Apache 2.0 license.
+
+```sh
+# Add to each commit automatically:
+git commit --signoff -m "..."
+
+# Or configure once per repo:
+git config format.signOff true
+```
+
+PRs missing sign-off on any commit are blocked at merge time
+(checked by the api-diff CI workflow).
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
 
-We do **not** require a CLA. Contributions remain copyrighted by their authors.
+We do **not** require a CLA. Contributions remain copyrighted by their authors. The DCO sign-off above is the attestation that you have the right to make this contribution under Apache 2.0.
