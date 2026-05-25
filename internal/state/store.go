@@ -59,9 +59,13 @@ type AppMetadata struct {
 	// (AddApp on an existing ID). Does NOT bump on status writes
 	// or annotation/label changes.
 	Generation int64 `json:"generation"`
-	// ResourceVersion bumps on every write (spec or status). Served
-	// to clients as a string per K8s wire convention. Clients MUST
-	// NOT do arithmetic on it.
+	// ResourceVersion bumps on every spec write (AddApp on an existing
+	// or new ID). Currently never bumped for status changes because
+	// the Store has no status-write path yet — status persistence
+	// lands with status.conditions[] (subsequent stack PR). When it
+	// does, this counter will also bump on status writes, matching
+	// the K8s rv convention. Served to clients as a string per K8s
+	// wire convention. Clients MUST NOT do arithmetic on it.
 	ResourceVersion uint64 `json:"resource_version"`
 	// CreationTimestamp is RFC3339 at first AddApp; immutable;
 	// preserved across restore.

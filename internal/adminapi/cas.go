@@ -69,7 +69,11 @@ func (s *Server) casMiddleware() apitypes.MiddlewareFunc {
 			if ifMatch == "" {
 				// Spec promises this Warning on every unconditional
 				// write — emit it before any store/meta short-circuit.
-				w.Header().Set("Warning", `299 - "unconditional-write"`)
+				// Use Add not Set: per RFC 7234 §5.5 Warning is a
+				// list-valued header, so a future deprecation or
+				// upstream-injected warning would be clobbered if we
+				// Set here.
+				w.Header().Add("Warning", `299 - "unconditional-write"`)
 				next.ServeHTTP(w, r)
 				return
 			}
