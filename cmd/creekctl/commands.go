@@ -489,19 +489,13 @@ func runEnsure(ctx context.Context, w io.Writer, argv []string) error {
 		return writeDryRun(w, "ensure", id, req, cf.json)
 	}
 	client := cf.client()
-	app, err := client.Spawn(ctx, req)
-	if err == nil {
-		// Spawn succeeded — display via legacy AppView path.
-		if cf.json {
-			return writeJSON(w, app)
-		}
-		return writeAppDetail(w, app)
+	if _, serr := client.Spawn(ctx, req); serr != nil && !adminclient.IsAlreadyRunning(serr) {
+		return serr
 	}
-	if !adminclient.IsAlreadyRunning(err) {
-		return err
-	}
-	// Already running — fall back to Get, which returns the
-	// envelope shape. Display via the envelope renderer.
+	// Whether the spawn succeeded or the app was already running, Get
+	// returns the envelope. ensure's output is therefore identical
+	// across both paths — important for --json automation, which used
+	// to receive an AppView on create vs an envelope on already-exists.
 	envelope, gerr := client.Get(ctx, id)
 	if gerr != nil {
 		return gerr

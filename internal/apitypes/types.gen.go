@@ -45,17 +45,21 @@ func (e AppKind) Valid() bool {
 
 // Defines values for AppStatusPhase.
 const (
-	AppStatusPhaseCrashLoop AppStatusPhase = "crash_loop"
-	AppStatusPhaseRunning   AppStatusPhase = "running"
-	AppStatusPhaseStarting  AppStatusPhase = "starting"
-	AppStatusPhaseStopped   AppStatusPhase = "stopped"
-	AppStatusPhaseStopping  AppStatusPhase = "stopping"
+	AppStatusPhaseCrashLooping AppStatusPhase = "crash-looping"
+	AppStatusPhaseCrashed      AppStatusPhase = "crashed"
+	AppStatusPhaseRunning      AppStatusPhase = "running"
+	AppStatusPhaseStarting     AppStatusPhase = "starting"
+	AppStatusPhaseStopped      AppStatusPhase = "stopped"
+	AppStatusPhaseUnhealthy    AppStatusPhase = "unhealthy"
+	AppStatusPhaseUnknown      AppStatusPhase = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the AppStatusPhase enum.
 func (e AppStatusPhase) Valid() bool {
 	switch e {
-	case AppStatusPhaseCrashLoop:
+	case AppStatusPhaseCrashLooping:
+		return true
+	case AppStatusPhaseCrashed:
 		return true
 	case AppStatusPhaseRunning:
 		return true
@@ -63,7 +67,9 @@ func (e AppStatusPhase) Valid() bool {
 		return true
 	case AppStatusPhaseStopped:
 		return true
-	case AppStatusPhaseStopping:
+	case AppStatusPhaseUnhealthy:
+		return true
+	case AppStatusPhaseUnknown:
 		return true
 	default:
 		return false

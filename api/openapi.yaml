@@ -442,8 +442,9 @@ components:
       description: |
         If-Match header did not match the current resourceVersion.
         Response body includes the current resourceVersion so clients
-        can retry. See DESIGN-self-host-state.md §"First-party CLI
-        MUST send If-Match".
+        can retry. First-party clients SHOULD send If-Match on
+        spec-mutating calls; missing header is allowed but emits a
+        `Warning: 299 - "unconditional-write"` response header.
       headers:
         ETag:
           description: Current resourceVersion (opaque string) of the resource.
@@ -699,7 +700,10 @@ components:
           description: Last spec generation the deploy flow has converged to a healthy state on.
         phase:
           type: string
-          enum: [starting, running, crash_loop, stopping, stopped]
+          # Mirror supervisor.Status.String() output, same as AppView.status.
+          # See the comment on AppView.status for rationale (hyphenated
+          # crash-looping is the canonical wire format).
+          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
           description: |
             Runtime state. NOTE — phase is K8s 1.13-deprecated; tracked
             here for the calibration PR while the Release ledger +
