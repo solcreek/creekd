@@ -356,3 +356,60 @@ func TestCAS_AuthPrecedesCAS(t *testing.T) {
 		t.Errorf("CAS 412 body returned to unauthenticated caller: %s", w.Body.String())
 	}
 }
+
+// TestCAS_NoStoreEmitsWarningOnMissingIfMatch guards the contract that
+// the Warning header is emitted regardless of whether a store is
+// configured. d6895ec hoisted the Warning emit before the store
+// short-circuit; this test prevents a future reorder from making the
+// Warning store-dependent again.
+func TestCAS_NoStoreEmitsWarningOnMissingIfMatch(t *testing.T) {
+	ts := newTestServer(t, "") // no SetStore call
+
+	port := freeTCPPort(t)
+	if status, _ := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "nostore-warn", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn: status=%d", status)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("nostore-warn") })
+
+	req := httptest.NewRequest("DELETE", "/v1/apps/nostore-warn", nil)
+	// Deliberately no If-Match header.
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+
+	if warn := w.Header().Get("Warning"); !strings.Contains(warn, "unconditional-write") {
+		t.Errorf("Warning header = %q, want it to contain \"unconditional-write\" even without a store", warn)
+	}
+}
+
+// TestCAS_AppNamedAppsIsNotBypassed guards against an extractAppID
+// regression that previously special-cased the literal id "apps" and
+// returned "" — which made CAS short-circuit and let DELETE /v1/apps/apps
+// bypass If-Match validation. supervisor.ValidateID permits "apps" as a
+// name, so the middleware must treat it like any other id.
+func TestCAS_AppNamedAppsIsNotBypassed(t *testing.T) {
+	ts := newTestServer(t, "")
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts.srv.SetStore(store)
+
+	port := freeTCPPort(t)
+	if status, body := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "apps", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn id=\"apps\": status=%d body=%s", status, body)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("apps") })
+
+	// DELETE with bogus If-Match. If extractAppID returns "" for "apps",
+	// the middleware short-circuits and the bogus rv is silently
+	// accepted → 204. With the fix it produces 412.
+	req := httptest.NewRequest("DELETE", "/v1/apps/apps", nil)
+	req.Header.Set("If-Match", "99999")
+	w := httptest.NewRecorder()
+	ts.srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 for bogus If-Match on app named \"apps\", got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
