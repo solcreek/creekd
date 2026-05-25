@@ -1123,7 +1123,7 @@ func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
 // chasing a security alarm. The new binaries are only moved into
 // place AFTER both checks pass; any failure leaves the existing
 // binaries untouched.
-func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
+func runSelfUpgrade(ctx context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("self-upgrade")
 	cf := &commonFlags{}
 	cf.register(fs)
@@ -1138,7 +1138,7 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 
 	version := *to
 	if version == "" {
-		v, err := resolveLatestTag(*latestURL)
+		v, err := resolveLatestTag(ctx, *latestURL)
 		if err != nil {
 			return err
 		}
@@ -1171,7 +1171,7 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	}
 	for _, d := range downloads {
 		fmt.Fprintf(w, "==> downloading %s\n", d.name)
-		if err := downloadFile(d.url, filepath.Join(tmp, d.name)); err != nil {
+		if err := downloadFile(ctx, d.url, filepath.Join(tmp, d.name)); err != nil {
 			return fmt.Errorf("download %s: %w", d.name, err)
 		}
 	}
@@ -1186,7 +1186,7 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 		// upstream). Default is the cosign binary on PATH.
 		v.CosignPath = cosign
 	}
-	if err := v.Verify(
+	if err := v.Verify(ctx,
 		filepath.Join(tmp, tarName), tarName,
 		filepath.Join(tmp, "checksums.txt.sig"),
 		filepath.Join(tmp, "checksums.txt.pem"),
@@ -1220,16 +1220,20 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	}
 
 	// Stash the pre-upgrade creekd so creekctl-swap failure can
-	// roll creekd back. Reserve a unique stash path via CreateTemp
-	// (a predictable name would silently clobber any operator file
-	// at that path), then populate it with CopyFile — hard link
-	// fast path on the common case, byte-copy fallback otherwise.
+	// roll creekd back. CreateTemp reserves a unique unguessable
+	// name (so we can't clobber an operator file at a predictable
+	// path), but it also creates the file — and CopyFile's
+	// os.Link fast path refuses an existing dst. Remove the empty
+	// placeholder so the hardlink path is reachable on the common
+	// case; on EEXIST race the byte-copy fallback still handles
+	// it correctly.
 	stashFile, err := os.CreateTemp(filepath.Dir(dPath), filepath.Base(dPath)+".pre-upgrade-*")
 	if err != nil {
 		return fmt.Errorf("reserve stash path: %w", err)
 	}
 	stashPath := stashFile.Name()
 	stashFile.Close()
+	_ = os.Remove(stashPath)
 	defer os.Remove(stashPath)
 	if err := upgrade.CopyFile(dPath, stashPath); err != nil {
 		return fmt.Errorf("stash pre-upgrade creekd: %w", err)
@@ -1256,15 +1260,16 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 
 // resolveLatestTag follows GitHub's /releases/latest redirect to
 // pick up the tag without parsing the API. Mirrors install.sh's
-// no-jq strategy.
-func resolveLatestTag(url string) (string, error) {
+// no-jq strategy. ctx cancellation aborts the HEAD in addition to
+// the 30s client timeout.
+func resolveLatestTag(ctx context.Context, url string) (string, error) {
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 		Timeout: 30 * time.Second,
 	}
-	req, err := http.NewRequest("HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
 	if err != nil {
 		return "", err
 	}
@@ -1308,10 +1313,15 @@ func detectOSArch() (string, string, error) {
 // downloadFile fetches url into dst with a bounded timeout. Self-
 // upgrade artifacts are tens of MB so the cap is generous, but it
 // MUST exist — Go's default client has no timeout and a stalled
-// TCP connection would hang the upgrade forever.
-func downloadFile(url, dst string) error {
+// TCP connection would hang the upgrade forever. ctx cancellation
+// also aborts mid-download (e.g. operator SIGINT on a slow link).
+func downloadFile(ctx context.Context, url, dst string) error {
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

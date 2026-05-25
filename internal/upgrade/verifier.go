@@ -76,18 +76,22 @@ func New() *Verifier {
 // filename as it appears in checksums.txt (e.g.
 // "creekd_0.0.5_linux_amd64.tar.gz"); used for entry lookup.
 //
+// ctx is propagated to the cosign subprocess; cancelling it
+// (typically via signal.NotifyContext) aborts a hung verify in
+// addition to the internal cosignVerifyTimeout floor.
+//
 // Returns ErrSignatureInvalid (wrapped) on either failure. Other
 // errors (file read, cosign exec failure, missing checksums entry)
 // are returned verbatim so callers can distinguish "verification
 // said no" from "could not even attempt verification".
-func (v *Verifier) Verify(tarballPath, tarballName, sigPath, certPath, checksumsPath string) error {
-	if err := v.verifyCosign(sigPath, certPath, checksumsPath); err != nil {
+func (v *Verifier) Verify(ctx context.Context, tarballPath, tarballName, sigPath, certPath, checksumsPath string) error {
+	if err := v.verifyCosign(ctx, sigPath, certPath, checksumsPath); err != nil {
 		return err
 	}
 	return v.verifyChecksum(tarballPath, tarballName, checksumsPath)
 }
 
-func (v *Verifier) verifyCosign(sigPath, certPath, checksumsPath string) error {
+func (v *Verifier) verifyCosign(parentCtx context.Context, sigPath, certPath, checksumsPath string) error {
 	bin := v.CosignPath
 	if bin == "" {
 		bin = "cosign"
@@ -103,8 +107,9 @@ func (v *Verifier) verifyCosign(sigPath, certPath, checksumsPath string) error {
 
 	// Bound the cosign call: it queries Rekor + Fulcio over the
 	// network, so a connectivity black hole could otherwise wedge
-	// self-upgrade forever.
-	ctx, cancel := context.WithTimeout(context.Background(), cosignVerifyTimeout)
+	// self-upgrade forever. Derive from the caller's ctx so a
+	// SIGINT also short-circuits the timer.
+	ctx, cancel := context.WithTimeout(parentCtx, cosignVerifyTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin, "verify-blob",

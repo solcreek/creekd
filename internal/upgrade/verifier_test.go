@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -77,7 +78,7 @@ func TestVerify_HappyPath(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	if err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums); err != nil {
+	if err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums); err != nil {
 		t.Errorf("Verify on valid artifacts: %v", err)
 	}
 }
@@ -93,7 +94,7 @@ func TestVerify_RejectsCosignFailure(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums)
 	if !errors.Is(err, ErrSignatureInvalid) {
 		t.Errorf("err = %v, want errors.Is(ErrSignatureInvalid)", err)
 	}
@@ -116,7 +117,7 @@ func TestVerify_RejectsTamperedTarball(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums)
 	if !errors.Is(err, ErrSignatureInvalid) {
 		t.Errorf("tampered tarball: err = %v, want errors.Is(ErrSignatureInvalid)", err)
 	}
@@ -135,7 +136,7 @@ func TestVerify_MissingChecksumsEntry(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	err := v.Verify(tar, "creekd_NOT_LISTED.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_NOT_LISTED.tar.gz", sig, cert, sums)
 	if err == nil {
 		t.Fatal("missing checksums entry should error")
 	}
@@ -155,7 +156,7 @@ func TestVerify_CosignNotInstalled(t *testing.T) {
 
 	v := New()
 	v.CosignPath = filepath.Join(dir, "definitely-not-here")
-	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums)
 	if err == nil {
 		t.Fatal("missing cosign should error")
 	}
@@ -180,7 +181,7 @@ func TestVerify_CosignNotExecutable(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums)
 	if err == nil {
 		t.Fatal("non-executable cosign should error")
 	}
@@ -210,12 +211,43 @@ func TestVerify_CosignTimeoutNotSignatureRejection(t *testing.T) {
 
 	v := New()
 	v.CosignPath = cosign
-	err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums)
+	err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums)
 	if err == nil {
 		t.Fatal("hung cosign should error")
 	}
 	if errors.Is(err, ErrSignatureInvalid) {
 		t.Errorf("timeout should NOT surface as ErrSignatureInvalid (setup/availability error): %v", err)
+	}
+}
+
+// TestVerify_CtxCancelInterruptsCosign covers the signal-handling
+// contract: an already-cancelled caller ctx must abort verifyCosign
+// without waiting for the internal cosignVerifyTimeout. This is
+// what lets `creekctl self-upgrade` honor Ctrl-C / SIGINT during a
+// hung Rekor lookup instead of riding out the full 30s.
+func TestVerify_CtxCancelInterruptsCosign(t *testing.T) {
+	dir := t.TempDir()
+	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
+	cosign := filepath.Join(dir, "cosign")
+	if err := os.WriteFile(cosign, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	v := New()
+	v.CosignPath = cosign
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled — should fail fast, not wait 30s
+
+	start := time.Now()
+	err := v.Verify(ctx, tar, "creekd_x.tar.gz", sig, cert, sums)
+	if err == nil {
+		t.Fatal("pre-cancelled ctx should error")
+	}
+	if errors.Is(err, ErrSignatureInvalid) {
+		t.Errorf("cancellation should NOT surface as ErrSignatureInvalid: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("ctx cancel took %s — should be near-instant, not waiting for cosignVerifyTimeout", elapsed)
 	}
 }
 
@@ -240,7 +272,7 @@ exit 0
 
 	v := New()
 	v.CosignPath = cosign
-	if err := v.Verify(tar, "creekd_x.tar.gz", sig, cert, sums); err != nil {
+	if err := v.Verify(context.Background(), tar, "creekd_x.tar.gz", sig, cert, sums); err != nil {
 		t.Fatal(err)
 	}
 	argv, err := os.ReadFile(cosign + ".argv")
