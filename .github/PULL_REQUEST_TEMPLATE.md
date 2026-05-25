@@ -21,7 +21,7 @@ Pick exactly one:
       with `kind: additive`.
 - [ ] This PR is API-breaking and references **ADR-NNNN** (must
       exist at [`docs/adr/NNNN-*.md`](docs/adr/) with
-      `status: accepted` BEFORE this PR can merge). See
+      `Status: accepted` BEFORE this PR can merge). See
       [`docs/adr/README.md`](docs/adr/README.md) for the
       template.
 

@@ -13,9 +13,11 @@ against the published `checksums.txt`, and drops `creekd` +
 For paranoid installs, also verify the cosign keyless signature:
 
 ```sh
-# Requires cosign on PATH (https://docs.sigstore.dev/cosign/installation)
-CREEKD_VERIFY_COSIGN=1 curl -fsSL \
-  https://raw.githubusercontent.com/solcreek/creekd/main/install.sh | sh
+# Requires cosign on PATH (https://docs.sigstore.dev/cosign/installation).
+# The env var has to ride with `sh`, not `curl` — otherwise it stays
+# in curl's environment and install.sh never sees it.
+curl -fsSL https://raw.githubusercontent.com/solcreek/creekd/main/install.sh \
+  | CREEKD_VERIFY_COSIGN=1 sh
 ```
 
 The installer verifies the cosign signature on `checksums.txt`
