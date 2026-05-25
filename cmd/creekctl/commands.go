@@ -17,6 +17,7 @@ import (
 	"github.com/solcreek/creekd/api/manifest"
 	"github.com/solcreek/creekd/internal/adminclient"
 	"github.com/solcreek/creekd/internal/apitypes"
+	"github.com/solcreek/creekd/internal/hardening"
 )
 
 // subcommand is one CLI verb. Run parses argv (minus the verb itself)
@@ -56,6 +57,9 @@ func init() {
 	}
 	subcommands["exec"] = &subcommand{
 		Name: "exec", Description: "run a one-off command with app env vars", Run: runExec,
+	}
+	subcommands["hardening-check"] = &subcommand{
+		Name: "hardening-check", Description: "validate creekd.service against the canonical hardening set", Run: runHardeningCheck,
 	}
 }
 
@@ -1038,6 +1042,55 @@ func runDescribe(_ context.Context, w io.Writer, argv []string) error {
 		Flags:       flags,
 	}
 	return writeJSON(w, info)
+}
+
+// runHardeningCheck validates a systemd unit file against the
+// canonical hardening set defined by hardening.RequiredDirectives.
+// Argv[0] is the path to the unit file; defaults to
+// /etc/systemd/system/creekd.service. Exits 0 on clean, 1 on drift
+// detected (matching shellcheck / lint convention).
+//
+// `creek host doctor` (when the laptop CLI lands in #23) wraps the
+// same internal/hardening validator and surfaces the result as the
+// `systemd_hardening_drift` error code; this creekctl subcommand
+// is the on-host operator path.
+func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
+	fs := newFlagSet("hardening-check")
+	cf := &commonFlags{}
+	cf.register(fs)
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	cf.resolveJSON()
+	path := "/etc/systemd/system/creekd.service"
+	if rest := fs.Args(); len(rest) > 0 {
+		path = rest[0]
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	drift, err := hardening.Validate(string(data))
+	if err != nil {
+		return err
+	}
+	if cf.json {
+		if err := writeJSON(w, drift); err != nil {
+			return err
+		}
+	} else if len(drift) == 0 {
+		fmt.Fprintf(w, "%s: hardening clean (%d directives validated)\n",
+			path, len(hardening.RequiredDirectives()))
+	} else {
+		fmt.Fprintf(w, "%s: %d hardening drift(s)\n", path, len(drift))
+		for _, d := range drift {
+			fmt.Fprintf(w, "  %s\n", d)
+		}
+	}
+	if len(drift) > 0 {
+		return fmt.Errorf("systemd_hardening_drift: %d directive(s) missing or weakened", len(drift))
+	}
+	return nil
 }
 
 // --- field filtering -----------------------------------------------

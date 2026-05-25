@@ -18,8 +18,47 @@ tags:
     description: Application lifecycle management
   - name: volumes
     description: Persistent volume management
+  - name: identity
+    description: Host identity (TOFU pin discovery)
 
 paths:
+  /v1/hostkey:
+    get:
+      operationId: getHostkey
+      summary: Fetch the daemon's public host key
+      description: |
+        Returns the ed25519 public key + fingerprint that signs
+        Tier 0 backup manifests (#7) and — once #21 multi-host CA
+        promotion lands — chains into the fleet CA. This endpoint
+        is UNAUTHENTICATED so the laptop's `creek init --adopt`
+        flow (Path B) can pin the fingerprint before any
+        credentials are exchanged. Path A (capstan-provisioned)
+        gets the fingerprint via the provider API instead; Path C
+        is operator-pasted out-of-band. See DESIGN-self-host-state.md
+        §"TOFU hostkey discovery".
+
+        The public key is public by definition — exposing it
+        without auth is correct. An attacker who can MITM this
+        response can substitute their own key; the operator MUST
+        verify against an out-of-band reference (provider console,
+        capstan-recorded fingerprint, or paper bundle) before
+        pinning.
+      tags: [identity]
+      security: []
+      responses:
+        "200":
+          description: Host key info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostkeyInfo"
+        "503":
+          description: Host key not yet initialised (early-boot or no state dir configured)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/apps:
     post:
       operationId: spawnApp
@@ -535,6 +574,7 @@ components:
         - unsupported_filesystem
         - storage_corrupted
         - release_artifact_pruned
+        - systemd_hardening_drift
         - internal
 
     ErrorResponse:
@@ -545,6 +585,23 @@ components:
           $ref: "#/components/schemas/ErrorCode"
         error:
           type: string
+
+    HostkeyInfo:
+      type: object
+      description: |
+        Public ed25519 host key + fingerprint. Algorithm field is
+        a forward-compat slot; only "ed25519" is recognised today.
+      required: [algorithm, publicKey, fingerprint]
+      properties:
+        algorithm:
+          type: string
+          enum: [ed25519]
+        publicKey:
+          type: string
+          description: base64 of the 32-byte ed25519 public key.
+        fingerprint:
+          type: string
+          description: "sha256:<hex> of the public key bytes."
 
     Limits:
       type: object

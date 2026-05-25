@@ -84,6 +84,7 @@ Commands:
   exec -- <cmd>      run a one-off command with app env vars
   db-reset           drop and recreate app database (sandbox)
   describe [cmd]     introspect command schema as JSON (agent-facing)
+  hardening-check    validate creekd.service against the hardening set
   version            print version
   help               this message
 
