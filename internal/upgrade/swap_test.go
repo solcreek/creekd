@@ -118,23 +118,20 @@ func TestSwapBinary_RefusesSymlinkedDst(t *testing.T) {
 	}
 }
 
-// TestCopyFile_DoesNotFollowSymlink covers the byte-copy fallback's
-// symlink-safety: if dst points at a symlink to some other path,
-// CopyFile MUST NOT follow it through and overwrite the target.
-// Pre-existing files are replaced atomically via rename, which
-// swaps the directory entry rather than writing through any
-// existing symlink.
+// TestCopyFile_DoesNotFollowSymlink covers the byte-copy + rename
+// fallback's symlink-safety. Pre-creating dst as a symlink forces
+// os.Link to fail with EEXIST, so this test exclusively exercises
+// the fallback path — which is the path that historically would
+// have followed a symlink through an O_CREATE|O_TRUNC open. The
+// rename-over-symlink replaces the symlink with the new regular
+// file rather than writing through it, so the symlink target
+// stays untouched.
 func TestCopyFile_DoesNotFollowSymlink(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
 	if err := os.WriteFile(src, []byte("src-bytes"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Force the byte-copy fallback by placing src + dst on what
-	// MAY be the same filesystem; os.Link would otherwise succeed
-	// and skip the symlink-clobber path entirely. We make dst a
-	// symlink BEFORE calling CopyFile — if hardlink succeeds, the
-	// test isn't exercising the symlink-safety claim, so we skip.
 	victim := filepath.Join(dir, "victim")
 	if err := os.WriteFile(victim, []byte("victim-untouched"), 0o644); err != nil {
 		t.Fatal(err)
@@ -147,9 +144,9 @@ func TestCopyFile_DoesNotFollowSymlink(t *testing.T) {
 	if err := CopyFile(src, dst); err != nil {
 		t.Fatalf("CopyFile: %v", err)
 	}
-	// Either hardlink succeeded (dst replaces symlink with src's
-	// inode entry) OR byte-copy + rename did. In either case the
-	// victim file MUST be untouched.
+	// The byte-copy+rename path replaces dst's directory entry with
+	// a fresh regular file; the symlink's target must NOT have
+	// been written through.
 	got, err := os.ReadFile(victim)
 	if err != nil {
 		t.Fatal(err)
