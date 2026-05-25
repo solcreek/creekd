@@ -23,15 +23,23 @@ func withCosignTimeoutForTest(d time.Duration) func() {
 	return func() { cosignVerifyTimeout = prev }
 }
 
+// skipNonPOSIX skips the current test on platforms without a POSIX
+// shell. Every test in this file that writes a `#!/bin/sh` fake
+// cosign needs this guard so `go test ./...` stays green on Windows.
+func skipNonPOSIX(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake cosign script needs POSIX shell")
+	}
+}
+
 // writeFakeCosign writes a shell script at path that exits with
 // the given code after echoing whatever message is passed via
 // args. Lets tests simulate cosign's accept/reject behaviour
 // without installing real cosign.
 func writeFakeCosign(t *testing.T, path string, exitCode int, message string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake cosign script needs POSIX shell")
-	}
+	skipNonPOSIX(t)
 	script := fmt.Sprintf(`#!/bin/sh
 echo %q
 exit %d
@@ -172,6 +180,7 @@ func TestVerify_CosignNotInstalled(t *testing.T) {
 // install is broken), NOT a signature rejection — surfacing it as
 // ErrSignatureInvalid would point the operator at the wrong fix.
 func TestVerify_CosignNotExecutable(t *testing.T) {
+	skipNonPOSIX(t)
 	dir := t.TempDir()
 	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
 	cosign := filepath.Join(dir, "cosign")
@@ -200,6 +209,7 @@ func TestVerify_CosignNotExecutable(t *testing.T) {
 // the type. The implementation guards by inspecting ctx.Err()
 // before falling through to the ExitError branch.
 func TestVerify_CosignTimeoutNotSignatureRejection(t *testing.T) {
+	skipNonPOSIX(t)
 	dir := t.TempDir()
 	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
 
@@ -227,6 +237,7 @@ func TestVerify_CosignTimeoutNotSignatureRejection(t *testing.T) {
 // what lets `creekctl self-upgrade` honor Ctrl-C / SIGINT during a
 // hung Rekor lookup instead of riding out the full 30s.
 func TestVerify_CtxCancelInterruptsCosign(t *testing.T) {
+	skipNonPOSIX(t)
 	dir := t.TempDir()
 	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
 	cosign := filepath.Join(dir, "cosign")
@@ -257,6 +268,7 @@ func TestVerify_CtxCancelInterruptsCosign(t *testing.T) {
 // identity regex — a regression that omitted --certificate-identity-regexp
 // would silently accept any signed checksums file.
 func TestVerify_PassesPipelineIdentityToCosign(t *testing.T) {
+	skipNonPOSIX(t)
 	dir := t.TempDir()
 	tar, sig, cert, sums := stageArtifacts(t, dir, "creekd_x.tar.gz", "bytes")
 

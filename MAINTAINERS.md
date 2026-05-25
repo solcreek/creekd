@@ -28,9 +28,9 @@ three commitments are in force:
 
 ### 1. Encrypted recovery escrow
 
-A private GitHub gist at `solcreek/creekd-recovery` is
-maintained, accessible to a paper-only off-site escrow. The
-escrow contains:
+An encrypted recovery bundle is maintained off-platform, with
+access details recorded on paper at the off-site escrow described
+below. The bundle contains:
 
 - GitHub organisation admin transfer instructions, in plain
   language for a non-technical executor.
