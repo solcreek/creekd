@@ -704,3 +704,57 @@ func TestLoadFutureVersionRefuses(t *testing.T) {
 		t.Error("NewStore accepted version=999; want error")
 	}
 }
+
+// TestLoadV2RepairsMissingMetadataAndPersists guards the contract that
+// UID + creationTimestamp are stable across restart even when the v2
+// file is hand-edited to drop the metadata block. loadV2 should
+// generate fresh metadata AND flush it back so the next restart picks
+// up the same identity.
+func TestLoadV2RepairsMissingMetadataAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	// v2 file shape with one app and no metadata block (simulates a
+	// hand-edit that stripped it or a partial write before metadata
+	// fields landed).
+	raw := `{
+  "version": 2,
+  "apps": [
+    {"config": {"id": "handedit", "command": "sleep", "args": ["30"], "port": 9700}}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write hand-edited v2 file: %v", err)
+	}
+
+	// First load — should synthesise metadata and persist it back.
+	s1, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("first NewStore: %v", err)
+	}
+	m1, ok := s1.Meta("handedit")
+	if !ok {
+		t.Fatal("Meta(handedit) returned false after repair")
+	}
+	if _, err := uuid.Parse(m1.UID); err != nil {
+		t.Fatalf("repaired UID %q is not parseable: %v", m1.UID, err)
+	}
+
+	// Second load from the same file — must surface the SAME UID.
+	// If the repair wasn't persisted, a fresh UID would be generated
+	// here and the assertion would fail.
+	s2, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("second NewStore: %v", err)
+	}
+	m2, ok := s2.Meta("handedit")
+	if !ok {
+		t.Fatal("Meta(handedit) returned false on second load")
+	}
+	if m1.UID != m2.UID {
+		t.Errorf("UID changed across restart: first=%q second=%q (repair was not persisted)", m1.UID, m2.UID)
+	}
+	if !m1.CreationTimestamp.Equal(m2.CreationTimestamp) {
+		t.Errorf("CreationTimestamp changed across restart: first=%v second=%v", m1.CreationTimestamp, m2.CreationTimestamp)
+	}
+}

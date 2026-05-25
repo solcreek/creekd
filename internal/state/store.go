@@ -343,6 +343,7 @@ func (s *Store) loadV2(data []byte) error {
 		}
 		s.volumes[v.Volume.ID] = v.Volume
 	}
+	var repaired bool
 	for _, a := range st.Apps {
 		if a.Config.ID == "" {
 			continue
@@ -357,8 +358,21 @@ func (s *Store) loadV2(data []byte) error {
 				return err
 			}
 			s.metadata[a.Config.ID] = meta
+			repaired = true
 		} else {
 			s.metadata[a.Config.ID] = a.Metadata
+		}
+	}
+	// Persist any repaired metadata back to disk. Without this, every
+	// restart would regenerate the UID — violating the contract that
+	// uid + creationTimestamp are never regenerated across restore.
+	// Mirrors the v1→v2 migration flush in load().
+	if repaired {
+		s.mu.Lock()
+		err := s.flushBoth(s.apps, s.volumes)
+		s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("state: persist repaired v2 metadata %s: %w", s.path, err)
 		}
 	}
 	return nil
