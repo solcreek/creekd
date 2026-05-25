@@ -24,7 +24,6 @@ import (
 // PrevSHA256 will no longer match the recomputed sha256 of the
 // tampered record.
 //
-// See DESIGN-self-host-state.md §"Audit log".
 type AuditEntry struct {
 	PrevSHA256 string `json:"prev_sha256"`
 	Timestamp  string `json:"ts"`

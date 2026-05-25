@@ -70,8 +70,9 @@ func TestHostKey_LoadOrCreate_RejectsCorruptFile(t *testing.T) {
 	}
 }
 
-// helper used by manifest_test.go: a deterministic keypair for
-// signing comparisons.
+// helper used across the package's test files: a freshly-generated
+// keypair (NOT deterministic — crypto/rand.Reader source) suitable
+// for tests that only need a valid signer-verifier pair.
 func mustHostKey(t *testing.T) *HostKey {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
