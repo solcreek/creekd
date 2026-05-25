@@ -53,9 +53,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: install oapi-codegen
-        run: go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest
       - name: make generate
+        # The Makefile invokes `go run oapi-codegen@<pinned version>` —
+        # no separate install step needed; pinning lives in one place.
         run: make generate
       - name: check for drift
         run: git diff --exit-code internal/apitypes/

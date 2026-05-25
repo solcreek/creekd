@@ -9,7 +9,12 @@ GO ?= go
 DOCKER ?= docker
 DOCKER_IMAGE_TAG ?= creekd-test:dev
 
-OAPI_CODEGEN ?= $(shell go env GOPATH)/bin/oapi-codegen
+# Pin to the version the committed generated files were produced with
+# (see the header of internal/apitypes/*.gen.go). `go run` resolves the
+# module from the cache or downloads it on first invocation — no need
+# to `go install` first, and no dependency on GOBIN/GOPATH/PATH.
+OAPI_CODEGEN_VERSION ?= v2.7.0
+OAPI_CODEGEN ?= go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION)
 
 # generate runs oapi-codegen to produce Go types + server interface
 # from the OpenAPI spec. Re-run after editing api/openapi.yaml.
