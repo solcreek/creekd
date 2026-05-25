@@ -1159,17 +1159,20 @@ func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	}
 	defer os.RemoveAll(tmp)
 
-	// Pull the three artifacts cosign needs + the tarball.
-	urls := map[string]string{
-		tarName:              fmt.Sprintf("%s/%s/%s", *releaseBase, version, tarName),
-		"checksums.txt":      fmt.Sprintf("%s/%s/checksums.txt", *releaseBase, version),
-		"checksums.txt.sig":  fmt.Sprintf("%s/%s/checksums.txt.sig", *releaseBase, version),
-		"checksums.txt.pem":  fmt.Sprintf("%s/%s/checksums.txt.pem", *releaseBase, version),
+	// Pull the three artifacts cosign needs + the tarball. Ordered
+	// (not a map) so log output is deterministic and the tarball —
+	// the largest fetch and the one most likely to surface a
+	// network issue — comes first.
+	downloads := []struct{ name, url string }{
+		{tarName, fmt.Sprintf("%s/%s/%s", *releaseBase, version, tarName)},
+		{"checksums.txt", fmt.Sprintf("%s/%s/checksums.txt", *releaseBase, version)},
+		{"checksums.txt.sig", fmt.Sprintf("%s/%s/checksums.txt.sig", *releaseBase, version)},
+		{"checksums.txt.pem", fmt.Sprintf("%s/%s/checksums.txt.pem", *releaseBase, version)},
 	}
-	for name, url := range urls {
-		fmt.Fprintf(w, "==> downloading %s\n", name)
-		if err := downloadFile(url, filepath.Join(tmp, name)); err != nil {
-			return fmt.Errorf("download %s: %w", name, err)
+	for _, d := range downloads {
+		fmt.Fprintf(w, "==> downloading %s\n", d.name)
+		if err := downloadFile(d.url, filepath.Join(tmp, d.name)); err != nil {
+			return fmt.Errorf("download %s: %w", d.name, err)
 		}
 	}
 

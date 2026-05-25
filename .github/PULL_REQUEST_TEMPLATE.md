@@ -1,7 +1,8 @@
 <!--
 Thanks for the PR! Please fill in the sections below. The
-checklist isn't ceremonial — the API impact box gates the api-diff
-CI workflow and the DCO sign-off gates merge.
+checklist isn't ceremonial — the API impact box and the DCO
+sign-off are both reviewer-enforced gates today; a dedicated
+api-diff workflow is planned for 0.1.0.
 -->
 
 ## Summary
@@ -15,12 +16,14 @@ Pick exactly one:
 
 - [ ] This PR does NOT change any wire format (no spec/status
       field, no endpoint, no header, no error code).
-- [ ] This PR is API-additive (only non-breaking rows in
-      `docs/api/breaking-changes.yaml`). The api-diff workflow
-      will classify automatically.
+- [ ] This PR is API-additive: append a row to
+      [`docs/api/breaking-changes.yaml`](../docs/api/breaking-changes.yaml)
+      with `kind: additive`.
 - [ ] This PR is API-breaking and references **ADR-NNNN** (must
-      exist at `docs/adr/NNNN-*.md` with `status: accepted`
-      BEFORE this PR can merge).
+      exist at [`docs/adr/NNNN-*.md`](../docs/adr/) with
+      `status: accepted` BEFORE this PR can merge). See
+      [`docs/adr/README.md`](../docs/adr/README.md) for the
+      template.
 
 ## Non-goals check
 

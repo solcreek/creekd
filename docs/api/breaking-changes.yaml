@@ -1,0 +1,25 @@
+# API change ledger for creekd's admin API (api/openapi.yaml).
+#
+# The PR template's "API impact" section refers contributors here.
+# Every PR that touches the wire format declares its impact by
+# adding a row below (additive) or by linking an ADR that justifies
+# a breaking row.
+#
+# Schema:
+#   versions:
+#     - version: vX.Y.Z              # the release the change shipped in
+#       date: YYYY-MM-DD
+#       changes:
+#         - kind: additive | breaking
+#           summary: one-line description of the change
+#           ref:     PR or ADR number (e.g. "#42" or "ADR-0003")
+#           migration: ""             # empty for additive
+#                                     # required for breaking — say
+#                                     # what callers must do
+#
+# Phase 1 status (0.0.x): the API is unstable; this file is the
+# place to start tracking entries, but breaking changes are
+# permitted without an ADR until 0.1.0 freezes the surface. The
+# `kind: breaking` rows below 0.1.0 are advisory.
+
+versions: []

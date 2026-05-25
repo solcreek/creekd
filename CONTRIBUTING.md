@@ -111,7 +111,8 @@ git config format.signOff true
 ```
 
 PRs missing sign-off on any commit are blocked at merge time
-(checked by the api-diff CI workflow).
+(reviewer-enforced today; an automated DCO check will land with
+the api-diff workflow in 0.1.0).
 
 ## License
 
