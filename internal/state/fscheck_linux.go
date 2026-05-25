@@ -53,14 +53,20 @@ func fsNameByMagic(magic int64) string {
 // rather than discovering it through silent data loss.
 func checkFilesystem(statePath string) error {
 	dir := filepath.Dir(statePath)
-	// MkdirAll first so statfs has something real to inspect even on
-	// fresh installs (NewStore is allowed to be called before any
-	// AddApp).
+	// On a fresh install the state dir doesn't exist yet (NewStore is
+	// allowed to be called before any AddApp). Statfs on a missing
+	// path returns ENOENT; walk up to the deepest existing ancestor in
+	// that case so we still check the right filesystem.
+	//
+	// Other Statfs errors (EACCES, EIO, EFAULT, ...) must propagate —
+	// falling back to ancestors would mis-detect the filesystem
+	// (e.g. accept ext4 based on /var when the intended dir lives on
+	// zfs) and let creekd boot on an unsupported fs.
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {
-		// Directory doesn't exist yet — statfs the deepest existing
-		// ancestor. /var/lib/creekd doesn't exist? walk up to /var,
-		// then /, both of which always exist on a Linux host.
+		if err != unix.ENOENT && err != unix.ENOTDIR {
+			return fmt.Errorf("state: statfs %s: %w", dir, err)
+		}
 		probe := dir
 		for {
 			parent := filepath.Dir(probe)
@@ -68,8 +74,12 @@ func checkFilesystem(statePath string) error {
 				return fmt.Errorf("state: statfs %s: %w", dir, err)
 			}
 			probe = parent
-			if err2 := unix.Statfs(probe, &st); err2 == nil {
+			err2 := unix.Statfs(probe, &st)
+			if err2 == nil {
 				break
+			}
+			if err2 != unix.ENOENT && err2 != unix.ENOTDIR {
+				return fmt.Errorf("state: statfs %s (probing for ancestor of %s): %w", probe, dir, err2)
 			}
 		}
 	}
