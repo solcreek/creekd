@@ -112,6 +112,7 @@ func (v *Verifier) verifyCosign(parentCtx context.Context, sigPath, certPath, ch
 	ctx, cancel := context.WithTimeout(parentCtx, cosignVerifyTimeout)
 	defer cancel()
 
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, bin, "verify-blob",
 		"--certificate-identity-regexp", identity,
 		"--certificate-oidc-issuer", issuer,
@@ -131,8 +132,11 @@ func (v *Verifier) verifyCosign(parentCtx context.Context, sigPath, certPath, ch
 		// propagated from the parent ctx. Both are availability,
 		// not security; the message distinguishes them so the
 		// operator knows whether to retry or fix the install.
+		// Report the actual elapsed time — the parent ctx may have
+		// fired with a deadline shorter than cosignVerifyTimeout,
+		// in which case the literal const would overstate the wait.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("upgrade: cosign unavailable (%s): timed out after %s", bin, cosignVerifyTimeout)
+			return fmt.Errorf("upgrade: cosign unavailable (%s): timed out after %s", bin, time.Since(start).Round(time.Millisecond))
 		}
 		return fmt.Errorf("upgrade: cosign unavailable (%s): %w", bin, ctx.Err())
 	}
