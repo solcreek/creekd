@@ -1,9 +1,9 @@
 // Package hardening validates that the running creekd systemd unit
-// carries every hardening directive specified by
-// DESIGN-self-host-state.md §"creekd privilege model & systemd
-// hardening". `creek host doctor` (lands with #23 CLI) wraps the
-// Validate function to surface drift as the `systemd_hardening_drift`
-// error code so an operator can re-apply the shipped unit.
+// carries every directive in the canonical hardening set defined by
+// RequiredDirectives in this package. `creek host doctor` (lands
+// with #23 CLI) wraps the Validate function to surface drift as the
+// `systemd_hardening_drift` error code so an operator can re-apply
+// the shipped unit.
 //
 // The validator parses an INI-style systemd unit (the on-disk
 // .service file at /etc/systemd/system/creekd.service) and reports

@@ -100,6 +100,31 @@ func TestValidate_SystemCallFilterOrderInsensitive(t *testing.T) {
 	}
 }
 
+// TestValidate_ReadWritePathsOrderInsensitive: ReadWritePaths uses a
+// strict set matcher, so swapping the order of the two shipped paths
+// MUST NOT trigger drift.
+func TestValidate_ReadWritePathsOrderInsensitive(t *testing.T) {
+	body := strings.Replace(minimalHardenedUnit(),
+		"ReadWritePaths=/var/lib/creekd /var/log/creekd",
+		"ReadWritePaths=/var/log/creekd /var/lib/creekd", 1)
+	if drift := mustValidate(t, body); len(drift) != 0 {
+		t.Errorf("reordered ReadWritePaths triggered drift: %v", drift)
+	}
+}
+
+// TestValidate_ReadWritePathsExtraPathIsDrift: an override that adds a
+// path beyond the canonical set silently broadens the write surface and
+// MUST be flagged. This is the comment's motivating regression.
+func TestValidate_ReadWritePathsExtraPathIsDrift(t *testing.T) {
+	body := strings.Replace(minimalHardenedUnit(),
+		"ReadWritePaths=/var/lib/creekd /var/log/creekd",
+		"ReadWritePaths=/var/lib/creekd /var/log/creekd /etc", 1)
+	drift := mustValidate(t, body)
+	if d := findDrift(drift, "ReadWritePaths"); d.Reason != "weakened" {
+		t.Errorf("extra ReadWritePaths entry not flagged: %+v", d)
+	}
+}
+
 // TestValidate_IgnoresCommentsAndBlankLines is a parse-robustness
 // check: a unit file with comments + blank lines must validate
 // just as cleanly.

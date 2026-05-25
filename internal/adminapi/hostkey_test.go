@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"net/http"
+	"path/filepath"
 	"testing"
 
 	"github.com/solcreek/creekd/internal/apitypes"
@@ -16,7 +17,7 @@ import (
 // through the public path is the only way to keep test + prod aligned.
 func newTestHostkey(t *testing.T) *backup.HostKey {
 	t.Helper()
-	hk, err := backup.LoadOrCreateHostKey(t.TempDir() + "/k")
+	hk, err := backup.LoadOrCreateHostKey(filepath.Join(t.TempDir(), "k"))
 	if err != nil {
 		t.Fatalf("LoadOrCreateHostKey: %v", err)
 	}

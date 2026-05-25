@@ -1045,10 +1045,10 @@ func runDescribe(_ context.Context, w io.Writer, argv []string) error {
 }
 
 // runHardeningCheck validates a systemd unit file against the
-// canonical hardening set (DESIGN-self-host-state.md §"creekd
-// privilege model"). Argv[0] is the path to the unit file; defaults
-// to /etc/systemd/system/creekd.service. Exits 0 on clean, 1 on
-// drift detected (matching shellcheck / lint convention).
+// canonical hardening set defined by hardening.RequiredDirectives.
+// Argv[0] is the path to the unit file; defaults to
+// /etc/systemd/system/creekd.service. Exits 0 on clean, 1 on drift
+// detected (matching shellcheck / lint convention).
 //
 // `creek host doctor` (when the laptop CLI lands in #23) wraps the
 // same internal/hardening validator and surfaces the result as the
@@ -1061,6 +1061,7 @@ func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
+	cf.resolveJSON()
 	path := "/etc/systemd/system/creekd.service"
 	if rest := fs.Args(); len(rest) > 0 {
 		path = rest[0]

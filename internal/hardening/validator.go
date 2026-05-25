@@ -33,10 +33,12 @@ func (d Drift) String() string {
 	return fmt.Sprintf("%s: %s (got %q, want %q)", d.Key, d.Reason, d.Got, d.Want)
 }
 
-// RequiredDirectives returns the canonical hardening set per
-// DESIGN-self-host-state.md §"creekd privilege model & systemd
-// hardening". Keys are directive names; values are the expected
-// values. Order is the order the validator reports drift in.
+// RequiredDirectives returns the canonical hardening set. This
+// function is itself the source-of-truth — callers should not
+// reach for an external doc to learn what creekd's privilege model
+// looks like, they should read this list. Keys are directive names;
+// values are the expected values. Order is the order the validator
+// reports drift in.
 //
 // Returning a fresh slice (not a global) keeps the canonical set
 // immutable from a caller's perspective.
@@ -64,6 +66,11 @@ func RequiredDirectives() []Required {
 		{"AmbientCapabilities", "CAP_NET_BIND_SERVICE", matchExact},
 		{"LimitCORE", "0", matchExact},
 		{"DynamicUser", "no", matchExact},
+		// ReadWritePaths is the escape hatch ProtectSystem=strict relies
+		// on; both adding extra paths (broadening write surface) and
+		// removing required paths (breaking runtime) count as drift, so
+		// the matcher demands an exact set match.
+		{"ReadWritePaths", "/var/lib/creekd /var/log/creekd", matchPathSet},
 	}
 }
 
@@ -102,6 +109,28 @@ func matchSyscallFilter(want, got string) bool {
 	}
 	for _, t := range w {
 		if !seen[t] {
+			return false
+		}
+	}
+	return true
+}
+
+// matchPathSet is a strict set comparison: same paths, no extras,
+// order-insensitive. Used for ReadWritePaths where extra entries
+// silently widen the write surface and missing entries break runtime
+// writes — both are drift the operator needs to see.
+func matchPathSet(want, got string) bool {
+	w := strings.Fields(want)
+	g := strings.Fields(got)
+	if len(w) != len(g) {
+		return false
+	}
+	seen := make(map[string]bool, len(g))
+	for _, p := range g {
+		seen[p] = true
+	}
+	for _, p := range w {
+		if !seen[p] {
 			return false
 		}
 	}
