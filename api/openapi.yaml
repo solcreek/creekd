@@ -597,7 +597,11 @@ components:
           type: integer
         status:
           type: string
-          enum: [starting, running, crash_loop, stopping, stopped]
+          # Values mirror supervisor.Status.String() output. The
+          # crash-looping spelling (hyphen) is the wire format already
+          # used by Prometheus metrics and the audit log; the spec
+          # follows the code rather than the other way around.
+          enum: [unknown, starting, running, crashed, crash-looping, stopped, unhealthy]
         pid:
           type: integer
         uptime_ms:

@@ -13,17 +13,21 @@ const (
 
 // Defines values for AppViewStatus.
 const (
-	CrashLoop AppViewStatus = "crash_loop"
-	Running   AppViewStatus = "running"
-	Starting  AppViewStatus = "starting"
-	Stopped   AppViewStatus = "stopped"
-	Stopping  AppViewStatus = "stopping"
+	CrashLooping AppViewStatus = "crash-looping"
+	Crashed      AppViewStatus = "crashed"
+	Running      AppViewStatus = "running"
+	Starting     AppViewStatus = "starting"
+	Stopped      AppViewStatus = "stopped"
+	Unhealthy    AppViewStatus = "unhealthy"
+	Unknown      AppViewStatus = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the AppViewStatus enum.
 func (e AppViewStatus) Valid() bool {
 	switch e {
-	case CrashLoop:
+	case CrashLooping:
+		return true
+	case Crashed:
 		return true
 	case Running:
 		return true
@@ -31,7 +35,9 @@ func (e AppViewStatus) Valid() bool {
 		return true
 	case Stopped:
 		return true
-	case Stopping:
+	case Unhealthy:
+		return true
+	case Unknown:
 		return true
 	default:
 		return false
