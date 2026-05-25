@@ -76,6 +76,15 @@ func WriteTier0(opts Options) (*Result, error) {
 	}
 
 	now := opts.Now().UTC()
+	files := map[string]string{
+		"state.json": hashOne(stateBytes),
+	}
+	if len(walBytes) > 0 {
+		files["state.json.wal"] = hashOne(walBytes)
+	}
+	if len(auditBytes) > 0 {
+		files["audit.log"] = hashOne(auditBytes)
+	}
 	m := Manifest{
 		CreekdVersion:      opts.CreekdVersion,
 		SchemaVersion:      opts.SchemaVersion,
@@ -83,6 +92,7 @@ func WriteTier0(opts Options) (*Result, error) {
 		AuditLogTipHash:    auditTipHash,
 		FleetCAFingerprint: opts.HostKey.Fingerprint, // Stage 0: hostkey IS the trust anchor
 		ContentHash:        hashContent(stateBytes, walBytes, auditBytes),
+		Files:              files,
 	}
 	if err := SignManifest(&m, opts.HostKey); err != nil {
 		return nil, err

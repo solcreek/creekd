@@ -10,23 +10,36 @@ import (
 	"fmt"
 )
 
-// Manifest is the signed payload accompanying a Tier 0 backup. It
-// matches the schema documented in DESIGN-self-host-state.md
-// §"Tier 0 — local (always on)".
+// Manifest is the signed payload accompanying a Tier 0 backup.
 //
 // All hash fields are hex with a "sha256:" prefix. The signature
 // is "ed25519:" + base64(64 raw signature bytes). The signature
 // covers the JSON encoding of the manifest with Signature left
 // empty — see signableBytes for the exact rule.
+//
+// ContentHash is a rolled-up sha256 over (state || wal || audit)
+// — convenient for a single-shot "did anything change" check, but
+// can't tell you WHICH file is corrupted on failure. Files carries
+// per-archive-member digests so verify-on-restore can identify the
+// specific corrupted file (state.json vs state.json.wal vs
+// audit.log vs an extras/ entry).
 type Manifest struct {
-	CreekdVersion      string `json:"creekdVersion"`
-	SchemaVersion      int    `json:"schemaVersion"`
-	BackupTimestamp    string `json:"backupTimestamp"`
-	AuditLogTipHash    string `json:"auditLogTipHash"`
-	FleetCAFingerprint string `json:"fleetCAFingerprint"`
-	ContentHash        string `json:"contentHash"`
-	SignedBy           string `json:"signedBy"`
-	Signature          string `json:"signature"`
+	CreekdVersion      string            `json:"creekdVersion"`
+	SchemaVersion      int               `json:"schemaVersion"`
+	BackupTimestamp    string            `json:"backupTimestamp"`
+	AuditLogTipHash    string            `json:"auditLogTipHash"`
+	FleetCAFingerprint string            `json:"fleetCAFingerprint"`
+	ContentHash        string            `json:"contentHash"`
+	Files              map[string]string `json:"files,omitempty"`
+	SignedBy           string            `json:"signedBy"`
+	Signature          string            `json:"signature"`
+}
+
+// hashOne returns "sha256:" + hex(sha256(data)). Used to populate
+// Manifest.Files entries.
+func hashOne(data []byte) string {
+	h := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(h[:])
 }
 
 // ManifestVerificationError signals that a parsed manifest failed

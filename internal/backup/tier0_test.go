@@ -390,3 +390,40 @@ func TestReadArtifact_MissingStateErrors(t *testing.T) {
 		t.Error("ReadArtifact on tarball missing state.json should error")
 	}
 }
+
+// TestTier0_ManifestPerFileDigests covers the per-file digest map
+// in MANIFEST.json: callers performing forensic restore must be
+// able to identify WHICH archive member is corrupted (not just
+// that something is corrupted). The Files map is the source of
+// that information; without it, ContentHash mismatch only tells
+// you "something changed".
+func TestTier0_ManifestPerFileDigests(t *testing.T) {
+	state := setupStateDir(t)
+	if err := os.WriteFile(filepath.Join(state, "state.json.wal"),
+		[]byte(`{"type":"pending","token":"x"}`+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	bdir := t.TempDir()
+	key := mustHostKey(t)
+	res, err := WriteTier0(Options{
+		StateDir: state, BackupDir: bdir,
+		CreekdVersion: "0.0.1", SchemaVersion: 2,
+		HostKey: key, Now: fakeNow(time.Unix(1_700_000_000, 0)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Manifest.Files == nil {
+		t.Fatal("Manifest.Files is nil, want per-file digest map")
+	}
+	for _, want := range []string{"state.json", "state.json.wal", "audit.log"} {
+		got, ok := res.Manifest.Files[want]
+		if !ok {
+			t.Errorf("Manifest.Files missing entry for %q", want)
+			continue
+		}
+		if !strings.HasPrefix(got, "sha256:") {
+			t.Errorf("Manifest.Files[%q] = %q, want sha256: prefix", want, got)
+		}
+	}
+}
