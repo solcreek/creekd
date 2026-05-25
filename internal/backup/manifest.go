@@ -98,11 +98,12 @@ func signableBytes(m *Manifest) ([]byte, error) {
 	return json.Marshal(&cp)
 }
 
-// hashContent returns "sha256:" + hex(sha256(stateJSON || auditLog)).
-// Either input may be empty; concatenation order is fixed.
-func hashContent(stateJSON, auditLog []byte) string {
+// hashContent returns "sha256:" + hex(sha256(stateJSON || walJSON || auditLog)).
+// Any input may be empty; concatenation order is fixed.
+func hashContent(stateJSON, walJSON, auditLog []byte) string {
 	h := sha256.New()
 	h.Write(stateJSON)
+	h.Write(walJSON)
 	h.Write(auditLog)
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }

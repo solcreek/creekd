@@ -1,10 +1,14 @@
 package backup
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -81,14 +85,14 @@ func TestTier0_ReadArtifactRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stateBytes, auditBytes, m, _, err := ReadArtifact(res.ArtifactPath)
+	stateBytes, walBytes, auditBytes, m, _, err := ReadArtifact(res.ArtifactPath)
 	if err != nil {
 		t.Fatalf("ReadArtifact: %v", err)
 	}
 	if err := VerifyManifest(&m, key.Pub); err != nil {
 		t.Errorf("untarred manifest verify: %v", err)
 	}
-	recomputed := hashContent(stateBytes, auditBytes)
+	recomputed := hashContent(stateBytes, walBytes, auditBytes)
 	if recomputed != m.ContentHash {
 		t.Errorf("recomputed contentHash = %q, want %q", recomputed, m.ContentHash)
 	}
@@ -122,11 +126,11 @@ func TestTier0_DetectsTamperedPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, auditBytes, _, _, err := ReadArtifact(res.ArtifactPath)
+	_, walBytes, auditBytes, _, _, err := ReadArtifact(res.ArtifactPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := hashContent(mutated, auditBytes)
+	got := hashContent(mutated, walBytes, auditBytes)
 	if got == res.Manifest.ContentHash {
 		t.Error("contentHash for tampered state should differ from manifest's stored value, but matched — collision or bug")
 	}
@@ -272,5 +276,117 @@ func TestTier0_RequiresHostKey(t *testing.T) {
 	_, err := WriteTier0(Options{StateDir: state, BackupDir: bdir})
 	if err == nil {
 		t.Error("WriteTier0 with no HostKey should error")
+	}
+}
+
+// TestTier0_IncludesWAL guards that state.json.wal is captured in
+// the backup when present. Without this, a backup mid-flush would
+// lose any orphan pending records, breaking crash-recovery on
+// restore.
+func TestTier0_IncludesWAL(t *testing.T) {
+	state := setupStateDir(t)
+	walContent := []byte(`{"type":"pending","token":"abc","state_payload":"eyJmb28iOiJiYXIifQ=="}` + "\n")
+	if err := os.WriteFile(filepath.Join(state, "state.json.wal"), walContent, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	bdir := t.TempDir()
+	key := mustHostKey(t)
+	res, err := WriteTier0(Options{
+		StateDir: state, BackupDir: bdir,
+		CreekdVersion: "0.0.1", SchemaVersion: 2,
+		HostKey: key, Now: fakeNow(time.Unix(1_700_000_000, 0)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, walBytes, _, _, _, err := ReadArtifact(res.ArtifactPath)
+	if err != nil {
+		t.Fatalf("ReadArtifact: %v", err)
+	}
+	if !bytes.Equal(walBytes, walContent) {
+		t.Errorf("WAL bytes from backup = %q, want %q", walBytes, walContent)
+	}
+}
+
+// TestTier0_KeepNegativeRejected guards validateOptions: a negative
+// Keep value previously slipped through and caused pruneOldest to
+// compute an out-of-range slice.
+func TestTier0_KeepNegativeRejected(t *testing.T) {
+	state := setupStateDir(t)
+	bdir := t.TempDir()
+	key := mustHostKey(t)
+	_, err := WriteTier0(Options{
+		StateDir: state, BackupDir: bdir,
+		CreekdVersion: "0.0.1", SchemaVersion: 2,
+		HostKey: key, Keep: -1,
+		Now: fakeNow(time.Unix(1_700_000_000, 0)),
+	})
+	if err == nil {
+		t.Error("WriteTier0 with Keep=-1 should error")
+	}
+}
+
+// TestTier0_FilenamesSortChronological guards that the unix-nano
+// fixed-width filename format keeps lex-sort == chrono-sort so
+// pruneOldest can rely on sort.Strings.
+func TestTier0_FilenamesSortChronological(t *testing.T) {
+	state := setupStateDir(t)
+	bdir := t.TempDir()
+	key := mustHostKey(t)
+	// Three backups at strictly increasing UnixNano timestamps.
+	tsList := []time.Time{
+		time.Unix(1_000_000_000, 0), // ~2001
+		time.Unix(1_700_000_000, 0), // ~2023
+		time.Unix(2_000_000_000, 0), // ~2033
+	}
+	for _, ts := range tsList {
+		_, err := WriteTier0(Options{
+			StateDir: state, BackupDir: bdir,
+			CreekdVersion: "0.0.1", SchemaVersion: 2,
+			HostKey: key, Now: fakeNow(ts),
+		})
+		if err != nil {
+			t.Fatalf("WriteTier0 @ %v: %v", ts, err)
+		}
+	}
+	entries, _ := os.ReadDir(bdir)
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tar.gz") {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) != 3 {
+		t.Fatalf("got %d artifact names, want 3: %v", len(names), names)
+	}
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	for i, n := range names {
+		if n != sorted[i] {
+			t.Errorf("lex sort doesn't match chronological order at position %d: %s vs %s", i, n, sorted[i])
+		}
+	}
+}
+
+// TestReadArtifact_MissingStateErrors guards that ReadArtifact
+// reports an error rather than returning a zero-value Manifest when
+// the tarball is missing required entries.
+func TestReadArtifact_MissingStateErrors(t *testing.T) {
+	// Build a minimal tarball with ONLY MANIFEST.json (no state.json).
+	bdir := t.TempDir()
+	bogus := filepath.Join(bdir, "bogus.tar.gz")
+	f, _ := os.Create(bogus)
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	body := []byte(`{"creekd_version":"x"}`)
+	_ = tw.WriteHeader(&tar.Header{Name: "MANIFEST.json", Mode: 0o640, Size: int64(len(body))})
+	_, _ = tw.Write(body)
+	_ = tw.Close()
+	_ = gz.Close()
+	_ = f.Close()
+
+	_, _, _, _, _, err := ReadArtifact(bogus)
+	if err == nil {
+		t.Error("ReadArtifact on tarball missing state.json should error")
 	}
 }

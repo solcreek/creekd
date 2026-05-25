@@ -113,14 +113,18 @@ func TestSignManifest_RejectsNilKey(t *testing.T) {
 // order matters (so a swapped state+audit can't satisfy the same
 // hash).
 func TestHashContent_Stable(t *testing.T) {
-	h1 := hashContent([]byte("alpha"), []byte("beta"))
-	h2 := hashContent([]byte("alpha"), []byte("beta"))
+	h1 := hashContent([]byte("alpha"), []byte("gamma"), []byte("beta"))
+	h2 := hashContent([]byte("alpha"), []byte("gamma"), []byte("beta"))
 	if h1 != h2 {
 		t.Error("same input must yield same hash")
 	}
-	h3 := hashContent([]byte("beta"), []byte("alpha")) // swapped
+	h3 := hashContent([]byte("beta"), []byte("gamma"), []byte("alpha")) // swap state/audit
 	if h1 == h3 {
 		t.Error("swapping state/audit must change hash (concatenation order is load-bearing)")
+	}
+	h4 := hashContent([]byte("alpha"), []byte("delta"), []byte("beta")) // change WAL
+	if h1 == h4 {
+		t.Error("changing WAL bytes must change hash")
 	}
 }
 

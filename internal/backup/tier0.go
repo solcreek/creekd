@@ -48,16 +48,27 @@ type Result struct {
 }
 
 // WriteTier0 produces one backup tar.gz under opts.BackupDir.
-// Steps: read state.json + audit.log → compute contentHash →
-// build + sign manifest → tar+gzip everything → fsync → prune.
+// Steps: read state.json + state.json.wal + audit.log → compute
+// contentHash → build + sign manifest → tar+gzip everything →
+// fsync → prune.
+//
+// state.json.wal is bundled when present so a restore can replay
+// any orphan pending records — without it, a backup captured
+// mid-flush would lose intent recorded in the WAL but not yet
+// landed in state.json.
 func WriteTier0(opts Options) (*Result, error) {
 	if err := validateOptions(&opts); err != nil {
 		return nil, err
 	}
 
-	stateBytes, err := os.ReadFile(filepath.Join(opts.StateDir, "state.json"))
+	statePath := filepath.Join(opts.StateDir, "state.json")
+	stateBytes, err := os.ReadFile(statePath)
 	if err != nil {
 		return nil, fmt.Errorf("backup: read state.json: %w", err)
+	}
+	walBytes, err := readOptional(statePath + ".wal")
+	if err != nil {
+		return nil, fmt.Errorf("backup: read state.json.wal: %w", err)
 	}
 	auditBytes, auditTipHash, err := readAuditLog(filepath.Join(opts.StateDir, "audit.log"))
 	if err != nil {
@@ -71,7 +82,7 @@ func WriteTier0(opts Options) (*Result, error) {
 		BackupTimestamp:    now.Format(time.RFC3339),
 		AuditLogTipHash:    auditTipHash,
 		FleetCAFingerprint: opts.HostKey.Fingerprint, // Stage 0: hostkey IS the trust anchor
-		ContentHash:        hashContent(stateBytes, auditBytes),
+		ContentHash:        hashContent(stateBytes, walBytes, auditBytes),
 	}
 	if err := SignManifest(&m, opts.HostKey); err != nil {
 		return nil, err
@@ -81,9 +92,13 @@ func WriteTier0(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("backup: marshal manifest: %w", err)
 	}
 
-	artifactName := fmt.Sprintf("state-%d.tar.gz", now.Unix())
+	// Filename uses UnixNano so two backups in the same wall-clock
+	// second don't collide and one overwrite the other. Fixed-width
+	// (19-digit) padding means lexicographic sort matches
+	// chronological order — important for pruneOldest's correctness.
+	artifactName := fmt.Sprintf("state-%019d.tar.gz", now.UnixNano())
 	artifactPath := filepath.Join(opts.BackupDir, artifactName)
-	if err := writeArtifact(artifactPath, &opts, stateBytes, auditBytes, manifestJSON); err != nil {
+	if err := writeArtifact(artifactPath, &opts, stateBytes, walBytes, auditBytes, manifestJSON); err != nil {
 		return nil, err
 	}
 
@@ -92,6 +107,19 @@ func WriteTier0(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("backup: prune: %w", err)
 	}
 	return &Result{ArtifactPath: artifactPath, Manifest: m, Pruned: pruned}, nil
+}
+
+// readOptional returns the file's contents, or nil bytes + nil error
+// when the file doesn't exist. Other errors propagate.
+func readOptional(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func validateOptions(opts *Options) error {
@@ -103,6 +131,9 @@ func validateOptions(opts *Options) error {
 	}
 	if opts.HostKey == nil {
 		return errors.New("backup: HostKey required")
+	}
+	if opts.Keep < 0 {
+		return fmt.Errorf("backup: Keep must be >= 0 (got %d); use 0 for the default of %d", opts.Keep, Tier0Keep)
 	}
 	if opts.Keep == 0 {
 		opts.Keep = Tier0Keep
@@ -143,34 +174,47 @@ func auditTipHash(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func writeArtifact(path string, opts *Options, stateBytes, auditBytes, manifestJSON []byte) error {
+func writeArtifact(path string, opts *Options, stateBytes, walBytes, auditBytes, manifestJSON []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
 	if err != nil {
 		return fmt.Errorf("backup: open artifact tmp: %w", err)
 	}
+	// Capture a single mtime up front so every tar entry shares it
+	// (necessary for the "deterministic tarball" guarantee — otherwise
+	// each writeTarFile call advances opts.Now and the headers drift).
+	mtime := opts.Now().UTC()
 	gz := gzip.NewWriter(f)
+	// Pin gzip header ModTime to the same mtime; gzip.NewWriter's
+	// default is time.Now(), which would defeat byte-determinism even
+	// when the tar payload is identical.
+	gz.ModTime = mtime
 	tw := tar.NewWriter(gz)
 
-	if err := writeTarFile(tw, "state.json", stateBytes, opts.Now()); err != nil {
+	if err := writeTarFile(tw, "state.json", stateBytes, mtime); err != nil {
 		return closeTmp(tw, gz, f, tmp, err)
 	}
+	if len(walBytes) > 0 {
+		if err := writeTarFile(tw, "state.json.wal", walBytes, mtime); err != nil {
+			return closeTmp(tw, gz, f, tmp, err)
+		}
+	}
 	if len(auditBytes) > 0 {
-		if err := writeTarFile(tw, "audit.log", auditBytes, opts.Now()); err != nil {
+		if err := writeTarFile(tw, "audit.log", auditBytes, mtime); err != nil {
 			return closeTmp(tw, gz, f, tmp, err)
 		}
 	}
 	if opts.ACMEDir != "" {
-		if err := writeTarDir(tw, "acme/", opts.ACMEDir, opts.Now()); err != nil {
+		if err := writeTarDir(tw, "acme/", opts.ACMEDir, mtime); err != nil {
 			return closeTmp(tw, gz, f, tmp, err)
 		}
 	}
 	if opts.SystemdUnitPath != "" {
-		if err := writeTarMaybe(tw, "creekd.service", opts.SystemdUnitPath, opts.Now()); err != nil {
+		if err := writeTarMaybe(tw, "creekd.service", opts.SystemdUnitPath, mtime); err != nil {
 			return closeTmp(tw, gz, f, tmp, err)
 		}
 	}
-	if err := writeTarFile(tw, "MANIFEST.json", manifestJSON, opts.Now()); err != nil {
+	if err := writeTarFile(tw, "MANIFEST.json", manifestJSON, mtime); err != nil {
 		return closeTmp(tw, gz, f, tmp, err)
 	}
 
@@ -247,6 +291,10 @@ func writeTarDir(tw *tar.Writer, tarPrefix, srcDir string, mtime time.Time) erro
 	if err != nil {
 		return fmt.Errorf("backup: readdir %s: %w", srcDir, err)
 	}
+	// os.ReadDir's result order is filesystem-dependent — sort by name
+	// so tar member ordering is stable across runs (required for the
+	// deterministic-tarball property).
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -294,9 +342,15 @@ func pruneOldest(dir string, keep int) ([]string, error) {
 // ReadArtifact reads a Tier 0 tarball back into its component
 // bytes plus the parsed manifest. It is the inverse of writeArtifact
 // for the parts that matter to restore + tests: state.json,
-// audit.log (may be empty), MANIFEST.json. acme/ + creekd.service
-// are returned in `extras` keyed by archive name.
-func ReadArtifact(path string) (stateJSON, auditLog []byte, m Manifest, extras map[string][]byte, err error) {
+// state.json.wal (may be empty), audit.log (may be empty),
+// MANIFEST.json. acme/ + creekd.service are returned in `extras`
+// keyed by archive name.
+//
+// Returns an error when required entries (state.json, MANIFEST.json)
+// are missing — silently returning a zero-value manifest would
+// produce a "success" that hides a malformed artifact and let
+// restore proceed with empty data.
+func ReadArtifact(path string) (stateJSON, walJSON, auditLog []byte, m Manifest, extras map[string][]byte, err error) {
 	f, oerr := os.Open(path)
 	if oerr != nil {
 		err = oerr
@@ -311,6 +365,7 @@ func ReadArtifact(path string) (stateJSON, auditLog []byte, m Manifest, extras m
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	extras = map[string][]byte{}
+	var sawState, sawManifest bool
 	for {
 		hdr, terr := tr.Next()
 		if errors.Is(terr, io.EOF) {
@@ -328,6 +383,9 @@ func ReadArtifact(path string) (stateJSON, auditLog []byte, m Manifest, extras m
 		switch hdr.Name {
 		case "state.json":
 			stateJSON = buf.Bytes()
+			sawState = true
+		case "state.json.wal":
+			walJSON = buf.Bytes()
 		case "audit.log":
 			auditLog = buf.Bytes()
 		case "MANIFEST.json":
@@ -335,9 +393,18 @@ func ReadArtifact(path string) (stateJSON, auditLog []byte, m Manifest, extras m
 				err = fmt.Errorf("backup: parse manifest from artifact: %w", jerr)
 				return
 			}
+			sawManifest = true
 		default:
 			extras[hdr.Name] = buf.Bytes()
 		}
+	}
+	if !sawState {
+		err = fmt.Errorf("backup: artifact %s is missing required state.json entry", path)
+		return
+	}
+	if !sawManifest {
+		err = fmt.Errorf("backup: artifact %s is missing required MANIFEST.json entry", path)
+		return
 	}
 	return
 }
