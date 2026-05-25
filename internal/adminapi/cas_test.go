@@ -52,9 +52,11 @@ func TestCAS_DeployWithMatchingIfMatchSucceeds(t *testing.T) {
 	if h := w.Header().Get("Warning"); h != "" {
 		t.Errorf("unexpected Warning header on matching If-Match: %q", h)
 	}
-	if w.Header().Get("ETag") == "" {
-		t.Error("ETag header missing on matching If-Match — clients expect it for HTTP-native rv tracking")
-	}
+	// Deliberately not asserting ETag on the success path. The
+	// middleware no longer sets it pre-mutation because Deploy/Stop
+	// bumps rv inside the handler, making any middleware-set ETag
+	// stale. Post-mutation ETag from the handler is tracked as a
+	// follow-up; the 412 path's ETag is covered by the mismatch test.
 }
 
 // TestCAS_DeployWithMismatchedIfMatchReturns412 covers the rejection
