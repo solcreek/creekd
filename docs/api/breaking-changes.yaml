@@ -21,5 +21,19 @@
 # place to start tracking entries, but breaking changes are
 # permitted without an ADR until 0.1.0 freezes the surface. The
 # `kind: breaking` rows below 0.1.0 are advisory.
+#
+# Unreleased entries land under `version: unreleased`; the
+# release engineer relocates them under the actual semver tag at
+# tag time.
 
-versions: []
+versions:
+  - version: unreleased
+    changes:
+      - kind: additive
+        summary: |
+          New ErrorCode value `upgrade_signature_invalid` for the
+          admin API's error response, returned when
+          `creekctl self-upgrade` rejects an artifact via cosign
+          signature mismatch or tarball SHA256 mismatch.
+        ref: "#11"
+        migration: ""

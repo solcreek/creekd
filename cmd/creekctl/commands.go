@@ -1232,7 +1232,10 @@ func runSelfUpgrade(ctx context.Context, w io.Writer, argv []string) error {
 		return fmt.Errorf("reserve stash path: %w", err)
 	}
 	stashPath := stashFile.Name()
-	stashFile.Close()
+	if err := stashFile.Close(); err != nil {
+		_ = os.Remove(stashPath)
+		return fmt.Errorf("reserve stash path: close: %w", err)
+	}
 	_ = os.Remove(stashPath)
 	defer os.Remove(stashPath)
 	if err := upgrade.CopyFile(dPath, stashPath); err != nil {
