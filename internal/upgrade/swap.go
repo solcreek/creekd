@@ -85,7 +85,11 @@ func SwapBinary(src, dst string) error {
 
 // CopyFile duplicates src to dst. Tries a hard link first (O(1),
 // shared inode, no extra disk space); on EXDEV / EPERM / FS that
-// doesn't support hard links, falls back to a byte copy.
+// doesn't support hard links, or when dst already exists, falls
+// back to a byte copy via CreateTemp + rename. The temp+rename
+// path avoids the symlink-clobber risk of opening a predictable
+// dst with O_CREATE|O_TRUNC.
+//
 // Callers depending on dst being a DISTINCT inode from src must
 // not use this — use SwapBinary for the atomic-swap primitive
 // that always allocates a fresh inode.
@@ -102,13 +106,31 @@ func CopyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	out, err := os.CreateTemp(filepath.Dir(dst), ".copy-*.tmp")
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
 		return err
 	}
-	return out.Close()
+	if err := out.Chmod(info.Mode().Perm()); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }

@@ -86,6 +86,47 @@ func TestSwapBinary_NoTempLeftOnSuccess(t *testing.T) {
 	}
 }
 
+// TestCopyFile_DoesNotFollowSymlink covers the byte-copy fallback's
+// symlink-safety: if dst points at a symlink to some other path,
+// CopyFile MUST NOT follow it through and overwrite the target.
+// Pre-existing files are replaced atomically via rename, which
+// swaps the directory entry rather than writing through any
+// existing symlink.
+func TestCopyFile_DoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.WriteFile(src, []byte("src-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Force the byte-copy fallback by placing src + dst on what
+	// MAY be the same filesystem; os.Link would otherwise succeed
+	// and skip the symlink-clobber path entirely. We make dst a
+	// symlink BEFORE calling CopyFile — if hardlink succeeds, the
+	// test isn't exercising the symlink-safety claim, so we skip.
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("victim-untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "dst")
+	if err := os.Symlink(victim, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyFile(src, dst); err != nil {
+		t.Fatalf("CopyFile: %v", err)
+	}
+	// Either hardlink succeeded (dst replaces symlink with src's
+	// inode entry) OR byte-copy + rename did. In either case the
+	// victim file MUST be untouched.
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "victim-untouched" {
+		t.Errorf("symlink target was clobbered: %q, want victim-untouched", got)
+	}
+}
+
 // TestSwapBinary_MissingSrcLeavesDstAlone covers the rollback
 // contract: when src doesn't exist, SwapBinary errors AND the
 // original dst is preserved. No half-upgrade window.

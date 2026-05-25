@@ -1115,9 +1115,14 @@ func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
 //                        (default: sibling of creekctl in the
 //                        same directory)
 //
-// Exits with upgrade_signature_invalid on cosign or SHA256
-// failure. The new binary is only moved into place AFTER both
-// checks pass; failure leaves the existing binaries untouched.
+// Exits with upgrade_signature_invalid on a verification REJECTION
+// (cosign signature mismatch or tarball SHA256 mismatch). Other
+// failure modes (cosign not installed / not executable / timed out,
+// network errors, missing checksums entry) surface as their own
+// non-mapped errors so the operator can fix the install instead of
+// chasing a security alarm. The new binaries are only moved into
+// place AFTER both checks pass; any failure leaves the existing
+// binaries untouched.
 func runSelfUpgrade(_ context.Context, w io.Writer, argv []string) error {
 	fs := newFlagSet("self-upgrade")
 	cf := &commonFlags{}
@@ -1347,10 +1352,10 @@ func extractTarGz(src, dstDir string) error {
 			continue
 		}
 		out := filepath.Join(dstDir, hdr.Name)
-		// Resolve + verify the result is still under dstDir.
-		// filepath.Clean removes any ".." segments; the prefix check
-		// ensures the cleaned path doesn't escape via absolute paths
-		// or symlinks.
+		// filepath.Clean normalises ".." segments; HasPrefix refuses
+		// any entry whose cleaned path is outside dstDir. (Path-
+		// string only — see the function comment for the symlink
+		// caveat.)
 		clean := filepath.Clean(out)
 		if !strings.HasPrefix(clean, dstDir+string(os.PathSeparator)) && clean != dstDir {
 			return fmt.Errorf("tarball entry %q escapes dest dir", hdr.Name)

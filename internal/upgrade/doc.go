@@ -8,9 +8,13 @@
 //  2. SHA256 of the downloaded tarball matches the checksums.txt
 //     entry. Proves the bytes on disk match what cosign signed.
 //
-// Either failure surfaces ErrSignatureInvalid; the admin API's
-// upgrade_signature_invalid error code is the wire-format
-// equivalent.
+// A rejection from EITHER layer surfaces ErrSignatureInvalid; the
+// admin API's upgrade_signature_invalid error code is the wire-
+// format equivalent. Setup / availability errors (cosign not
+// installed or non-executable, network timeout, missing checksums
+// entry) do NOT surface as ErrSignatureInvalid — they're returned
+// verbatim so the caller can tell "untrusted bytes" from "couldn't
+// even attempt verification" and react accordingly.
 //
 // Verification shells out to the cosign binary (matching install.sh's
 // pattern) rather than embedding sigstore-go. The dep cost of
