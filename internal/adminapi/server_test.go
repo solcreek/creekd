@@ -243,6 +243,63 @@ func TestSpawnRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+// TestGetAppEvents_BlankLineTerminator covers the SSE spec
+// compliance fix for issue #14: each event must be terminated by
+// a blank line (two consecutive `\n`), otherwise EventSource
+// buffers `data` fields until the next event accidentally starts
+// a new `data:` and sparse streams never dispatch.
+func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
+	ts := newTestServer(t, "")
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "a", Command: ptr("sleep"), Args: &[]string{"60"}, Port: port}, "")
+	t.Cleanup(func() { _, _ = ts.do(t, "DELETE", "/v1/apps/a", nil, "") })
+
+	srv := httptest.NewServer(ts.srv.Handler())
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/apps/a/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Read SSE bytes in a goroutine; cancel via ctx after a short
+	// budget if nothing arrives.
+	type readResult struct {
+		buf []byte
+		err error
+	}
+	readCh := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		n, err := resp.Body.Read(buf)
+		readCh <- readResult{buf[:n], err}
+	}()
+
+	// Settle, then publish one event.
+	time.Sleep(50 * time.Millisecond)
+	ts.sup.Events.Publish(supervisor.Event{Type: supervisor.EventReady, AppID: "a", Timestamp: time.Now().UTC()})
+
+	select {
+	case r := <-readCh:
+		if !bytes.Contains(r.buf, []byte("\n\n")) {
+			t.Errorf("SSE payload missing blank-line terminator (no \\n\\n):\n%q", r.buf)
+		}
+		if !bytes.HasPrefix(r.buf, []byte("data: ")) {
+			t.Errorf("SSE payload missing `data: ` prefix: %q", r.buf)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SSE bytes received within 2s")
+	}
+}
+
 func TestListAndGet(t *testing.T) {
 	ts := newTestServer(t, "")
 	p1, p2 := freeTCPPort(t), freeTCPPort(t)

@@ -601,8 +601,15 @@ func (s *Server) GetAppEvents(w http.ResponseWriter, r *http.Request, id apitype
 			if evt.AppID != id {
 				continue
 			}
+			// SSE: data line, then a blank line (two \n total). The
+			// json.Encoder.Encode already emits one trailing \n after
+			// the JSON; the explicit Fprint adds the second \n that
+			// terminates the event. Without it EventSource buffers
+			// `data` fields until the next event accidentally starts a
+			// new `data:` line — sparse streams never dispatch.
 			fmt.Fprintf(w, "data: ")
-			enc.Encode(evt)
+			_ = enc.Encode(evt)
+			fmt.Fprint(w, "\n")
 			flusher.Flush()
 		}
 	}
