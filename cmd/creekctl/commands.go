@@ -1257,7 +1257,6 @@ func runSelfUpgrade(ctx context.Context, w io.Writer, argv []string) error {
 		return err
 	}
 	fmt.Fprintf(w, "==> upgraded to %s\n", version)
-	_ = cf // commonFlags currently unused; reserved for future --json output
 	return nil
 }
 
