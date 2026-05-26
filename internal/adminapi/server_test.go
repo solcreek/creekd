@@ -349,11 +349,61 @@ func TestListAndGet(t *testing.T) {
 		t.Errorf("conditions[0].type = %q, want Ready (canonical order)", envelope.Status.Conditions[0].Type)
 	}
 	// Test server lacks a store, so the identity fields of metadata
-	// (uid / generation / resourceVersion / creationTimestamp) are
-	// unset. metadata.name is still populated from the runtime app.
-	// This path is documented behavior — the runtime status is still
-	// authoritative. Once store is wired in for tests (see
-	// TestGetAppEnvelopeWithStore), the identity fields populate.
+	// come from ephemeralMetadata (deterministic UUIDv5, generation
+	// 1, resourceVersion 1, creationTimestamp ≈ app start).
+	// TestGetAppEnvelopeWithStore covers the persisted path;
+	// TestGetAppEnvelopeWithoutStore covers the synthesis path.
+}
+
+// TestGetAppEnvelopeWithoutStore covers the ephemeral-metadata
+// fix for issue #15: when CREEKD_STATE_DIR is unset (s.store ==
+// nil) the envelope's metadata must NOT be all-zero. uid is a
+// deterministic UUIDv5 derived from the app id; generation /
+// observedGeneration / resourceVersion are 1; creationTimestamp
+// reflects approximately when the app started.
+func TestGetAppEnvelopeWithoutStore(t *testing.T) {
+	ts := newTestServer(t, "")
+	// Deliberately no SetStore.
+	port := freeTCPPort(t)
+	before := time.Now().UTC().Add(-time.Second)
+	if status, _ := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "ephem", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn status = %d", status)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("ephem") })
+	after := time.Now().UTC().Add(time.Second)
+
+	status, body := ts.do(t, "GET", "/v1/apps/ephem", nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", status, body)
+	}
+	var envelope apitypes.App
+	mustJSON(t, body, &envelope)
+
+	// uid: non-zero, deterministic for this id (UUIDv5).
+	if envelope.Metadata.Uid.String() == "00000000-0000-0000-0000-000000000000" {
+		t.Error("metadata.uid is zero without store; want synthesized UUIDv5")
+	}
+	if envelope.Metadata.Uid.Version() != 5 {
+		t.Errorf("metadata.uid version = %d, want 5 (UUIDv5 / deterministic)", envelope.Metadata.Uid.Version())
+	}
+	// Two calls in a row must return the same uid (determinism).
+	_, body2 := ts.do(t, "GET", "/v1/apps/ephem", nil, "")
+	var envelope2 apitypes.App
+	mustJSON(t, body2, &envelope2)
+	if envelope.Metadata.Uid != envelope2.Metadata.Uid {
+		t.Errorf("uid not deterministic: %q vs %q", envelope.Metadata.Uid, envelope2.Metadata.Uid)
+	}
+
+	if envelope.Metadata.Generation != 1 {
+		t.Errorf("generation = %d, want 1", envelope.Metadata.Generation)
+	}
+	if envelope.Metadata.ResourceVersion != "1" {
+		t.Errorf("resourceVersion = %q, want \"1\"", envelope.Metadata.ResourceVersion)
+	}
+	if envelope.Metadata.CreationTimestamp.Before(before) || envelope.Metadata.CreationTimestamp.After(after) {
+		t.Errorf("creationTimestamp = %v, want in [%v, %v]", envelope.Metadata.CreationTimestamp, before, after)
+	}
 }
 
 // TestGetAppEnvelopeWithStore verifies the full envelope shape when

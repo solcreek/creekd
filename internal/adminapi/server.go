@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/backup"
 	"github.com/solcreek/creekd/internal/dispatch"
@@ -342,17 +344,51 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 	// spec, status} shape. Other handlers still return AppView until
 	// they're refactored individually.
 	//
-	// If store is not configured (some test paths) or the app
-	// predates the metadata era (in-memory-only spawn), fall back to
-	// a zero-metadata envelope rather than 500ing — the runtime
-	// state is still authoritative for status fields.
+	// If store is configured AND has metadata for this id, use the
+	// persisted record. Otherwise (no store, or app predates the
+	// metadata era) synthesize a deterministic ephemeral record —
+	// see ephemeralMetadata — so strict typed clients that key off
+	// uid / creationTimestamp / resourceVersion don't get nil
+	// values that would also pass schema validation.
 	var meta state.AppMetadata
 	if s.store != nil {
 		if m, ok := s.store.Meta(id); ok {
 			meta = m
+		} else {
+			meta = ephemeralMetadata(id, app.Uptime())
 		}
+	} else {
+		meta = ephemeralMetadata(id, app.Uptime())
 	}
 	writeJSON(w, http.StatusOK, appToEnvelope(app, meta, s.conditions))
+}
+
+// ephemeralMetadata constructs a non-zero AppMetadata for an app
+// that has no persisted record (CREEKD_STATE_DIR unset, or app
+// spawned before the metadata era). The values are stable within
+// a daemon run and across daemon restarts for the same id, but
+// carry no CAS semantics — clients should not use the
+// resourceVersion for If-Match against a no-store daemon.
+//
+// uid: deterministic UUIDv5 keyed off the app id so the same id
+// always maps to the same uid (distinguishes from the nil UUID
+// the old zero-valued path returned).
+//
+// creationTimestamp: derived from the supervisor's uptime so it
+// reflects when this particular process started, not when GetApp
+// was called.
+//
+// generation / observedGeneration / resourceVersion: hardcoded 1.
+// The app exists, generation has never bumped (no AddApp via
+// store), and there's no monotonic write history to track.
+func ephemeralMetadata(id apitypes.AppID, uptime time.Duration) state.AppMetadata {
+	return state.AppMetadata{
+		UID:                uuid.NewSHA1(uuid.NameSpaceOID, []byte("creekd/app/"+id)).String(),
+		Generation:         1,
+		ObservedGeneration: 1,
+		ResourceVersion:    1,
+		CreationTimestamp:  time.Now().UTC().Add(-uptime),
+	}
 }
 
 func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
