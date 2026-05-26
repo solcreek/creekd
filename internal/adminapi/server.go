@@ -234,7 +234,7 @@ func (s *Server) checkBearer(r *http.Request) bool {
 
 func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.SpawnRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
@@ -381,7 +381,7 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 
 func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, _ apitypes.DeployAppParams) {
 	var req apitypes.DeployRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
@@ -529,7 +529,7 @@ func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes
 func (s *Server) RestartApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
 	var req apitypes.RestartRequest
 	if r.ContentLength > 0 || r.Body != http.NoBody {
-		if err := decodeJSONAllowEmpty(r, &req); err != nil {
+		if err := decodeJSONAllowEmpty(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 			return
 		}
@@ -693,7 +693,7 @@ func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.
 
 func (s *Server) RegisterVolume(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.VolumeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "decode: "+err.Error())
 		return
 	}
@@ -790,12 +790,12 @@ func validatePort(p int) error {
 	return nil
 }
 
-func decodeJSON(r *http.Request, dst any) error {
-	return decodeJSONInner(nil, r, dst, false)
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	return decodeJSONInner(w, r, dst, false)
 }
 
-func decodeJSONAllowEmpty(r *http.Request, dst any) error {
-	return decodeJSONInner(nil, r, dst, true)
+func decodeJSONAllowEmpty(w http.ResponseWriter, r *http.Request, dst any) error {
+	return decodeJSONInner(w, r, dst, true)
 }
 
 func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool) error {
