@@ -852,6 +852,12 @@ func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty
 		return errors.New("empty body")
 	}
 	defer r.Body.Close()
+	// Set Content-Type up front so MaxBytesReader's 413 carries the
+	// right header — once it calls requestTooLarge, the response
+	// headers are flushed and writeJSON's later Set is a no-op.
+	// Every successful path also writes JSON, so the header is
+	// always correct.
+	w.Header().Set("Content-Type", "application/json")
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
