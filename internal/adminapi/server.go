@@ -365,10 +365,13 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 
 // ephemeralMetadata constructs a non-zero AppMetadata for an app
 // that has no persisted record (CREEKD_STATE_DIR unset, or app
-// spawned before the metadata era). The values are stable within
-// a daemon run and across daemon restarts for the same id, but
-// carry no CAS semantics — clients should not use the
-// resourceVersion for If-Match against a no-store daemon.
+// spawned before the metadata era). Only UID is fully stable —
+// derived from the app id, so the same id always maps to the same
+// uid across calls AND across daemon restarts. The other fields
+// are runtime-derived (creationTimestamp) or hardcoded (generation /
+// observedGeneration / resourceVersion) and carry no CAS semantics:
+// clients must not use the resourceVersion for If-Match against a
+// no-store daemon.
 //
 // uid: deterministic UUIDv5 keyed off the app id so the same id
 // always maps to the same uid (distinguishes from the nil UUID
