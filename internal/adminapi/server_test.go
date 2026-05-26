@@ -186,10 +186,13 @@ func TestSpawnValidatesRequired(t *testing.T) {
 }
 
 // TestSpawnRejectsOutOfRangePort covers the boundary-validation
-// fix for issue #12: ports outside 1..65535 (negative, zero kept
-// for the "required" path, > 65535) must be rejected at the
-// handler before any spawn happens, not via dispatch's late
-// "invalid port N" after the child process has already started.
+// fix for issue #12: ports outside 1..65535 (negative, > 65535)
+// must be rejected at the handler before any spawn happens, not
+// via dispatch's late "invalid port N" after the child process
+// has already started. The Port == 0 case is exercised by
+// TestSpawnValidatesRequired since it has a distinct error
+// message ("port is required") that this test's range-match
+// assertion would not catch.
 func TestSpawnRejectsOutOfRangePort(t *testing.T) {
 	ts := newTestServer(t, "")
 	cases := []int{-1, 65536, 70000, 1 << 20}
