@@ -242,8 +242,8 @@ func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
-	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
+	if err := validatePort(req.Port); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 
@@ -385,8 +385,8 @@ func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.A
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
-	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
+	if err := validatePort(req.Port); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 
@@ -773,6 +773,22 @@ func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitype
 // --- shared helpers ---
 
 const MaxRequestBodyBytes = 64 << 10
+
+// validatePort enforces the OpenAPI spec's port range (1..65535) at
+// the handler boundary, before any spawn / SetAddr work. The old
+// `port == 0 ? "required"` check let negative or >65535 values
+// through to the supervisor; the request still failed (dispatch's
+// "invalid port N") but only after the child process had briefly
+// started, which is the wrong place to refuse bad input.
+func validatePort(p int) error {
+	if p == 0 {
+		return errors.New("port is required")
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("port must be in range 1..65535, got %d", p)
+	}
+	return nil
+}
 
 func decodeJSON(r *http.Request, dst any) error {
 	return decodeJSONInner(nil, r, dst, false)

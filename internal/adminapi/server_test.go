@@ -185,6 +185,26 @@ func TestSpawnValidatesRequired(t *testing.T) {
 	}
 }
 
+// TestSpawnRejectsOutOfRangePort covers the boundary-validation
+// fix for issue #12: ports outside 1..65535 (negative, zero kept
+// for the "required" path, > 65535) must be rejected at the
+// handler before any spawn happens, not via dispatch's late
+// "invalid port N" after the child process has already started.
+func TestSpawnRejectsOutOfRangePort(t *testing.T) {
+	ts := newTestServer(t, "")
+	cases := []int{-1, 65536, 70000, 1 << 20}
+	for _, p := range cases {
+		req := apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: p}
+		status, body := ts.do(t, "POST", "/v1/apps", req, "")
+		if status != http.StatusBadRequest {
+			t.Errorf("port=%d: status = %d, want 400; body=%s", p, status, string(body))
+		}
+		if !strings.Contains(string(body), "1..65535") {
+			t.Errorf("port=%d: body should name the valid range, got %s", p, body)
+		}
+	}
+}
+
 func TestSpawnRejectsInvalidID(t *testing.T) {
 	ts := newTestServer(t, "")
 	// Each of these IDs would, if accepted, become a directory name,
