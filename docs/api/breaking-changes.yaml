@@ -37,3 +37,12 @@ versions:
           signature mismatch or tarball SHA256 mismatch.
         ref: "#11"
         migration: ""
+      - kind: additive
+        summary: |
+          AppMetadata.uid description now documents that the
+          field is UUIDv7 from the persistence store OR UUIDv5
+          synthesized from the app id when the daemon runs without
+          a store (CREEKD_STATE_DIR unset). Wire shape unchanged
+          (still `format: uuid`); only the description widens.
+        ref: "#16"
+        migration: ""

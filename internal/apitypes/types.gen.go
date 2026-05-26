@@ -327,7 +327,13 @@ type AppMetadata struct {
 	// ResourceVersion Opaque CAS token. Clients MUST NOT do arithmetic on it.
 	ResourceVersion string `json:"resourceVersion"`
 
-	// Uid UUIDv7. Stable across rename; never reused.
+	// Uid Stable identity, never reused across rename or
+	// delete+recreate. Generated as UUIDv7 by the persistence
+	// store at first AddApp. When the daemon runs without a
+	// store (CREEKD_STATE_DIR unset) GetApp synthesizes a
+	// UUIDv5 derived from the app id — same `format: uuid`
+	// wire shape, but clients that rely on v7's embedded
+	// timestamp ordering must enable the persistent store.
 	Uid openapi_types.UUID `json:"uid"`
 }
 
