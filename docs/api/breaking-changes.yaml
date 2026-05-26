@@ -44,5 +44,8 @@ versions:
           synthesized from the app id when the daemon runs without
           a store (CREEKD_STATE_DIR unset). Wire shape unchanged
           (still `format: uuid`); only the description widens.
+          The uniqueness-across-delete+recreate guarantee is
+          scoped to the persisted-store path — no-store mode
+          reuses the v5 uid when an app id is recreated.
         ref: "#16"
         migration: ""
