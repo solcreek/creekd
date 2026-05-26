@@ -646,9 +646,21 @@ func (s *Server) GetAppEvents(w http.ResponseWriter, r *http.Request, id apitype
 			// terminates the event. Without it EventSource buffers
 			// `data` fields until the next event accidentally starts a
 			// new `data:` line — sparse streams never dispatch.
-			fmt.Fprintf(w, "data: ")
-			_ = enc.Encode(evt)
-			fmt.Fprint(w, "\n")
+			//
+			// A write or encode failure here means the client is gone
+			// (closed connection, network drop). Return so the
+			// deferred Unsubscribe frees the channel — otherwise the
+			// loop keeps consuming events and burning the subscription
+			// for a writer that will never succeed again.
+			if _, err := fmt.Fprintf(w, "data: "); err != nil {
+				return
+			}
+			if err := enc.Encode(evt); err != nil {
+				return
+			}
+			if _, err := fmt.Fprint(w, "\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
