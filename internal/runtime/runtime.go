@@ -13,18 +13,19 @@ import (
 type Runtime string
 
 const (
-	Bun  Runtime = "bun"
-	Node Runtime = "node"
-	Deno Runtime = "deno"
+	Bun     Runtime = "bun"
+	Node    Runtime = "node"
+	Deno    Runtime = "deno"
+	Workers Runtime = "workers"
 )
 
 // All returns every supported runtime in a stable order.
-func All() []Runtime { return []Runtime{Bun, Node, Deno} }
+func All() []Runtime { return []Runtime{Bun, Node, Deno, Workers} }
 
 // Valid reports whether r is one of the known runtimes.
 func (r Runtime) Valid() bool {
 	switch r {
-	case Bun, Node, Deno:
+	case Bun, Node, Deno, Workers:
 		return true
 	}
 	return false
@@ -42,6 +43,8 @@ func Parse(s string) (Runtime, error) {
 		return Node, nil
 	case Deno:
 		return Deno, nil
+	case Workers:
+		return Workers, nil
 	}
 	return "", fmt.Errorf("runtime: unknown runtime %q", s)
 }
@@ -82,6 +85,9 @@ func Command(r Runtime, entry string, extraArgs []string) (string, []string, err
 	case Deno:
 		args := append([]string{"run", "-A", entry}, extraArgs...)
 		return "deno", args, nil
+	case Workers:
+		args := append([]string{"serve", entry}, extraArgs...)
+		return "workerd", args, nil
 	}
 	return "", nil, fmt.Errorf("runtime: unreachable %q", r)
 }

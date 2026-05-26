@@ -228,10 +228,10 @@ func TestDetect(t *testing.T) {
 
 func TestAllListsRuntimes(t *testing.T) {
 	all := All()
-	if len(all) != 3 {
-		t.Errorf("All() length = %d, want 3", len(all))
+	if len(all) != 4 {
+		t.Errorf("All() length = %d, want 4", len(all))
 	}
-	want := map[Runtime]bool{Bun: false, Node: false, Deno: false}
+	want := map[Runtime]bool{Bun: false, Node: false, Deno: false, Workers: false}
 	for _, r := range all {
 		want[r] = true
 	}
