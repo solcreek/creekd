@@ -49,3 +49,14 @@ versions:
           reuses the v5 uid when an app id is recreated.
         ref: "#16"
         migration: ""
+      - kind: additive
+        summary: |
+          New ErrorCode value `request_too_large`, returned with
+          HTTP 413 when the request body exceeds the
+          MaxRequestBodyBytes limit. Previously these requests
+          surfaced as 413-status / bad_request-body (status
+          pre-written by http.MaxBytesReader, body produced by
+          the 400 path) — inconsistent, and dependent on the
+          ResponseWriter implementation.
+        ref: "#16"
+        migration: ""

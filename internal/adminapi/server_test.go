@@ -234,6 +234,41 @@ func TestSpawnRejectsInvalidID(t *testing.T) {
 	}
 }
 
+// TestSpawn_OversizedBodyReturns413 covers the
+// writeDecodeError mapping: when the JSON body exceeds
+// MaxRequestBodyBytes, http.MaxBytesReader pre-writes a 413
+// status — the handler must respond with a 413-shaped body
+// (request_too_large code) rather than the old bad_request body
+// that left the wire mismatched. Real httptest.Server needed
+// because httptest.NewRecorder doesn't enforce the
+// can't-re-write-status rule MaxBytesReader exploits.
+func TestSpawn_OversizedBodyReturns413(t *testing.T) {
+	ts := newTestServer(t, "")
+	srv := httptest.NewServer(ts.srv.Handler())
+	t.Cleanup(srv.Close)
+
+	// Pad a value field past the MaxRequestBodyBytes limit.
+	big := strings.Repeat("x", MaxRequestBodyBytes+1)
+	body := strings.NewReader(`{"id":"x","port":9000,"command":"sleep","args":["` + big + `"]}`)
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/apps", body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var er apitypes.ErrorResponse
+	if err := json.Unmarshal(raw, &er); err != nil {
+		t.Fatalf("decode error body: %v (raw=%q)", err, raw)
+	}
+	if string(er.Code) != string(apitypes.ErrorCodeRequestTooLarge) {
+		t.Errorf("code = %q, want %q", er.Code, apitypes.ErrorCodeRequestTooLarge)
+	}
+}
+
 func TestSpawnRejectsUnknownFields(t *testing.T) {
 	ts := newTestServer(t, "")
 	// Build raw JSON with a bogus field.

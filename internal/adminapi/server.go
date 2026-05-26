@@ -237,7 +237,7 @@ func (s *Server) checkBearer(r *http.Request) bool {
 func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.SpawnRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if err := supervisor.ValidateID(req.Id); err != nil {
@@ -421,7 +421,7 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, _ apitypes.DeployAppParams) {
 	var req apitypes.DeployRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	if err := validatePort(req.Port); err != nil {
@@ -569,7 +569,7 @@ func (s *Server) RestartApp(w http.ResponseWriter, r *http.Request, id apitypes.
 	var req apitypes.RestartRequest
 	if r.ContentLength > 0 || r.Body != http.NoBody {
 		if err := decodeJSONAllowEmpty(w, r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+			writeDecodeError(w, err)
 			return
 		}
 	}
@@ -752,7 +752,7 @@ func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.
 func (s *Server) RegisterVolume(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.VolumeRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "decode: "+err.Error())
+		writeDecodeError(w, err)
 		return
 	}
 	v := supervisor.Volume{
@@ -846,6 +846,24 @@ func validatePort(p int) error {
 		return fmt.Errorf("port must be in range 1..65535, got %d", p)
 	}
 	return nil
+}
+
+// writeDecodeError maps a decodeJSON*-returned error to the right
+// status + error code. A *http.MaxBytesError means the body
+// exceeded MaxRequestBodyBytes: at that point MaxBytesReader has
+// already written a 413 status line on the wire, so the handler
+// MUST emit a 413-shaped body — re-writing the status to 400 is
+// rejected by net/http, producing a mismatched 413-status with
+// bad_request body. All other decode errors stay 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			string(apitypes.ErrorCodeRequestTooLarge),
+			fmt.Sprintf("request body exceeds %d-byte limit", mbe.Limit))
+		return
+	}
+	writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
