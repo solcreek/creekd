@@ -138,6 +138,7 @@ const (
 	ErrorCodeSystemdHardeningDrift   ErrorCode = "systemd_hardening_drift"
 	ErrorCodeUnauthorized            ErrorCode = "unauthorized"
 	ErrorCodeUnsupportedFilesystem   ErrorCode = "unsupported_filesystem"
+	ErrorCodeUpgradeSignatureInvalid ErrorCode = "upgrade_signature_invalid"
 )
 
 // Valid indicates whether the value is a known member of the ErrorCode enum.
@@ -172,6 +173,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeUnauthorized:
 		return true
 	case ErrorCodeUnsupportedFilesystem:
+		return true
+	case ErrorCodeUpgradeSignatureInvalid:
 		return true
 	default:
 		return false

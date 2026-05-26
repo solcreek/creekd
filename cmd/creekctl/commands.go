@@ -1,14 +1,19 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -18,6 +23,7 @@ import (
 	"github.com/solcreek/creekd/internal/adminclient"
 	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/hardening"
+	"github.com/solcreek/creekd/internal/upgrade"
 )
 
 // subcommand is one CLI verb. Run parses argv (minus the verb itself)
@@ -60,6 +66,9 @@ func init() {
 	}
 	subcommands["hardening-check"] = &subcommand{
 		Name: "hardening-check", Description: "validate creekd.service against the canonical hardening set", Run: runHardeningCheck,
+	}
+	subcommands["self-upgrade"] = &subcommand{
+		Name: "self-upgrade", Description: "verify + replace creekd/creekctl binaries from a GitHub release", Run: runSelfUpgrade,
 	}
 }
 
@@ -1089,6 +1098,309 @@ func runHardeningCheck(_ context.Context, w io.Writer, argv []string) error {
 	}
 	if len(drift) > 0 {
 		return fmt.Errorf("systemd_hardening_drift: %d directive(s) missing or weakened", len(drift))
+	}
+	return nil
+}
+
+// runSelfUpgrade downloads a tagged release tarball from GitHub,
+// verifies it via cosign + SHA256 (internal/upgrade.Verifier), and
+// atomically replaces the running creekctl + the sibling creekd
+// binary via the rename trick.
+//
+// Flags:
+//   --to=<version>       target tag (default: latest)
+//   --release-base=<url> override GitHub Releases URL prefix
+//                        (test hook; production callers omit)
+//   --creekd=<path>      override creekd binary path
+//                        (default: sibling of creekctl in the
+//                        same directory)
+//
+// Exits with upgrade_signature_invalid on a verification REJECTION
+// (cosign signature mismatch or tarball SHA256 mismatch). Other
+// failure modes (cosign not installed / not executable / timed out,
+// network errors, missing checksums entry) surface as their own
+// non-mapped errors so the operator can fix the install instead of
+// chasing a security alarm. The new binaries are only moved into
+// place AFTER both checks pass; any failure leaves the existing
+// binaries untouched.
+func runSelfUpgrade(ctx context.Context, w io.Writer, argv []string) error {
+	fs := newFlagSet("self-upgrade")
+	cf := &commonFlags{}
+	cf.register(fs)
+	to := fs.String("to", "", "target release tag (e.g. v0.0.5); empty = latest")
+	releaseBase := fs.String("release-base", "https://github.com/solcreek/creekd/releases/download", "release download URL prefix (test hook)")
+	creekdPath := fs.String("creekd", "", "creekd binary path (default: sibling of creekctl)")
+	creekctlPath := fs.String("creekctl", "", "creekctl binary path (default: os.Executable; override for tests)")
+	latestURL := fs.String("latest-url", "https://github.com/solcreek/creekd/releases/latest", "URL whose final redirect names the latest tag (test hook)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	version := *to
+	if version == "" {
+		v, err := resolveLatestTag(ctx, *latestURL)
+		if err != nil {
+			return err
+		}
+		version = v
+	}
+	fmt.Fprintf(w, "==> target %s\n", version)
+
+	osName, arch, err := detectOSArch()
+	if err != nil {
+		return err
+	}
+	verNoV := strings.TrimPrefix(version, "v")
+	tarName := fmt.Sprintf("creekd_%s_%s_%s.tar.gz", verNoV, osName, arch)
+
+	tmp, err := os.MkdirTemp("", "creekd-selfupgrade-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+
+	// Pull the three artifacts cosign needs + the tarball. Ordered
+	// (not a map) so log output is deterministic and the tarball —
+	// the largest fetch and the one most likely to surface a
+	// network issue — comes first.
+	downloads := []struct{ name, url string }{
+		{tarName, fmt.Sprintf("%s/%s/%s", *releaseBase, version, tarName)},
+		{"checksums.txt", fmt.Sprintf("%s/%s/checksums.txt", *releaseBase, version)},
+		{"checksums.txt.sig", fmt.Sprintf("%s/%s/checksums.txt.sig", *releaseBase, version)},
+		{"checksums.txt.pem", fmt.Sprintf("%s/%s/checksums.txt.pem", *releaseBase, version)},
+	}
+	for _, d := range downloads {
+		fmt.Fprintf(w, "==> downloading %s\n", d.name)
+		if err := downloadFile(ctx, d.url, filepath.Join(tmp, d.name)); err != nil {
+			return fmt.Errorf("download %s: %w", d.name, err)
+		}
+	}
+
+	// Two-layer verify. Either layer's failure leaves the local
+	// binaries untouched.
+	fmt.Fprintln(w, "==> verifying cosign + SHA256")
+	v := upgrade.New()
+	if cosign := os.Getenv("CREEKCTL_COSIGN_PATH"); cosign != "" {
+		// Test hook + operator escape hatch (e.g. a wrapper script
+		// that adds Rekor offline-bundle support not yet in cosign
+		// upstream). Default is the cosign binary on PATH.
+		v.CosignPath = cosign
+	}
+	if err := v.Verify(ctx,
+		filepath.Join(tmp, tarName), tarName,
+		filepath.Join(tmp, "checksums.txt.sig"),
+		filepath.Join(tmp, "checksums.txt.pem"),
+		filepath.Join(tmp, "checksums.txt"),
+	); err != nil {
+		if errors.Is(err, upgrade.ErrSignatureInvalid) {
+			return fmt.Errorf("upgrade_signature_invalid: %w", err)
+		}
+		return err
+	}
+	fmt.Fprintln(w, "==> verification passed")
+
+	// Extract tarball into tmp. New binaries land at tmp/creekd
+	// and tmp/creekctl alongside the original tarball.
+	if err := extractTarGz(filepath.Join(tmp, tarName), tmp); err != nil {
+		return fmt.Errorf("extract tarball: %w", err)
+	}
+
+	// Resolve install paths.
+	ctlPath := *creekctlPath
+	if ctlPath == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve creekctl path: %w", err)
+		}
+		ctlPath = exe
+	}
+	dPath := *creekdPath
+	if dPath == "" {
+		dPath = filepath.Join(filepath.Dir(ctlPath), "creekd")
+	}
+
+	// Stash the pre-upgrade creekd so creekctl-swap failure can
+	// roll creekd back. CreateTemp reserves a unique unguessable
+	// name (so we can't clobber an operator file at a predictable
+	// path), but it also creates the file — and CopyFile's
+	// os.Link fast path refuses an existing dst. Remove the empty
+	// placeholder so the hardlink path is reachable on the common
+	// case; on EEXIST race the byte-copy fallback still handles
+	// it correctly.
+	stashFile, err := os.CreateTemp(filepath.Dir(dPath), filepath.Base(dPath)+".pre-upgrade-*")
+	if err != nil {
+		return fmt.Errorf("reserve stash path: %w", err)
+	}
+	stashPath := stashFile.Name()
+	if err := stashFile.Close(); err != nil {
+		_ = os.Remove(stashPath)
+		return fmt.Errorf("reserve stash path: close: %w", err)
+	}
+	_ = os.Remove(stashPath)
+	defer os.Remove(stashPath)
+	if err := upgrade.CopyFile(dPath, stashPath); err != nil {
+		return fmt.Errorf("stash pre-upgrade creekd: %w", err)
+	}
+
+	fmt.Fprintf(w, "==> replacing %s\n", dPath)
+	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekd"), dPath); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "==> replacing %s\n", ctlPath)
+	if err := upgrade.SwapBinary(filepath.Join(tmp, "creekctl"), ctlPath); err != nil {
+		// Best-effort rollback; surface the original error either way.
+		if rbErr := upgrade.SwapBinary(stashPath, dPath); rbErr != nil {
+			fmt.Fprintf(w, "WARN: creekctl upgrade failed AND rollback of %s also failed: %v\n", dPath, rbErr)
+		} else {
+			fmt.Fprintf(w, "==> creekctl swap failed; rolled back %s to pre-upgrade\n", dPath)
+		}
+		return err
+	}
+	fmt.Fprintf(w, "==> upgraded to %s\n", version)
+	return nil
+}
+
+// resolveLatestTag follows GitHub's /releases/latest redirect to
+// pick up the tag without parsing the API. Mirrors install.sh's
+// no-jq strategy. ctx cancellation aborts the HEAD in addition to
+// the 30s client timeout.
+func resolveLatestTag(ctx context.Context, url string) (string, error) {
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 30 * time.Second,
+	}
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("resolve latest: %w", err)
+	}
+	defer resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("resolve latest: no Location header in response (status %d)", resp.StatusCode)
+	}
+	tag := loc[strings.LastIndex(loc, "/")+1:]
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("resolve latest: redirect target %q does not look like a tag", loc)
+	}
+	return tag, nil
+}
+
+func detectOSArch() (string, string, error) {
+	var osName, arch string
+	switch runtime.GOOS {
+	case "linux":
+		osName = "linux"
+	case "darwin":
+		osName = "darwin"
+	default:
+		return "", "", fmt.Errorf("self-upgrade: unsupported OS %q (linux + darwin only)", runtime.GOOS)
+	}
+	switch runtime.GOARCH {
+	case "amd64":
+		arch = "amd64"
+	case "arm64":
+		arch = "arm64"
+	default:
+		return "", "", fmt.Errorf("self-upgrade: unsupported arch %q (amd64 + arm64 only)", runtime.GOARCH)
+	}
+	return osName, arch, nil
+}
+
+// downloadFile fetches url into dst with a bounded timeout. Self-
+// upgrade artifacts are tens of MB so the cap is generous, but it
+// MUST exist — Go's default client has no timeout and a stalled
+// TCP connection would hang the upgrade forever. ctx cancellation
+// also aborts mid-download (e.g. operator SIGINT on a slow link).
+func downloadFile(ctx context.Context, url, dst string) error {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// Explicit close to surface late flush errors (NFS commit,
+	// disk-full on buffered writes) — defer would discard the
+	// return value.
+	return out.Close()
+}
+
+// extractTarGz untars src into dstDir. Skips non-regular entries
+// (we only want creekd + creekctl + the bundled docs). The
+// HasPrefix(filepath.Clean(...)) check handles ".." and absolute
+// paths but NOT pre-existing symlinks inside dstDir — safe here
+// only because the caller always passes a fresh MkdirTemp; do not
+// reuse against a persistent dstDir without O_NOFOLLOW + per-
+// component lstat.
+func extractTarGz(src, dstDir string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		out := filepath.Join(dstDir, hdr.Name)
+		// filepath.Clean normalises ".." segments; HasPrefix refuses
+		// any entry whose cleaned path is outside dstDir. (Path-
+		// string only — see the function comment for the symlink
+		// caveat.)
+		clean := filepath.Clean(out)
+		if !strings.HasPrefix(clean, dstDir+string(os.PathSeparator)) && clean != dstDir {
+			return fmt.Errorf("tarball entry %q escapes dest dir", hdr.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(clean), 0o755); err != nil {
+			return err
+		}
+		w, err := os.OpenFile(clean, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(hdr.Mode)&0o777)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(w, tr); err != nil {
+			_ = w.Close()
+			return err
+		}
+		// Surface late flush errors so a partially-written
+		// creekd/creekctl can't slip past extraction and into
+		// SwapBinary.
+		if err := w.Close(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
