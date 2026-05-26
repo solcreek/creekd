@@ -273,17 +273,29 @@ func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 
-	// Read SSE bytes in a goroutine; cancel via ctx after a short
-	// budget if nothing arrives.
-	type readResult struct {
-		buf []byte
-		err error
-	}
-	readCh := make(chan readResult, 1)
+	// Read SSE bytes in a goroutine, accumulating until \n\n
+	// appears (or the body returns an error). HTTP chunking is
+	// arbitrary, so a single Read could land just `data: ...\n`
+	// without the blank-line terminator — assertion would flake.
+	doneCh := make(chan []byte, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		buf := make([]byte, 1024)
-		n, err := resp.Body.Read(buf)
-		readCh <- readResult{buf[:n], err}
+		var acc []byte
+		buf := make([]byte, 256)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				acc = append(acc, buf[:n]...)
+				if bytes.Contains(acc, []byte("\n\n")) {
+					doneCh <- acc
+					return
+				}
+			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
 	}()
 
 	// Settle, then publish one event.
@@ -291,15 +303,14 @@ func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
 	ts.sup.Events.Publish(supervisor.Event{Type: supervisor.EventReady, AppID: "a", Timestamp: time.Now().UTC()})
 
 	select {
-	case r := <-readCh:
-		if !bytes.Contains(r.buf, []byte("\n\n")) {
-			t.Errorf("SSE payload missing blank-line terminator (no \\n\\n):\n%q", r.buf)
+	case got := <-doneCh:
+		if !bytes.HasPrefix(got, []byte("data: ")) {
+			t.Errorf("SSE payload missing `data: ` prefix: %q", got)
 		}
-		if !bytes.HasPrefix(r.buf, []byte("data: ")) {
-			t.Errorf("SSE payload missing `data: ` prefix: %q", r.buf)
-		}
+	case err := <-errCh:
+		t.Fatalf("body read error before \\n\\n: %v", err)
 	case <-time.After(2 * time.Second):
-		t.Fatal("no SSE bytes received within 2s")
+		t.Fatal("no SSE blank-line terminator within 2s")
 	}
 }
 
