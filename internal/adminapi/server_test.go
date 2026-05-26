@@ -555,6 +555,31 @@ func TestDeployRequiresPort(t *testing.T) {
 	}
 }
 
+// TestDeployRejectsOutOfRangePort is the Deploy-side analogue of
+// TestSpawnRejectsOutOfRangePort — the validatePort helper is
+// called from both handlers and must continue to reject out-of-
+// range values before any supervisor / router work runs. Port == 0
+// is exercised by TestDeployRequiresPort (different error message).
+func TestDeployRejectsOutOfRangePort(t *testing.T) {
+	ts := newTestServer(t, "")
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("x") })
+
+	cases := []int{-1, 65536, 70000, 1 << 20}
+	for _, p := range cases {
+		req := apitypes.DeployRequest{Port: p, Command: ptr("sleep"), Args: &[]string{"30"}}
+		status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
+		if status != http.StatusBadRequest {
+			t.Errorf("port=%d: status = %d, want 400; body=%s", p, status, string(body))
+		}
+		if !strings.Contains(string(body), "1..65535") {
+			t.Errorf("port=%d: body should name the valid range, got %s", p, body)
+		}
+	}
+}
+
 // TestDeploySamePortReturnsBadRequest exercises the underlying
 // Supervisor.Deploy validation reaching the API correctly.
 func TestDeploySamePortReturnsBadRequest(t *testing.T) {
