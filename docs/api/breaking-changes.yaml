@@ -17,10 +17,12 @@
 #                                     # required for breaking — say
 #                                     # what callers must do
 #
-# Phase 1 status (0.0.x): the API is unstable; this file is the
-# place to start tracking entries, but breaking changes are
-# permitted without an ADR until 0.1.0 freezes the surface. The
-# `kind: breaking` rows below 0.1.0 are advisory.
+# Pre-1.0 status (0.1.x): the surface is still allowed to break in
+# MINOR bumps when justified, per CHANGELOG.md's semver note;
+# breaking rows in this ledger should still cite an ADR so the
+# decision survives the release. The 0.1.0 release was the first
+# tagged surface, and each post-0.1.x cut should backfill its own
+# block here before tagging.
 #
 # Unreleased entries land under `version: unreleased`; the
 # release engineer relocates them under the actual semver tag at
@@ -59,4 +61,48 @@ versions:
           the 400 path) — inconsistent, and dependent on the
           ResponseWriter implementation.
         ref: "#16"
+        migration: ""
+
+  # The 0.1.0 / 0.1.1 entries below were backfilled from
+  # CHANGELOG.md after the ledger landed in #11. The ledger did not
+  # exist when those releases shipped, so the catalogue here is the
+  # smallest set of additive wire-format facts that survive the
+  # release notes — it is not an exhaustive replay of the changelog.
+  - version: v0.1.1
+    date: 2026-05-19
+    changes:
+      - kind: additive
+        summary: |
+          `cmd/creekd` now reads `CREEKD_NET_SUBNET` and
+          `CREEKD_NET_BRIDGE_NAME` env vars to enable per-app
+          network isolation. Operator-facing config addition; no
+          wire-format change to the admin API itself.
+        ref: "v0.1.1 CHANGELOG"
+        migration: ""
+      - kind: additive
+        summary: |
+          Admin API now validates app ID grammar
+          (`^[a-z0-9][a-z0-9-]{0,62}$`) at the handler boundary.
+          Previously-accepted IDs that violated the grammar (path
+          separators, shell metachars, null bytes, leading hyphens,
+          uppercase, etc.) now return 400 `invalid_id`. Existing
+          well-formed IDs are unaffected.
+        ref: "v0.1.1 CHANGELOG"
+        migration: |
+          Callers that constructed IDs algorithmically and relied
+          on lax validation must conform to the grammar. The fix is
+          treated as additive because v0.1.0's "accept anything"
+          shape was a defect.
+
+  - version: v0.1.0
+    date: 2026-05-19
+    changes:
+      - kind: additive
+        summary: |
+          First tagged release of the admin API. OpenAPI 3.0 spec
+          at api/openapi.yaml is the source-of-truth wire format;
+          Go types and the server interface are generated from it.
+          Endpoints: ps/get/up/ensure/rm/restart/reset/deploy/logs/
+          events/stats plus the internal-tooling describe.
+        ref: "v0.1.0 CHANGELOG"
         migration: ""
