@@ -15,7 +15,7 @@ What creekd deliberately is **not**:
 - **Not a container runtime.** No image format, no layered filesystem, no registry. We use the same primitives containers do (cgroup v2, namespaces, chroot) à la carte.
 - **Not a scheduler.** One host. No bin-packing across machines, no autoscaling decisions. Multi-host is solved one layer up.
 - **Not a build system.** Apps arrive as already-runnable processes; how to compile them is the runtime's problem (Bun, Node, etc.) and the user's problem.
-- **Not Kubernetes-shaped.** No CRDs, no declarative reconciliation loop, no controller pattern. The admin API is imperative HTTP/JSON (spawn this, stop that).
+- **Not Kubernetes-shaped as a control plane.** The admin API borrows K8s WIRE CONVENTIONS (`apiVersion / kind / metadata / spec / status`; `status.conditions[]`; `resourceVersion` + `If-Match` optimistic concurrency) so existing client libraries can introspect it cleanly, but there are no CRDs, no declarative reconciliation loop, no controller pattern. Operations stay imperative HTTP/JSON (spawn this, stop that). `kubectl` will not talk to it.
 - **Not a service mesh.** Per-app netns is for isolation, not for sidecars or mTLS-everywhere.
 
 These are choices, not omissions. If you need any of the above, creekd is the wrong layer.
@@ -55,7 +55,15 @@ The dispatch listener is independently disable-able (`CREEKD_DISPATCH_ADDR=`) fo
 State has two halves:
 
 - **Process state** (PIDs, watch channels, cgroup paths, netns names) — in-memory, lost on creekd restart. By design.
-- **Declared state** (the set of apps that *should* exist, with their configs) — `state.json`, atomic rename on every mutation. Persisted iff `CREEKD_STATE_DIR` is set.
+- **Declared state** (the set of apps that *should* exist, with their configs, plus the per-app `AppMetadata` envelope and the `Release` ledger) — `state.json`, currently format `v3`, atomic rename on every mutation, fsync on both the file and its parent directory. Persisted iff `CREEKD_STATE_DIR` is set. Older `v1` / `v2` on-disk files are migrated forward on startup.
+
+Mutation safety lives in three layers above the bare rename:
+
+1. A per-app file lock so concurrent admin calls on the same id serialise without blocking unrelated apps.
+2. A WAL with explicit `pending` → `commit` records so a crash between the in-memory mutation and the disk swap replays forward on the next boot (the audit-log path uses the same WAL).
+3. An audit log under `<state-dir>/audit/` with each record's `prev_sha256` chained to the previous record. Tampering with one record breaks every subsequent record's hash — the chain is verified at startup and across rotations.
+
+The `Release` ledger sits alongside `state.json`: every successful deploy (and every rollback) appends a Release with `EnvHash`, `ConfigSnapshot`, optional `RolledBackFrom`/`OriginalArtifactRelease` pointers, and a monotonic generation. At-most-one Release is `Active` per app, enforced via the same WAL pending-then-commit invariant. Rollback re-runs an exact prior `ConfigSnapshot`.
 
 On creekd startup, the supervisor replays every declared app through `Spawn` before listeners open. Apps come back as fresh processes (new PID, new cgroup, new netns), but their configurations — port, runtime, sandbox spec, cgroup limits — are preserved.
 
@@ -101,6 +109,12 @@ Deploy is the zero-downtime path: spawn a new instance on a different port, heal
 
 The supervisor does not try to do canary or weighted routing; that's a higher-layer concern.
 
+## Backup and host identity
+
+When `CREEKD_STATE_DIR` is set the daemon also keeps a persistent ed25519 host key at `<state-dir>/hostkey` (generated on first start, never rotated automatically) and exposes the public half through an unauthenticated `GET /v1/hostkey`. This is the TOFU discovery primitive: an operator running `creek init --adopt` fetches the fingerprint, compares it against an out-of-band reference (provider console, paper escrow, serial console), and pins it before any credentialed traffic flows. The endpoint is auth-exempt by design — public keys are public, and bootstrap can't require a token that hasn't been provisioned yet.
+
+The same host key signs the Tier 0 backup `MANIFEST.json`. A backup is a tarball of `state.json`, the audit log (all rotations), and the Release-ledger artifacts, accompanied by a manifest that lists every member with its SHA-256 and an ed25519 signature over the manifest itself. A restore that doesn't verify against the pinned hostkey is refused at the loader. There is no Tier 1+ tier yet — Tier 0 is a single-host snapshot intended for "restore to a different host" disaster recovery, not for incremental online backup.
+
 ## Operational surface
 
 The minimum production setup:
@@ -108,11 +122,19 @@ The minimum production setup:
 - `CREEKD_ADMIN_TOKEN` set, admin bound to a private interface.
 - `CREEKD_DISPATCH_ADDR` either on the public interface or behind a reverse proxy.
 - `CREEKD_LOG_DIR` and `CREEKD_CGROUP_PARENT` set.
-- `CREEKD_STATE_DIR` set, so a restart of the daemon doesn't drop the fleet.
+- `CREEKD_STATE_DIR` set, so a restart of the daemon doesn't drop the fleet — also enables the audit log, hostkey, and Release ledger described above.
 - Run as root (or a systemd unit with `Delegate=yes`) so cgroup writes succeed.
 - `CREEKD_DEBUG_PPROF` left **unset**.
 
-This is intentionally small. Phase 1 explicitly does not include: TLS termination (use a reverse proxy or `autocert` outside creekd), metrics export (add later via OpenTelemetry), audit logging (the structured logs are append-only and JSON; pipe them).
+Bundled `init/creekd.service` is the canonical systemd unit: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel-* protections, restricted syscall set, `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` only, `DynamicUser=no`. `creekctl hardening-check` parses an installed unit and reports drift against the canonical set — used by operators after edits, and by CI as a regression fence against the shipped unit weakening over time.
+
+This is intentionally small. Phase 1 explicitly does not include: TLS termination (use a reverse proxy or `autocert` outside creekd), metrics export beyond the Prometheus `/metrics` endpoint that already exists, or remote-log shipping (the structured logs are append-only JSON; pipe them).
+
+## Supply chain integrity
+
+Release artifacts (tarballs + `checksums.txt`) are signed via cosign keyless: the GitHub Actions OIDC token mints a short-lived Fulcio certificate, cosign signs `checksums.txt`, and Rekor records the signature in the transparency log. There is no long-lived signing key to rotate or leak. SLSA L3 provenance is produced by the `slsa-framework/slsa-github-generator` reusable workflow over every published artifact (including the `.sig`/`.pem` themselves, so an attacker can't post-build-substitute the verification chain).
+
+`creekctl self-upgrade` mirrors what `install.sh` does: download the target release, verify both the cosign signature against the pinned pipeline identity AND the tarball's SHA-256 against the signed checksums, then atomically swap the running binaries via a tempfile + `rename(2)` (rename(2) is safe over a running executable — the kernel unlinks the old inode but the running process continues from its still-open fd). Pre-upgrade binaries are stashed via `os.Link` when possible so a creekctl-swap failure rolls creekd back without copying tens of MB. The swap refuses to operate when the destination is a symlink — vendor-installed paths (brew, apt) get a clear "upgrade via your package manager" error rather than a silently-broken tracking link.
 
 ## Testing strategy
 
