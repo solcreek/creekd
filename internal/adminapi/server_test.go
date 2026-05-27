@@ -51,6 +51,18 @@ func newTestServer(t *testing.T, token string) *testServer {
 	}
 }
 
+// liveServer stands up an httptest.NewServer against the same
+// handler that `do` calls in-memory. Use when a test needs the
+// real net/http stack — streaming endpoints (SSE), MaxBytesReader
+// behaviour, anything that depends on header flush ordering.
+// Cleanup is registered automatically.
+func (ts *testServer) liveServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(ts.srv.Handler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // do performs a request through the configured handler and returns
 // status + body + decoded JSON.
 func (ts *testServer) do(t *testing.T, method, path string, body any, token string) (int, []byte) {
@@ -244,8 +256,7 @@ func TestSpawnRejectsInvalidID(t *testing.T) {
 // can't-re-write-status rule MaxBytesReader exploits.
 func TestSpawn_OversizedBodyReturns413(t *testing.T) {
 	ts := newTestServer(t, "")
-	srv := httptest.NewServer(ts.srv.Handler())
-	t.Cleanup(srv.Close)
+	srv := ts.liveServer(t)
 
 	// Pad a value field past the MaxRequestBodyBytes limit.
 	big := strings.Repeat("x", MaxRequestBodyBytes+1)
@@ -293,8 +304,7 @@ func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
 		apitypes.SpawnRequest{Id: "a", Command: ptr("sleep"), Args: &[]string{"60"}, Port: port}, "")
 	t.Cleanup(func() { _, _ = ts.do(t, "DELETE", "/v1/apps/a", nil, "") })
 
-	srv := httptest.NewServer(ts.srv.Handler())
-	t.Cleanup(srv.Close)
+	srv := ts.liveServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -333,19 +343,29 @@ func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
 		}
 	}()
 
-	// Settle, then publish one event.
-	time.Sleep(50 * time.Millisecond)
-	ts.sup.Events.Publish(supervisor.Event{Type: supervisor.EventReady, AppID: "a", Timestamp: time.Now().UTC()})
+	// Publish on a tight cadence rather than `Sleep(50ms) + publish-
+	// once`: the old shape assumed Subscribe in the handler races
+	// faster than 50ms, which flakes on slow CI runners. Republishing
+	// every 20ms means the loop wins as soon as the subscription is
+	// live, regardless of scheduler jitter.
+	pub := time.NewTicker(20 * time.Millisecond)
+	defer pub.Stop()
 
-	select {
-	case got := <-doneCh:
-		if !bytes.HasPrefix(got, []byte("data: ")) {
-			t.Errorf("SSE payload missing `data: ` prefix: %q", got)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case got := <-doneCh:
+			if !bytes.HasPrefix(got, []byte("data: ")) {
+				t.Errorf("SSE payload missing `data: ` prefix: %q", got)
+			}
+			return
+		case err := <-errCh:
+			t.Fatalf("body read error before \\n\\n: %v", err)
+		case <-pub.C:
+			ts.sup.Events.Publish(supervisor.Event{Type: supervisor.EventReady, AppID: "a", Timestamp: time.Now().UTC()})
+		case <-deadline:
+			t.Fatal("no SSE blank-line terminator within 2s")
 		}
-	case err := <-errCh:
-		t.Fatalf("body read error before \\n\\n: %v", err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("no SSE blank-line terminator within 2s")
 	}
 }
 
