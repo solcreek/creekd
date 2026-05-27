@@ -12,14 +12,14 @@ Three principles. The first two have load-bearing real examples in the codebase;
 
 ### Why
 
-creekd shipped its first ten months — through `v0.4.0`, 730+ tests, multi-runtime support, cgroup v2, network namespaces, sandboxing, log rotation, blue-green deploy, full HTTP reverse proxy — with **zero third-party dependencies**. The single direct dependency that exists today (`prometheus/client_golang`) was added deliberately for the `/metrics` endpoint, after we explicitly weighed it against OpenTelemetry SDK and a hand-rolled Prometheus text emitter and documented why ([see commit `05a6c64`](https://github.com/solcreek/creekd/commit/05a6c64) for the reasoning).
+creekd (current line `v0.1.1`, ~570 tests) ships multi-runtime support, cgroup v2, network namespaces, sandboxing, log rotation, blue-green deploy, and a full HTTP reverse proxy on a **tiny direct-dependency surface**: five direct modules in `go.mod` — `BurntSushi/toml` (parsing `creek.toml`), `getkin/kin-openapi` + `oapi-codegen/runtime` (OpenAPI spec is the wire-format source-of-truth), `prometheus/client_golang` (the `/metrics` endpoint), and `golang.org/x/sys` (stdlib-adjacent). Each was added deliberately, with the alternative considered and rejected (e.g. OpenTelemetry SDK was weighed against `prometheus/client_golang` for `/metrics` and rejected on transitive-dep count).
 
 The benefits compound:
 
-- **Supply-chain blast radius is minimal.** Every dep is a potential CVE, a maintainer who walks away, a license change, a transitive that pulls in 40 more transitives. Zero deps means zero of those problems.
-- **Stripped binary stays small.** As of `v0.4.0` the stripped binary is ~11 MB. Most "supervisor + reverse proxy" tools in this class are 50-100 MB.
-- **`go mod tidy` is boring.** Three months between updates is fine. No constant dep churn, no scrambling to track Dependabot PRs.
-- **Reading the source is enough.** You don't need to know what 12 third-party libraries do to understand a function call.
+- **Supply-chain blast radius stays small.** Every dep is a potential CVE, a maintainer who walks away, a license change, a transitive that pulls in 40 more transitives. Five direct modules is the floor; we add the sixth only when the analysis below points clearly past it.
+- **Stripped binary stays small.** As of `v0.1.1` the stripped `creekd` binary is ~13 MB. Most "supervisor + reverse proxy" tools in this class are 50–100 MB.
+- **`go mod tidy` is boring.** Months between updates is fine. No constant dep churn, no scrambling to track Dependabot PRs.
+- **Reading the source is enough.** You don't need to know what a dozen third-party libraries do to understand a function call.
 
 ### How to apply
 
@@ -106,11 +106,11 @@ When evaluating a feature proposal, ask:
 
 - **Not "Creek Cloud is unimportant."** It is the primary product, the revenue layer, the place most users will start. This principle is about what happens when the primary product fails, not about deprioritising it.
 - **Not "creekd is a downgrade."** Self-host is a different shape, not a worse shape. It's the same daemon that runs underneath any future Creek Cloud deployment.
-- **Not "we're advertising the eject path as a feature."** Marketing the OSS escape hatch only works if the path is actually smooth. As of `v0.4.0`, it works but takes an afternoon (clone, build, configure DNS, set up TLS). `creek eject` (v2 design intent, design doc lives in the private planning repo) is the deliverable that closes that gap. Until that ships, the principle is a design commitment, not a marketing claim.
+- **Not "we're advertising the eject path as a feature."** Marketing the OSS escape hatch only works if the path is actually smooth. As of `v0.1.1`, it works but takes an afternoon (clone, build, configure DNS, set up TLS). `creek eject` (v2 design intent, design doc lives in the private planning repo) is the deliverable that closes that gap. Until that ships, the principle is a design commitment, not a marketing claim.
 
 ### Current state vs forward intent
 
-| Aspect | Today (`creekd v0.4.x`) | Forward (v2 `creek eject`) |
+| Aspect | Today (`creekd v0.1.x`) | Forward (v2 `creek eject`) |
 |---|---|---|
 | Code portability | ✅ Git repo, user owns it | ✅ Unchanged |
 | Data residency | ✅ User's own CF / Postgres account | ✅ Unchanged |
