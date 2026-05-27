@@ -36,9 +36,20 @@ jobs:
           cosign-release: "v2.4.1"
 
       - name: goreleaser
-        uses: goreleaser/goreleaser-action@v7
+        # Pinned to @v6 — @v7 introduced a self-verify step that
+        # downloads goreleaser binaries and checks their cosign
+        # signature against an identity (`.../release.yml@refs/tags/v<X>`)
+        # that drifts whenever goreleaser cuts a new release with a
+        # different bundle format. The v0.1.2 tag push (2026-05-27)
+        # broke on `bundle does not contain cert for verification`.
+        # v6 has no self-verify and is the known-working line used
+        # through v0.1.0 and v0.1.1.
+        uses: goreleaser/goreleaser-action@v6
         with:
-          version: latest
+          # Pin the goreleaser binary too. `latest` floats and is
+          # what surfaces upstream regressions inside CI; lock to
+          # the v2 major.
+          version: "~> v2"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
