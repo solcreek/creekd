@@ -19,20 +19,28 @@ This installs `creekd` + `creekctl` to `/usr/local/bin/`.
 ## 2. Set up systemd service (1 min)
 
 ```bash
-sudo cp /usr/local/bin/../init/creekd.service /etc/systemd/system/
-# Or download directly:
-curl -fsSL https://raw.githubusercontent.com/solcreek/creekd/main/init/creekd.service \
+# install.sh ships only the binaries; fetch the systemd unit
+# directly from the repo. The shipped unit hardens the daemon
+# (NoNewPrivileges, ProtectSystem=strict, etc.) and points
+# CREEKD_STATE_DIR / CREEKD_LOG_DIR at /var/lib/creekd/{state,logs}.
+sudo curl -fsSL https://raw.githubusercontent.com/solcreek/creekd/main/init/creekd.service \
   -o /etc/systemd/system/creekd.service
 
 sudo mkdir -p /var/lib/creekd/state /var/lib/creekd/logs
 
-# Set admin token
+# Set admin token. The unit reads /etc/creekd/env as an optional
+# EnvironmentFile, so anything you put here overrides the unit's
+# Environment= lines.
 sudo mkdir -p /etc/creekd
 echo "CREEKD_ADMIN_TOKEN=$(openssl rand -hex 32)" | sudo tee /etc/creekd/env
 
 sudo systemctl daemon-reload
 sudo systemctl enable creekd
 sudo systemctl start creekd
+
+# Verify the shipped hardening directives are intact on disk
+# (catches operator edits that weaken the unit).
+creekctl hardening-check /etc/systemd/system/creekd.service
 ```
 
 Verify:
@@ -110,8 +118,10 @@ creekctl logs my-app
 # Event stream
 creekctl events my-app
 
-# One-off command
-creekctl exec -- bun run seed.ts
+# One-off command (--app picks the env to inherit; omitting it
+# uses whichever app comes back first, which is ambiguous in a
+# multi-app setup — always pass --app once you have more than one).
+creekctl exec --app my-app -- bun run seed.ts
 ```
 
 ## What's running
