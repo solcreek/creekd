@@ -4,7 +4,7 @@ Status: design 2026-05-20  (target: land before creekd v1.0 API freeze, ahead of
 
 ## Why this RFC exists
 
-`creekd` v0.4.x supervises stateless processes well. Stateful workloads — Postgres, SQLite, MinIO, Valkey, NATS, anything that needs disk + non-HTTP networking + ordered start-up — need four substrate primitives that don't exist yet:
+`creekd` v0.1.x supervises stateless processes well. Stateful workloads — Postgres, SQLite, MinIO, Valkey, NATS, anything that needs disk + non-HTTP networking + ordered start-up — need four substrate primitives that don't exist yet:
 
 1. **Persistent volume mounts** (bind-mount declaration at spawn)
 2. **Non-HTTP TCP dispatch** (port allocation + routing for non-HTTP protocols)
@@ -13,7 +13,7 @@ Status: design 2026-05-20  (target: land before creekd v1.0 API freeze, ahead of
 
 All four are **mechanism, not policy** — they extend what creekd can be told to do, without baking opinions about how to do anything in particular. This is the bar from `ARCHITECTURE.md` principle 2: substrate primitives are fair game; policies belong in callers (CLIs, orchestrators, dashboards).
 
-These extensions are prerequisites for `STRATEGY-primitives.md`'s Layer 4 orchestrators (`creekdb`, `creek-sqlite`, `creek-storage`, …). Without them, every future orchestrator would either fork `creekd` or reimplement substrate. Landing them before v1.0 freeze keeps the supervisor cohesive.
+These extensions are prerequisites for the future Layer 4 orchestrators (`creekdb`, `creek-sqlite`, `creek-storage`, …) discussed in private planning notes. Without them, every future orchestrator would either fork `creekd` or reimplement substrate. Landing them before v1.0 freeze keeps the supervisor cohesive.
 
 **Out of scope**: this RFC does not specify any orchestrator. It does not pick which primitives ship. It is purely the creekd-side enabling work.
 
@@ -78,7 +78,7 @@ Non-Linux platforms: reject the field at API time with a clear error ("volume_mo
 
 - Quota enforcement: do we apply XFS project quotas or just rely on disk-level monitoring? Defer to first orchestrator that needs it.
 - Snapshot integration: see extension 4.
-- Backup automation: belongs in Layer 3 of `STRATEGY-primitives.md`, not in creekd.
+- Backup automation: belongs in a separate orchestrator layer, not in creekd. (Tier 0 snapshot via signed `MANIFEST.json` already exists; orchestrated incremental backups stay out of scope.)
 
 ## Extension 2: Non-HTTP TCP dispatch
 
@@ -202,11 +202,9 @@ Total: ~2-3 weeks of focused work. Each as a separate atomic PR with its own tes
 
 - **Do not bake any primitive-specific logic into creekd.** No "if this is a Postgres" branches. The extensions stay generic.
 - **Do not couple to a specific backup target.** S3-compatible is the obvious default, but creekd itself doesn't push backups; it provides the hook (extension 4) that orchestrators use.
-- **Do not promote `creek deploy --db=creekd` until trigger conditions are met** (per `STRATEGY-primitives.md`). The substrate extensions enable the orchestrator path, but the orchestrator does not exist yet.
+- **Do not promote any future "deploy a database via creekd" CLI surface until trigger conditions are met.** The substrate extensions enable the orchestrator path, but the orchestrator does not exist yet, and the public CLI today (`creekd` + `creekctl`) does not include a database-shaped deploy verb.
 
 ## See also
 
 - `ARCHITECTURE.md` (principles 1 + 2) — stdlib-first and substrate-not-policy commitments that constrain this RFC
 - `docs/DESIGN.md` — existing engineering design context (process model, cgroup, dispatch)
-- `STRATEGY-primitives.md` (private planning repo) — the Layer 2 / Layer 3 / Layer 4 framework these extensions slot into
-- `DESIGN-creekdb.md` (private planning repo) — first concrete consumer of all four extensions
