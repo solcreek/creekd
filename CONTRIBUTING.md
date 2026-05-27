@@ -110,9 +110,10 @@ git commit --signoff -m "..."
 git config format.signOff true
 ```
 
-PRs missing sign-off on any commit are blocked at merge time
-(reviewer-enforced today; an automated DCO check will land with
-the api-diff workflow in 0.1.0).
+PRs missing sign-off on any commit are blocked at merge time.
+DCO is reviewer-enforced today; the api-diff CI workflow that
+will automate the check is still pending (it slipped past v0.1.0
+and is not yet milestoned).
 
 ## License
 

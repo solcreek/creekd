@@ -1,8 +1,9 @@
 <!--
 Thanks for the PR! Please fill in the sections below. The
 checklist isn't ceremonial — the API impact box and the DCO
-sign-off are both reviewer-enforced gates today; a dedicated
-api-diff workflow is planned for 0.1.0.
+sign-off are both reviewer-enforced gates today. The dedicated
+api-diff CI workflow that will automate these checks slipped
+past v0.1.0 and is not yet milestoned.
 -->
 
 ## Summary
