@@ -13,3 +13,9 @@ package state
 func checkFilesystem(_ string) error {
 	return nil
 }
+
+// AllowUnsupportedFilesystemForTests is the non-Linux counterpart of
+// the Linux toggle. The check is already a no-op here, so this symbol
+// exists only so test code that flips the flag compiles cleanly on
+// macOS dev machines.
+var AllowUnsupportedFilesystemForTests bool

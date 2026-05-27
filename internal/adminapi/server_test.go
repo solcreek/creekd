@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,17 @@ import (
 	"github.com/solcreek/creekd/internal/state"
 	"github.com/solcreek/creekd/internal/supervisor"
 )
+
+// TestMain flips state.AllowUnsupportedFilesystemForTests so the
+// many tests below that wire a real state.Store on t.TempDir() can
+// run on CI workers whose /tmp is on overlayfs (e.g. GitHub Actions
+// inside Docker, magic=0x794c7630) — the production ext4/xfs check
+// would otherwise reject the store and the tests would panic at the
+// first store.Apps() call. Production startup is unaffected.
+func TestMain(m *testing.M) {
+	state.AllowUnsupportedFilesystemForTests = true
+	os.Exit(m.Run())
+}
 
 // testServer wires a real Supervisor (no cgroup, no log dir, no probe)
 // behind the admin API + an empty dispatch.Router. Used by all
@@ -774,7 +786,10 @@ func TestSpawnPersistsToStore(t *testing.T) {
 
 func TestStopRemovesFromStore(t *testing.T) {
 	ts := newTestServer(t, "")
-	store, _ := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
 	ts.srv.SetStore(store)
 
 	port := freeTCPPort(t)
@@ -793,7 +808,10 @@ func TestPersistenceSurvivesNewStore(t *testing.T) {
 	// First server writes one app.
 	ts := newTestServer(t, "")
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	store1, _ := state.NewStore(statePath)
+	store1, err := state.NewStore(statePath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
 	ts.srv.SetStore(store1)
 	port := freeTCPPort(t)
 	_, _ = ts.do(t, "POST", "/v1/apps",
@@ -963,7 +981,10 @@ func newVolumeTestServer(t *testing.T) *volumeTestServer {
 	// registry to bypass the Linux-only openat2 + MS_PRIVATE work
 	// (covered by integration tests).
 	ts.sup.VolumeRoot = "/var/lib/creekd/volumes"
-	store, _ := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store, err := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
 	ts.srv.SetStore(store)
 	return &volumeTestServer{testServer: ts, store: store}
 }

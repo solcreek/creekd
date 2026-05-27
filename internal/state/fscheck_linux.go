@@ -51,7 +51,20 @@ func fsNameByMagic(magic int64) string {
 // unsupported filesystem the daemon refuses to boot with
 // `unsupported_filesystem` so operators see the constraint loudly
 // rather than discovering it through silent data loss.
+// AllowUnsupportedFilesystemForTests, when true, makes checkFilesystem
+// a no-op. This exists solely so packages that integration-test against
+// a real Store (internal/state, internal/adminapi) can run under
+// `go test` on CI workers whose /tmp is on overlayfs (containerised CI,
+// e.g. GitHub Actions inside Docker) or tmpfs. Production code MUST NOT
+// set this — the ext4/xfs requirement is a daemon-boot hardening
+// invariant per DESIGN-self-host-state.md §"Filesystem requirement
+// (Phase 1)". Set from each test package's TestMain.
+var AllowUnsupportedFilesystemForTests bool
+
 func checkFilesystem(statePath string) error {
+	if AllowUnsupportedFilesystemForTests {
+		return nil
+	}
 	dir := filepath.Dir(statePath)
 	// On a fresh install the state dir doesn't exist yet (NewStore is
 	// allowed to be called before any AddApp). Statfs on a missing

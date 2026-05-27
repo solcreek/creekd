@@ -17,6 +17,16 @@ import (
 	"github.com/solcreek/creekd/internal/supervisor"
 )
 
+// TestMain flips AllowUnsupportedFilesystemForTests so the package's
+// integration tests can run on CI workers whose /tmp is on overlayfs
+// or tmpfs (rejected by the production ext4/xfs check). Tests that
+// need to exercise the check itself (e.g. TestNewStoreRejectsUnsupportedFilesystem)
+// temporarily set the flag back to false within the test body.
+func TestMain(m *testing.M) {
+	AllowUnsupportedFilesystemForTests = true
+	os.Exit(m.Run())
+}
+
 // newStore returns a Store rooted at a fresh temp dir.
 func newStore(t *testing.T) *Store {
 	t.Helper()
@@ -856,26 +866,24 @@ func TestFlushFsyncSequenceCompletes(t *testing.T) {
 	}
 }
 
-// TestNewStoreAcceptsTempDirOnLinux on Linux verifies that the
-// filesystem check accepts t.TempDir's filesystem (typically ext4
-// or tmpfs depending on /tmp mount). tmpfs would be rejected by
-// the check; ext4 accepted. On non-Linux (Mac dev) the check is a
-// no-op so the test always passes.
-func TestNewStoreAcceptsTempDirOnSupportedFS(t *testing.T) {
+// TestNewStoreRejectsUnsupportedFilesystem verifies the production
+// ext4/xfs check still fires when AllowUnsupportedFilesystemForTests
+// is off — defending against a regression where the toggle silently
+// stays enabled. Skips if t.TempDir() happens to be on ext4/xfs
+// (true on most dev Linux hosts), since there is then nothing for
+// the check to reject.
+func TestNewStoreRejectsUnsupportedFilesystem(t *testing.T) {
+	AllowUnsupportedFilesystemForTests = false
+	t.Cleanup(func() { AllowUnsupportedFilesystemForTests = true })
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
 	_, err := NewStore(path)
-	if err != nil {
-		// On Linux CI the default TMPDIR is sometimes mounted on
-		// tmpfs (e.g. /tmp in some container configurations). That's
-		// not creekd's fault — it's expected behaviour for the
-		// filesystem check. Surface as a Skip rather than a fail so
-		// the test runs cleanly across host configurations.
-		var ufs *UnsupportedFilesystemError
-		if errors.As(err, &ufs) {
-			t.Skipf("test TempDir is on unsupported fs %q (%s); host CI quirk, skipping",
-				ufs.Detected, dir)
-		}
-		t.Fatalf("NewStore on TempDir: %v", err)
+	if err == nil {
+		t.Skipf("TempDir %s is on a supported fs; nothing to assert", dir)
+	}
+	var ufs *UnsupportedFilesystemError
+	if !errors.As(err, &ufs) {
+		t.Fatalf("NewStore failed but not with UnsupportedFilesystemError: %v", err)
 	}
 }
