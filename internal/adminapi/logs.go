@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -148,4 +149,24 @@ func sendSSEData(w http.ResponseWriter, flusher http.Flusher, payload string) {
 func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, name, payload string) {
 	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, payload)
 	flusher.Flush()
+}
+
+// sendSSEJSON writes a JSON-encoded payload as one SSE event
+// terminated by a blank line (per spec, EventSource requires the
+// trailing `\n\n` to dispatch). Returns any write or encode error
+// so streaming callers can detect a disconnected client and exit
+// the loop — silently consuming events for a dead writer would
+// pin the subscription forever.
+func sendSSEJSON(w http.ResponseWriter, flusher http.Flusher, payload any) error {
+	if _, err := fmt.Fprint(w, "data: "); err != nil {
+		return err
+	}
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
 }

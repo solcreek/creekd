@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,8 +217,7 @@ func TestLogsFollowModeStreamsAppendedLines(t *testing.T) {
 	logPath := writeLogFile(t, ts.sup.LogDir, "follow",
 		[]string{`{"msg":"pre1"}`, `{"msg":"pre2"}`})
 
-	httpSrv := httptest.NewServer(ts.srv.Handler())
-	defer httpSrv.Close()
+	httpSrv := ts.liveServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -51,6 +51,18 @@ func newTestServer(t *testing.T, token string) *testServer {
 	}
 }
 
+// liveServer stands up an httptest.NewServer against the same
+// handler that `do` calls in-memory. Use when a test needs the
+// real net/http stack — streaming endpoints (SSE), MaxBytesReader
+// behaviour, anything that depends on header flush ordering.
+// Cleanup is registered automatically.
+func (ts *testServer) liveServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(ts.srv.Handler())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // do performs a request through the configured handler and returns
 // status + body + decoded JSON.
 func (ts *testServer) do(t *testing.T, method, path string, body any, token string) (int, []byte) {
@@ -185,6 +197,29 @@ func TestSpawnValidatesRequired(t *testing.T) {
 	}
 }
 
+// TestSpawnRejectsOutOfRangePort covers the boundary-validation
+// fix for issue #12: ports outside 1..65535 (negative, > 65535)
+// must be rejected at the handler before any spawn happens, not
+// via dispatch's late "invalid port N" after the child process
+// has already started. The Port == 0 case is exercised by
+// TestSpawnValidatesRequired since it has a distinct error
+// message ("port is required") that this test's range-match
+// assertion would not catch.
+func TestSpawnRejectsOutOfRangePort(t *testing.T) {
+	ts := newTestServer(t, "")
+	cases := []int{-1, 65536, 70000, 1 << 20}
+	for _, p := range cases {
+		req := apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: p}
+		status, body := ts.do(t, "POST", "/v1/apps", req, "")
+		if status != http.StatusBadRequest {
+			t.Errorf("port=%d: status = %d, want 400; body=%s", p, status, string(body))
+		}
+		if !strings.Contains(string(body), "1..65535") {
+			t.Errorf("port=%d: body should name the valid range, got %s", p, body)
+		}
+	}
+}
+
 func TestSpawnRejectsInvalidID(t *testing.T) {
 	ts := newTestServer(t, "")
 	// Each of these IDs would, if accepted, become a directory name,
@@ -211,6 +246,40 @@ func TestSpawnRejectsInvalidID(t *testing.T) {
 	}
 }
 
+// TestSpawn_OversizedBodyReturns413 covers the
+// writeDecodeError mapping: when the JSON body exceeds
+// MaxRequestBodyBytes, http.MaxBytesReader pre-writes a 413
+// status — the handler must respond with a 413-shaped body
+// (request_too_large code) rather than the old bad_request body
+// that left the wire mismatched. Real httptest.Server needed
+// because httptest.NewRecorder doesn't enforce the
+// can't-re-write-status rule MaxBytesReader exploits.
+func TestSpawn_OversizedBodyReturns413(t *testing.T) {
+	ts := newTestServer(t, "")
+	srv := ts.liveServer(t)
+
+	// Pad a value field past the MaxRequestBodyBytes limit.
+	big := strings.Repeat("x", MaxRequestBodyBytes+1)
+	body := strings.NewReader(`{"id":"x","port":9000,"command":"sleep","args":["` + big + `"]}`)
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/apps", body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var er apitypes.ErrorResponse
+	if err := json.Unmarshal(raw, &er); err != nil {
+		t.Fatalf("decode error body: %v (raw=%q)", err, raw)
+	}
+	if string(er.Code) != string(apitypes.ErrorCodeRequestTooLarge) {
+		t.Errorf("code = %q, want %q", er.Code, apitypes.ErrorCodeRequestTooLarge)
+	}
+}
+
 func TestSpawnRejectsUnknownFields(t *testing.T) {
 	ts := newTestServer(t, "")
 	// Build raw JSON with a bogus field.
@@ -220,6 +289,83 @@ func TestSpawnRejectsUnknownFields(t *testing.T) {
 	ts.srv.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for unknown field", w.Code)
+	}
+}
+
+// TestGetAppEvents_BlankLineTerminator covers the SSE spec
+// compliance fix for issue #14: each event must be terminated by
+// a blank line (two consecutive `\n`), otherwise EventSource
+// buffers `data` fields until the next event accidentally starts
+// a new `data:` and sparse streams never dispatch.
+func TestGetAppEvents_BlankLineTerminator(t *testing.T) {
+	ts := newTestServer(t, "")
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "a", Command: ptr("sleep"), Args: &[]string{"60"}, Port: port}, "")
+	t.Cleanup(func() { _, _ = ts.do(t, "DELETE", "/v1/apps/a", nil, "") })
+
+	srv := ts.liveServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", srv.URL+"/v1/apps/a/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Read SSE bytes in a goroutine, accumulating until \n\n
+	// appears (or the body returns an error). HTTP chunking is
+	// arbitrary, so a single Read could land just `data: ...\n`
+	// without the blank-line terminator — assertion would flake.
+	doneCh := make(chan []byte, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		var acc []byte
+		buf := make([]byte, 256)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				acc = append(acc, buf[:n]...)
+				if bytes.Contains(acc, []byte("\n\n")) {
+					doneCh <- acc
+					return
+				}
+			}
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+
+	// Publish on a tight cadence rather than `Sleep(50ms) + publish-
+	// once`: the old shape assumed Subscribe in the handler races
+	// faster than 50ms, which flakes on slow CI runners. Republishing
+	// every 20ms means the loop wins as soon as the subscription is
+	// live, regardless of scheduler jitter.
+	pub := time.NewTicker(20 * time.Millisecond)
+	defer pub.Stop()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case got := <-doneCh:
+			if !bytes.HasPrefix(got, []byte("data: ")) {
+				t.Errorf("SSE payload missing `data: ` prefix: %q", got)
+			}
+			return
+		case err := <-errCh:
+			t.Fatalf("body read error before \\n\\n: %v", err)
+		case <-pub.C:
+			ts.sup.Events.Publish(supervisor.Event{Type: supervisor.EventReady, AppID: "a", Timestamp: time.Now().UTC()})
+		case <-deadline:
+			t.Fatal("no SSE blank-line terminator within 2s")
+		}
 	}
 }
 
@@ -272,11 +418,61 @@ func TestListAndGet(t *testing.T) {
 		t.Errorf("conditions[0].type = %q, want Ready (canonical order)", envelope.Status.Conditions[0].Type)
 	}
 	// Test server lacks a store, so the identity fields of metadata
-	// (uid / generation / resourceVersion / creationTimestamp) are
-	// unset. metadata.name is still populated from the runtime app.
-	// This path is documented behavior — the runtime status is still
-	// authoritative. Once store is wired in for tests (see
-	// TestGetAppEnvelopeWithStore), the identity fields populate.
+	// come from ephemeralMetadata (deterministic UUIDv5, generation
+	// 1, resourceVersion 1, creationTimestamp ≈ app start).
+	// TestGetAppEnvelopeWithStore covers the persisted path;
+	// TestGetAppEnvelopeWithoutStore covers the synthesis path.
+}
+
+// TestGetAppEnvelopeWithoutStore covers the ephemeral-metadata
+// fix for issue #15: when CREEKD_STATE_DIR is unset (s.store ==
+// nil) the envelope's metadata must NOT be all-zero. uid is a
+// deterministic UUIDv5 derived from the app id; generation /
+// observedGeneration / resourceVersion are 1; creationTimestamp
+// reflects approximately when the app started.
+func TestGetAppEnvelopeWithoutStore(t *testing.T) {
+	ts := newTestServer(t, "")
+	// Deliberately no SetStore.
+	port := freeTCPPort(t)
+	before := time.Now().UTC().Add(-time.Second)
+	if status, _ := ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "ephem", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, ""); status != http.StatusCreated {
+		t.Fatalf("spawn status = %d", status)
+	}
+	t.Cleanup(func() { _ = ts.sup.Stop("ephem") })
+	after := time.Now().UTC().Add(time.Second)
+
+	status, body := ts.do(t, "GET", "/v1/apps/ephem", nil, "")
+	if status != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", status, body)
+	}
+	var envelope apitypes.App
+	mustJSON(t, body, &envelope)
+
+	// uid: non-zero, deterministic for this id (UUIDv5).
+	if envelope.Metadata.Uid.String() == "00000000-0000-0000-0000-000000000000" {
+		t.Error("metadata.uid is zero without store; want synthesized UUIDv5")
+	}
+	if envelope.Metadata.Uid.Version() != 5 {
+		t.Errorf("metadata.uid version = %d, want 5 (UUIDv5 / deterministic)", envelope.Metadata.Uid.Version())
+	}
+	// Two calls in a row must return the same uid (determinism).
+	_, body2 := ts.do(t, "GET", "/v1/apps/ephem", nil, "")
+	var envelope2 apitypes.App
+	mustJSON(t, body2, &envelope2)
+	if envelope.Metadata.Uid != envelope2.Metadata.Uid {
+		t.Errorf("uid not deterministic: %q vs %q", envelope.Metadata.Uid, envelope2.Metadata.Uid)
+	}
+
+	if envelope.Metadata.Generation != 1 {
+		t.Errorf("generation = %d, want 1", envelope.Metadata.Generation)
+	}
+	if envelope.Metadata.ResourceVersion != "1" {
+		t.Errorf("resourceVersion = %q, want \"1\"", envelope.Metadata.ResourceVersion)
+	}
+	if envelope.Metadata.CreationTimestamp.Before(before) || envelope.Metadata.CreationTimestamp.After(after) {
+		t.Errorf("creationTimestamp = %v, want in [%v, %v]", envelope.Metadata.CreationTimestamp, before, after)
+	}
 }
 
 // TestGetAppEnvelopeWithStore verifies the full envelope shape when
@@ -411,6 +607,31 @@ func TestDeployRequiresPort(t *testing.T) {
 	status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
 	if status != http.StatusBadRequest {
 		t.Errorf("status = %d body = %s, want 400", status, body)
+	}
+}
+
+// TestDeployRejectsOutOfRangePort is the Deploy-side analogue of
+// TestSpawnRejectsOutOfRangePort — the validatePort helper is
+// called from both handlers and must continue to reject out-of-
+// range values before any supervisor / router work runs. Port == 0
+// is exercised by TestDeployRequiresPort (different error message).
+func TestDeployRejectsOutOfRangePort(t *testing.T) {
+	ts := newTestServer(t, "")
+	port := freeTCPPort(t)
+	_, _ = ts.do(t, "POST", "/v1/apps",
+		apitypes.SpawnRequest{Id: "x", Command: ptr("sleep"), Args: &[]string{"30"}, Port: port}, "")
+	t.Cleanup(func() { _ = ts.sup.Stop("x") })
+
+	cases := []int{-1, 65536, 70000, 1 << 20}
+	for _, p := range cases {
+		req := apitypes.DeployRequest{Port: p, Command: ptr("sleep"), Args: &[]string{"30"}}
+		status, body := ts.do(t, "POST", "/v1/apps/x/deploy", req, "")
+		if status != http.StatusBadRequest {
+			t.Errorf("port=%d: status = %d, want 400; body=%s", p, status, string(body))
+		}
+		if !strings.Contains(string(body), "1..65535") {
+			t.Errorf("port=%d: body should name the valid range, got %s", p, body)
+		}
 	}
 }
 

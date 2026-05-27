@@ -388,6 +388,16 @@ func (a *App) Uptime() time.Duration {
 	return time.Since(a.startedAt)
 }
 
+// StartedAt returns the absolute time the current process started,
+// or the zero time if the app has not been started yet. Stable
+// across calls — unlike `time.Now().Add(-Uptime())` which jitters
+// by the gap between the two clock reads.
+func (a *App) StartedAt() time.Time {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.startedAt
+}
+
 // setState mutates the runtime state under App.mu.
 func (a *App) setState(cmd *exec.Cmd, status Status, startedAt time.Time) {
 	a.mu.Lock()

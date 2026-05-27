@@ -133,6 +133,7 @@ const (
 	ErrorCodeNotFound                ErrorCode = "not_found"
 	ErrorCodePortConflict            ErrorCode = "port_conflict"
 	ErrorCodeReleaseArtifactPruned   ErrorCode = "release_artifact_pruned"
+	ErrorCodeRequestTooLarge         ErrorCode = "request_too_large"
 	ErrorCodeResourceVersionMismatch ErrorCode = "resource_version_mismatch"
 	ErrorCodeStorageCorrupted        ErrorCode = "storage_corrupted"
 	ErrorCodeSystemdHardeningDrift   ErrorCode = "systemd_hardening_drift"
@@ -163,6 +164,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodePortConflict:
 		return true
 	case ErrorCodeReleaseArtifactPruned:
+		return true
+	case ErrorCodeRequestTooLarge:
 		return true
 	case ErrorCodeResourceVersionMismatch:
 		return true
@@ -327,7 +330,18 @@ type AppMetadata struct {
 	// ResourceVersion Opaque CAS token. Clients MUST NOT do arithmetic on it.
 	ResourceVersion string `json:"resourceVersion"`
 
-	// Uid UUIDv7. Stable across rename; never reused.
+	// Uid Stable identity for an app's current lifetime.
+	// Generated as UUIDv7 by the persistence store at first
+	// AddApp; in that mode, never reused across rename or
+	// delete+recreate (each AddApp mints a fresh v7).
+	// When the daemon runs without a store (CREEKD_STATE_DIR
+	// unset) GetApp synthesizes a UUIDv5 derived from the
+	// app id — same `format: uuid` wire shape, but
+	// deterministic: deleting and recreating an app with the
+	// same id WILL produce the same uid, and clients that
+	// rely on v7's embedded timestamp ordering or the
+	// uniqueness-across-recreate guarantee must enable the
+	// persistent store.
 	Uid openapi_types.UUID `json:"uid"`
 }
 

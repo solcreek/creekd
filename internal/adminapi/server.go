@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/solcreek/creekd/internal/apitypes"
 	"github.com/solcreek/creekd/internal/backup"
 	"github.com/solcreek/creekd/internal/dispatch"
@@ -234,16 +236,16 @@ func (s *Server) checkBearer(r *http.Request) bool {
 
 func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.SpawnRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	if err := supervisor.ValidateID(req.Id); err != nil {
 		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
-	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
+	if err := validatePort(req.Port); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 
@@ -342,17 +344,37 @@ func (s *Server) GetApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppI
 	// spec, status} shape. Other handlers still return AppView until
 	// they're refactored individually.
 	//
-	// If store is not configured (some test paths) or the app
-	// predates the metadata era (in-memory-only spawn), fall back to
-	// a zero-metadata envelope rather than 500ing — the runtime
-	// state is still authoritative for status fields.
-	var meta state.AppMetadata
+	// Start with ephemeral metadata, override with the persisted
+	// record when the store is configured and has it. Synthesis
+	// (see ephemeralMetadata) ensures the envelope never carries
+	// nil-uid / zero-time values that pass schema validation but
+	// mean nothing to clients keying off uid for identity.
+	meta := ephemeralMetadata(id, app.StartedAt())
 	if s.store != nil {
 		if m, ok := s.store.Meta(id); ok {
 			meta = m
 		}
 	}
 	writeJSON(w, http.StatusOK, appToEnvelope(app, meta, s.conditions))
+}
+
+// ephemeralMetadata constructs a non-zero AppMetadata for an app
+// that has no persisted record (CREEKD_STATE_DIR unset, or app
+// spawned before the metadata era). UID is the stable field —
+// deterministic UUIDv5 derived from the app id, so the same id
+// always maps to the same uid. CreationTimestamp reflects the
+// actual process-start instant. Generation / ObservedGeneration /
+// ResourceVersion are hardcoded 1 and carry no CAS semantics:
+// clients must not use ResourceVersion for If-Match against a
+// no-store daemon.
+func ephemeralMetadata(id apitypes.AppID, startedAt time.Time) state.AppMetadata {
+	return state.AppMetadata{
+		UID:                uuid.NewSHA1(uuid.NameSpaceURL, []byte("creekd://app/"+id)).String(),
+		Generation:         1,
+		ObservedGeneration: 1,
+		ResourceVersion:    1,
+		CreationTimestamp:  startedAt.UTC(),
+	}
 }
 
 func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.AppID, _ apitypes.StopAppParams) {
@@ -381,12 +403,12 @@ func (s *Server) StopApp(w http.ResponseWriter, _ *http.Request, id apitypes.App
 
 func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID, _ apitypes.DeployAppParams) {
 	var req apitypes.DeployRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
-	if req.Port == 0 {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "port is required")
+	if err := validatePort(req.Port); err != nil {
+		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
 		return
 	}
 
@@ -529,8 +551,8 @@ func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes
 func (s *Server) RestartApp(w http.ResponseWriter, r *http.Request, id apitypes.AppID) {
 	var req apitypes.RestartRequest
 	if r.ContentLength > 0 || r.Body != http.NoBody {
-		if err := decodeJSONAllowEmpty(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+		if err := decodeJSONAllowEmpty(w, r, &req); err != nil {
+			writeDecodeError(w, err)
 			return
 		}
 	}
@@ -589,7 +611,6 @@ func (s *Server) GetAppEvents(w http.ResponseWriter, r *http.Request, id apitype
 	defer s.sup.Events.Unsubscribe(subID)
 
 	ctx := r.Context()
-	enc := json.NewEncoder(w)
 	for {
 		select {
 		case <-ctx.Done():
@@ -601,9 +622,9 @@ func (s *Server) GetAppEvents(w http.ResponseWriter, r *http.Request, id apitype
 			if evt.AppID != id {
 				continue
 			}
-			fmt.Fprintf(w, "data: ")
-			enc.Encode(evt)
-			flusher.Flush()
+			if err := sendSSEJSON(w, flusher, evt); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -693,8 +714,8 @@ func (s *Server) GetAppLogs(w http.ResponseWriter, r *http.Request, id apitypes.
 
 func (s *Server) RegisterVolume(w http.ResponseWriter, r *http.Request) {
 	var req apitypes.VolumeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), "decode: "+err.Error())
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeDecodeError(w, err)
 		return
 	}
 	v := supervisor.Volume{
@@ -774,12 +795,46 @@ func (s *Server) DeleteVolume(w http.ResponseWriter, _ *http.Request, id apitype
 
 const MaxRequestBodyBytes = 64 << 10
 
-func decodeJSON(r *http.Request, dst any) error {
-	return decodeJSONInner(nil, r, dst, false)
+// validatePort enforces the OpenAPI spec's port range (1..65535) at
+// the handler boundary, before any spawn / SetAddr work. The old
+// `port == 0 ? "required"` check let negative or >65535 values
+// through to the supervisor; the request still failed (dispatch's
+// "invalid port N") but only after the child process had briefly
+// started, which is the wrong place to refuse bad input.
+func validatePort(p int) error {
+	if p == 0 {
+		return errors.New("port is required")
+	}
+	if p < 1 || p > 65535 {
+		return fmt.Errorf("port must be in range 1..65535, got %d", p)
+	}
+	return nil
 }
 
-func decodeJSONAllowEmpty(r *http.Request, dst any) error {
-	return decodeJSONInner(nil, r, dst, true)
+// writeDecodeError maps a decodeJSON*-returned error to the right
+// status + error code. A *http.MaxBytesError means the body
+// exceeded MaxRequestBodyBytes: at that point MaxBytesReader has
+// already written a 413 status line on the wire, so the handler
+// MUST emit a 413-shaped body — re-writing the status to 400 is
+// rejected by net/http, producing a mismatched 413-status with
+// bad_request body. All other decode errors stay 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			string(apitypes.ErrorCodeRequestTooLarge),
+			fmt.Sprintf("request body exceeds %d-byte limit", mbe.Limit))
+		return
+	}
+	writeError(w, http.StatusBadRequest, string(apitypes.ErrorCodeBadRequest), err.Error())
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	return decodeJSONInner(w, r, dst, false)
+}
+
+func decodeJSONAllowEmpty(w http.ResponseWriter, r *http.Request, dst any) error {
+	return decodeJSONInner(w, r, dst, true)
 }
 
 func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool) error {
@@ -790,6 +845,12 @@ func decodeJSONInner(w http.ResponseWriter, r *http.Request, dst any, allowEmpty
 		return errors.New("empty body")
 	}
 	defer r.Body.Close()
+	// Set Content-Type up front so MaxBytesReader's 413 carries the
+	// right header — once it calls requestTooLarge, the response
+	// headers are flushed and writeJSON's later Set is a no-op.
+	// Every successful path also writes JSON, so the header is
+	// always correct.
+	w.Header().Set("Content-Type", "application/json")
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
