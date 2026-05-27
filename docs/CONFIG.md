@@ -72,11 +72,34 @@ Daemon-wide floor for cgroup `memory.max` — the **hard** memory cap that trigg
 
 ### `CREEKD_STATE_DIR`
 
-Directory holding `state.json`, the persisted set of declared apps.
+Directory holding `state.json` plus the audit log, host key, and Release ledger. Setting this single variable turns on every persistence feature creekd offers.
 
-- **Default**: empty (no persistence — apps vanish when creekd restarts)
-- **When set**: creekd loads `<dir>/state.json` at startup and replays every recorded app through `Spawn` before opening listeners. Spawn / deploy / stop operations write through to the file atomically.
+- **Default**: empty (no persistence — apps vanish when creekd restarts; audit / hostkey / ledger are disabled too)
+- **When set**, creekd lays out:
+  - `<dir>/state.json` — declared apps + per-app `AppMetadata` envelope. Currently format `v3`; older `v1` / `v2` files are migrated forward on startup.
+  - `<dir>/audit/` — append-only audit log with each record's `prev_sha256` chained to the previous. Verified at startup and across log rotations.
+  - `<dir>/hostkey` — persistent ed25519 host key. Generated on first start, never rotated automatically. Public half + fingerprint served by the unauthenticated `GET /v1/hostkey` for TOFU pinning; private half signs the Tier 0 backup `MANIFEST.json`.
+  - `<dir>/releases/` — Release ledger entries (every successful deploy / rollback) so a future rollback can re-run an exact prior `ConfigSnapshot`.
 - **Semantics**: declarations persist, processes do not. After a creekd restart the supervisor re-spawns fresh processes from the saved configs.
+
+## Volume substrate
+
+### `CREEKD_VOLUME_ROOT`
+
+Host-side root that anchors every volume registered via `POST /v1/volumes`. Each volume's `BackingPath` is resolved relative to this root before any bind-mount inside an app's mount namespace.
+
+- **Default**: empty (the Volume substrate is disabled — `RegisterVolume` returns an error)
+- **Example**: `/var/lib/creekd/volumes`
+- **Requires**: Linux + writable directory owned by the user creekd runs as.
+
+### `CREEKD_ALLOWED_TARGET_PREFIXES`
+
+Allowlist of host-side `Target` paths that apps without a `Sandbox.Chroot` may bind-mount over. Forbidden system prefixes (`/proc`, `/sys`, `/dev`, etc.) are rejected unconditionally regardless of this list — the allowlist further restricts what is otherwise permitted.
+
+- **Default**: empty (apps without chroot may target any non-system path).
+- **Format**: PATH-style, colon-separated absolute prefixes. Empty entries are ignored.
+- **Example**: `/srv:/var/lib/app-state`
+- Apps with a non-empty `Sandbox.Chroot` ignore this list — the chroot is already the boundary.
 
 ## Network isolation
 
