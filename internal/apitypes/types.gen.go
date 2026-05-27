@@ -249,9 +249,10 @@ func (e ReleasePhase) Valid() bool {
 
 // Defines values for Runtime.
 const (
-	Bun  Runtime = "bun"
-	Deno Runtime = "deno"
-	Node Runtime = "node"
+	Bun     Runtime = "bun"
+	Deno    Runtime = "deno"
+	Node    Runtime = "node"
+	Workers Runtime = "workers"
 )
 
 // Valid indicates whether the value is a known member of the Runtime enum.
@@ -262,6 +263,8 @@ func (e Runtime) Valid() bool {
 	case Deno:
 		return true
 	case Node:
+		return true
+	case Workers:
 		return true
 	default:
 		return false

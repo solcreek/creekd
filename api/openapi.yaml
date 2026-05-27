@@ -556,7 +556,7 @@ components:
   schemas:
     Runtime:
       type: string
-      enum: [bun, node, deno]
+      enum: [bun, node, deno, workers]
 
     ErrorCode:
       type: string
