@@ -28,7 +28,7 @@ pinned). A fork or hijacked pipeline cannot satisfy verification.
 
 | Variable               | Default                                    | Purpose                                                                                  |
 |------------------------|--------------------------------------------|------------------------------------------------------------------------------------------|
-| `CREEKD_VERSION`       | latest release tag                         | Pin a specific release (e.g. `v0.0.5`).                                                  |
+| `CREEKD_VERSION`       | latest release tag                         | Pin a specific release (e.g. `v0.1.1`).                                                  |
 | `CREEKD_PREFIX`        | `/usr/local/bin` if root, else `~/.local/bin` | Install directory.                                                                       |
 | `CREEKD_VERIFY_COSIGN` | unset (soft-attempt)                       | `1` → hard-require cosign verification. Missing cosign aborts the install.               |
 
