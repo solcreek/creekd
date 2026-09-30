@@ -6,11 +6,17 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-30
+
+Security release for [GHSA-mj5q-2pxj-hrpv](https://github.com/solcreek/creekd/security/advisories/GHSA-mj5q-2pxj-hrpv): every app now runs as its own UID. **Contains a breaking change** — read *Changed* before upgrading.
+
 ### Security
 
-- **Apps could read each other's secrets and creekd's admin token.** Every app ran as creekd's own user: root (with `CAP_SYS_PTRACE`) under a root creekd, or the shared `creekd` user under the shipped unit. Either way any app could read `/proc/<pid>/environ` of every other app and of creekd itself, including `CREEKD_ADMIN_TOKEN`. The default PID namespace did not prevent this: `/proc` is not remounted.
+- **Apps could read each other's secrets and creekd's admin token** ([GHSA-mj5q-2pxj-hrpv](https://github.com/solcreek/creekd/security/advisories/GHSA-mj5q-2pxj-hrpv)). Every app ran as creekd's own user: root (with `CAP_SYS_PTRACE`) under a root creekd, or the shared `creekd` user under the shipped unit. Either way any app could read `/proc/<pid>/environ` of every other app and of creekd itself, including `CREEKD_ADMIN_TOKEN`. The default PID namespace did not prevent this: `/proc` is not remounted.
   - Each app now runs as its own UID/GID, allocated from `CREEKD_APP_UID_BASE` (default `1000000`), persisted, and never reused. The switch drops the app's inheritable and ambient capabilities, so it keeps none.
   - The shipped `init/creekd.service` grants `CAP_SETUID` + `CAP_SETGID` for this; `creekctl hardening-check` now expects them. creekd warns at startup when it cannot switch UIDs.
+
+- **Go 1.26.6.** Releases and CI were built with go1.26.3, which `govulncheck` flags for 8 standard-library vulnerabilities reachable from creekd (crypto/tls, crypto/x509, encoding/asn1, net/http, net/textproto); 1.26.6 fixes all of them.
 
 ### Changed
 
@@ -162,7 +168,8 @@ First public release. The supervisor is now installable via `curl install.sh | s
 - Single host. No clustering, no multi-host scheduling.
 - Log retention is size-only, no time-based rotation, no remote shipping.
 
-[Unreleased]: https://github.com/solcreek/creekd/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/solcreek/creekd/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/solcreek/creekd/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/solcreek/creekd/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/solcreek/creekd/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/solcreek/creekd/releases/tag/v0.1.0
