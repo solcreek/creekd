@@ -86,17 +86,9 @@ func TestRunHardeningCheck_MissingFileReturnsError(t *testing.T) {
 }
 
 // canonicalUnit synthesises a unit body that contains every
-// directive in the canonical hardening set with the expected
-// value. Mirrors the helper used in internal/hardening tests; kept
-// duplicated here to avoid a cross-package test-helper export.
+// directive in the canonical hardening set with the expected value,
+// rendered by the same hardening.CanonicalServiceSection the package
+// tests use (a multi-line directive needs one assignment per line).
 func canonicalUnit() string {
-	var b strings.Builder
-	b.WriteString("[Service]\n")
-	for _, r := range hardening.RequiredDirectives() {
-		b.WriteString(r.Key)
-		b.WriteString("=")
-		b.WriteString(r.Want)
-		b.WriteString("\n")
-	}
-	return b.String()
+	return "[Service]\n" + hardening.CanonicalServiceSection()
 }
