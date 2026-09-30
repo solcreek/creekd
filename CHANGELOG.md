@@ -6,6 +6,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Security
+
+- **The shipped unit's syscall filter now denies what it says it denies.** `SystemCallFilter=@system-service ~@privileged ~@resources` on one line is an allow-list of `@system-service`; its `~` tokens removed nothing that set already contains, so creekd and its apps could still call `setpriority`, `sched_setaffinity`, `sched_setscheduler`, `setrlimit`, `chown`, `mbind` and 20 more. The unit now allows `@system-service`, denies `@privileged @resources`, and re-allows only `@setuid capset` for per-app UIDs, as three assignments; a denied call fails with `EPERM` (`SystemCallErrorNumber=EPERM`) instead of killing the process. Impact before the fix was limited: apps run under their own UID with no capabilities, so these calls could not raise privileges.
+
+### Changed
+
+- `creekctl hardening-check` reads repeated `SystemCallFilter=` assignments as systemd does (in order; an empty one resets) and expects the three-line filter plus `SystemCallErrorNumber=EPERM`. The one-line filter now reports as weakened.
+
 ## [0.1.3] - 2026-09-30
 
 Security release for [GHSA-mj5q-2pxj-hrpv](https://github.com/solcreek/creekd/security/advisories/GHSA-mj5q-2pxj-hrpv): every app now runs as its own UID. **Contains a breaking change** — read *Changed* before upgrading.

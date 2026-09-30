@@ -14,12 +14,7 @@ import (
 func minimalHardenedUnit() string {
 	var b strings.Builder
 	b.WriteString("[Service]\n")
-	for _, r := range RequiredDirectives() {
-		b.WriteString(r.Key)
-		b.WriteString("=")
-		b.WriteString(r.Want)
-		b.WriteString("\n")
-	}
+	b.WriteString(CanonicalServiceSection())
 	return b.String()
 }
 
@@ -92,11 +87,46 @@ func TestValidate_IgnoresDirectivesOutsideServiceSection(t *testing.T) {
 // order MUST NOT flag drift — systemd treats them as equivalent.
 func TestValidate_SystemCallFilterOrderInsensitive(t *testing.T) {
 	body := strings.Replace(minimalHardenedUnit(),
-		"SystemCallFilter=@system-service ~@privileged ~@resources",
-		"SystemCallFilter=~@resources @system-service ~@privileged", 1)
+		"SystemCallFilter=~@privileged @resources",
+		"SystemCallFilter=~@resources @privileged", 1)
 	drift := mustValidate(t, body)
 	if len(drift) != 0 {
-		t.Errorf("SystemCallFilter reordered triggered drift: %v", drift)
+		t.Errorf("SystemCallFilter tokens reordered within a line triggered drift: %v", drift)
+	}
+}
+
+// TestValidate_SystemCallFilterDrift: the filter is judged as the
+// sequence of assignments systemd applies.
+func TestValidate_SystemCallFilterDrift(t *testing.T) {
+	canonical := "SystemCallFilter=@system-service\nSystemCallFilter=~@privileged @resources\nSystemCallFilter=@setuid capset\n"
+	cases := map[string]string{
+		// allow-list whose ~ tokens deny nothing @system-service includes
+		"the old one-liner": "SystemCallFilter=@system-service ~@privileged ~@resources\n",
+		// kills setpriv: per-app UIDs stop working
+		"no re-allow line": "SystemCallFilter=@system-service\nSystemCallFilter=~@privileged @resources\n",
+		// the deny line after the re-allow line removes @setuid again
+		"lines out of order": "SystemCallFilter=@system-service\nSystemCallFilter=@setuid capset\nSystemCallFilter=~@privileged @resources\n",
+		// an empty assignment resets everything before it
+		"reset, then a lone allow-list": canonical + "SystemCallFilter=\nSystemCallFilter=@system-service\n",
+	}
+	for name, filter := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(minimalHardenedUnit(), canonical, filter, 1)
+			if !containsDriftFor(mustValidate(t, body), "SystemCallFilter") {
+				t.Errorf("want SystemCallFilter drift for %q", filter)
+			}
+		})
+	}
+}
+
+// TestValidate_SystemCallFilterResetThenCanonical: a reset followed by
+// the canonical lines is the canonical filter.
+func TestValidate_SystemCallFilterResetThenCanonical(t *testing.T) {
+	body := strings.Replace(minimalHardenedUnit(),
+		"SystemCallFilter=@system-service\n",
+		"SystemCallFilter=@default\nSystemCallFilter=\nSystemCallFilter=@system-service\n", 1)
+	if drift := mustValidate(t, body); len(drift) != 0 {
+		t.Errorf("reset then canonical triggered drift: %v", drift)
 	}
 }
 

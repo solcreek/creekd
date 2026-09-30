@@ -61,7 +61,15 @@ func RequiredDirectives() []Required {
 		{"LockPersonality", "true", matchExact},
 		{"MemoryDenyWriteExecute", "true", matchExact},
 		{"SystemCallArchitectures", "native", matchExact},
-		{"SystemCallFilter", "@system-service ~@privileged ~@resources", matchSyscallFilter},
+		// Three lines, in this order: allow @system-service, deny
+		// @privileged and @resources, re-allow what per-app UIDs need.
+		// The old one-line "@system-service ~@privileged ~@resources" is
+		// an allow-list whose ~ tokens deny nothing @system-service
+		// includes (setresuid, setpriority, chown, setrlimit, ...).
+		{"SystemCallFilter", "@system-service\n~@privileged @resources\n@setuid capset", matchSyscallFilter},
+		// A denied syscall fails with EPERM instead of killing the
+		// process with SIGSYS, so an app that probes one degrades.
+		{"SystemCallErrorNumber", "EPERM", matchExact},
 		// CAP_SETUID/CAP_SETGID: per-app UIDs (see init/creekd.service).
 		// A set, not a string: systemd accepts the names in any order.
 		{"CapabilityBoundingSet", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID", matchPathSet},
@@ -96,10 +104,53 @@ func matchExact(want, got string) bool {
 	return strings.TrimSpace(want) == strings.TrimSpace(got)
 }
 
-// matchSyscallFilter is order-insensitive over the space-separated
-// tokens. systemd accepts the same filter expressed with tokens
-// shuffled; the validator should not flag that as drift.
+// matchSyscallFilter compares SystemCallFilter assignments line by
+// line (one per "\n"). Line order matters — systemd applies each
+// assignment in turn, so allow / deny / re-allow is not the same filter
+// in another order — but tokens within a line are order-insensitive.
 func matchSyscallFilter(want, got string) bool {
+	w := strings.Split(want, "\n")
+	g := strings.Split(got, "\n")
+	if len(w) != len(g) {
+		return false
+	}
+	for i := range w {
+		wDeny, wList := filterLine(w[i])
+		gDeny, gList := filterLine(g[i])
+		if wDeny != gDeny || !matchTokenSet(wList, gList) {
+			return false
+		}
+	}
+	return true
+}
+
+// filterLine splits one SystemCallFilter assignment into its mode and
+// its list: a leading "~" makes the whole line a deny-list; it is not
+// part of the first token.
+func filterLine(line string) (deny bool, list string) {
+	line = strings.TrimSpace(line)
+	if rest, ok := strings.CutPrefix(line, "~"); ok {
+		return true, rest
+	}
+	return false, line
+}
+
+// CanonicalServiceSection renders RequiredDirectives as the directive
+// lines of a unit's [Service] section, one assignment per line (a
+// multi-line want becomes repeated assignments of the same key).
+func CanonicalServiceSection() string {
+	var b strings.Builder
+	for _, r := range RequiredDirectives() {
+		for _, v := range strings.Split(r.Want, "\n") {
+			b.WriteString(r.Key + "=" + v + "\n")
+		}
+	}
+	return b.String()
+}
+
+// matchTokenSet reports whether two space-separated lists hold the same
+// tokens, in any order.
+func matchTokenSet(want, got string) bool {
 	w := strings.Fields(want)
 	g := strings.Fields(got)
 	if len(w) != len(g) {
@@ -116,6 +167,11 @@ func matchSyscallFilter(want, got string) bool {
 	}
 	return true
 }
+
+// multiAssign lists the directives systemd accumulates across repeated
+// assignments (an empty assignment resets the list). Every other key
+// keeps its last assignment.
+var multiAssign = map[string]bool{"SystemCallFilter": true}
 
 // matchPathSet is a strict set comparison: same paths, no extras,
 // order-insensitive. Used for ReadWritePaths where extra entries
@@ -198,7 +254,16 @@ func parseServiceSection(unitContent string) (map[string]string, error) {
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
-		out[key] = val
+		switch {
+		case !multiAssign[key]:
+			out[key] = val
+		case val == "":
+			delete(out, key) // systemd: an empty assignment resets the list
+		case out[key] == "":
+			out[key] = val
+		default:
+			out[key] += "\n" + val
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("hardening: parse unit: %w", err)
