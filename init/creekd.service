@@ -59,10 +59,13 @@ SystemCallErrorNumber=EPERM
 # (CREEKD_APP_UID_BASE). Without them every app runs as the creekd
 # user, and a process can read /proc/<pid>/environ of any process with
 # its own UID: every other app's secrets and creekd's CREEKD_ADMIN_TOKEN.
-# Apps never inherit these two: setpriv clears the inheritable and
-# ambient sets before exec'ing the app.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+# CAP_KILL lets creekd signal those apps — SIGTERM on stop, restart and
+# deploy, SIGKILL on escalation. Without it every stop fails with EPERM
+# and the old process keeps running.
+# Apps never inherit these: setpriv clears the inheritable and ambient
+# sets before exec'ing the app.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL
 
 # No core dumps — protects in-memory secrets (#7 hostkey, future
 # KEK envelope material) from landing on disk on crash.

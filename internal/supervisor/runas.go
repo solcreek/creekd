@@ -57,9 +57,27 @@ func (s *Supervisor) PerAppUIDsAvailable() bool {
 var hasSetIDCaps = readSetIDCapsFromProc
 
 const (
-	capSetgidBit = 6 // CAP_SETGID, <linux/capability.h>
+	capKillBit   = 5 // CAP_KILL, <linux/capability.h>
+	capSetgidBit = 6 // CAP_SETGID
 	capSetuidBit = 7 // CAP_SETUID
 )
+
+// CanSignalApps reports whether creekd can signal an app that runs as
+// another UID: root, or CAP_KILL. Without it, a per-app UID app cannot
+// be stopped, restarted or replaced by a deploy; creekd reports this
+// at startup.
+func (s *Supervisor) CanSignalApps() bool {
+	return !runtimeIsLinux() || hasKillCap()
+}
+
+// hasKillCap reports whether CAP_KILL is effective. Overridable for tests.
+var hasKillCap = func() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	return parseCapBits(data, 1<<capKillBit)
+}
 
 func readSetIDCapsFromProc() bool {
 	data, err := os.ReadFile("/proc/self/status")
@@ -84,6 +102,19 @@ func parseSetIDCaps(data []byte) bool {
 		}
 		want := uint64(1)<<capSetgidBit | uint64(1)<<capSetuidBit
 		return caps&want == want
+	}
+	return false
+}
+
+// parseCapBits reports whether every bit in want is set in CapEff.
+func parseCapBits(data []byte, want uint64) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		caps, err := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+		return err == nil && caps&want == want
 	}
 	return false
 }

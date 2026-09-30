@@ -137,7 +137,7 @@ func TestValidate_CapabilitiesWithoutSetID(t *testing.T) {
 	body := minimalHardenedUnit()
 	for _, key := range []string{"CapabilityBoundingSet", "AmbientCapabilities"} {
 		body = strings.Replace(body,
-			key+"=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID",
+			key+"=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL",
 			key+"=CAP_NET_BIND_SERVICE", 1)
 	}
 	drift := mustValidate(t, body)
@@ -152,8 +152,8 @@ func TestValidate_CapabilitiesWithoutSetID(t *testing.T) {
 // capability list as a set, so the validator does too.
 func TestValidate_CapabilitiesOrderInsensitive(t *testing.T) {
 	body := strings.Replace(minimalHardenedUnit(),
-		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID",
-		"CapabilityBoundingSet=CAP_SETGID CAP_NET_BIND_SERVICE CAP_SETUID", 1)
+		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL",
+		"CapabilityBoundingSet=CAP_KILL CAP_SETGID CAP_NET_BIND_SERVICE CAP_SETUID", 1)
 	if drift := mustValidate(t, body); len(drift) != 0 {
 		t.Errorf("reordered CapabilityBoundingSet triggered drift: %v", drift)
 	}
