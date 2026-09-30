@@ -302,6 +302,11 @@ type App struct {
 	// is read without locking.
 	runAs *RunAs
 
+	// runAsRoot records that the app was spawned with RunAsRoot, as
+	// opposed to running as root only because per-app UIDs were off.
+	// A blue-green deploy carries it over (inheritIdentity).
+	runAsRoot bool
+
 	mu        sync.RWMutex
 	cmd       *exec.Cmd
 	status    Status
@@ -471,6 +476,9 @@ func (a *App) snapshotCmd() *exec.Cmd {
 func (a *App) Env() []string {
 	return append([]string(nil), a.env...)
 }
+
+// RunAsRoot reports whether the app was spawned with RunAsRoot.
+func (a *App) RunAsRoot() bool { return a.runAsRoot }
 
 // RunAs returns a copy of the host UID/GID the app runs as, or nil
 // when it runs as root.
@@ -668,9 +676,9 @@ type Supervisor struct {
 	AllowedTargetPrefixes []string
 
 	// AppUIDBase is the first host UID/GID handed to an app that names
-	// no Config.RunAs (see resolveRunAsLocked). 0 turns per-app UIDs
-	// off: such apps then run as root, as before. Default
-	// DefaultAppUIDBase.
+	// no Config.RunAs (see resolveRunAsLocked). 0 stops allocating: an
+	// app with no RunAs yet runs as creekd's own user, while one whose
+	// RunAs is already recorded keeps it. Default DefaultAppUIDBase.
 	AppUIDBase int
 
 	// UIDStatePath is where the UID high-water mark persists, so a UID
@@ -1226,6 +1234,7 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		ra := *cfg.RunAs
 		app.runAs = &ra
 	}
+	app.runAsRoot = cfg.RunAsRoot
 
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller
@@ -2030,11 +2039,7 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 	tempID := deployTempID(cfg.ID)
 	v2Cfg := cfg.Config
 	v2Cfg.ID = tempID
-	// v2 keeps v1's identity unless the deploy names one: the files v1
-	// wrote are owned by that UID, and v2 must still read them.
-	if v2Cfg.RunAs == nil && !v2Cfg.RunAsRoot {
-		v2Cfg.RunAs = v1.RunAs()
-	}
+	inheritIdentity(&v2Cfg, v1)
 	v2, err := s.spawnUnchecked(v2Cfg)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: spawn v2: %w", err)

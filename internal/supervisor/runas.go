@@ -116,10 +116,25 @@ func (s *Supervisor) resolveRunAsLocked(cfg *Config) error {
 		if owner := s.runAsOwnerLocked(cfg.RunAs.UID, cfg.ID); owner != "" {
 			return fmt.Errorf("supervisor: uid %d is used by app %q: %w", cfg.RunAs.UID, owner, ErrRunAsInUse)
 		}
-		s.observeUIDLocked(cfg.RunAs.UID)
+		// A pinned UID inside the allocation range is persisted like an
+		// allocated one: otherwise, once its app is deleted and creekd
+		// restarts, the file's older mark would let the UID be handed
+		// to a new app, which would inherit the old one's files.
+		if s.observeUIDLocked(cfg.RunAs.UID) {
+			if err := s.persistUIDHighWater(s.uidHWM); err != nil {
+				return fmt.Errorf("supervisor: persist uid high-water mark: %w", err)
+			}
+		}
 		return nil
 	}
 	if !s.autoRunAsEnabled() {
+		return nil
+	}
+	// A user-namespaced app's identity is its UID mapping: a host UID
+	// from the allocator is not mapped inside the namespace, and
+	// setresuid to it fails with EINVAL. Such apps get an identity only
+	// through an explicit RunAs the operator has mapped.
+	if cfg.Sandbox != nil && cfg.Sandbox.UserNamespace {
 		return nil
 	}
 	next := s.AppUIDBase
@@ -167,10 +182,44 @@ func (s *Supervisor) ObserveRunAs(cfg Config) {
 	s.observeUIDLocked(cfg.RunAs.UID)
 }
 
-func (s *Supervisor) observeUIDLocked(uid int) {
+// observeUIDLocked raises the in-memory mark to uid when uid is in the
+// allocation range and above it; reports whether it did. Caller holds
+// s.mu.
+func (s *Supervisor) observeUIDLocked(uid int) bool {
 	if s.AppUIDBase > 0 && uid >= s.AppUIDBase && uid > s.uidHWM {
 		s.uidHWM = uid
+		return true
 	}
+	return false
+}
+
+// SyncUIDHighWater persists the in-memory mark. Called after restore
+// observed every persisted RunAs: if the mark file was lost or is
+// older than state.json, a later delete + restart must still not hand
+// those UIDs out again.
+func (s *Supervisor) SyncUIDHighWater() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.uidHWM == 0 {
+		return nil
+	}
+	return s.persistUIDHighWater(s.uidHWM)
+}
+
+// inheritIdentity gives a blue-green v2 the identity of v1 unless the
+// deploy names one: v1's UID (the files it wrote are owned by it), or
+// root when v1 was spawned with RunAsRoot. Without the second case a
+// deploy that omits run_as_root would move a root app onto a fresh UID
+// that cannot read what v1 wrote.
+func inheritIdentity(v2 *Config, v1 *App) {
+	if v2.RunAs != nil || v2.RunAsRoot {
+		return
+	}
+	if v1.runAsRoot {
+		v2.RunAsRoot = true
+		return
+	}
+	v2.RunAs = v1.RunAs()
 }
 
 // LoadUIDHighWater reads the persisted high-water mark from

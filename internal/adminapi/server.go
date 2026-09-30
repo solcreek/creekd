@@ -277,7 +277,7 @@ func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 	// Persist the identity Spawn settled on (an allocated UID when the
 	// request named none), so a restore brings the app back as the
 	// same user that owns its files.
-	cfg.RunAs = app.RunAs()
+	cfg.RunAs, cfg.RunAsRoot = app.RunAs(), app.RunAsRoot()
 
 	if s.store != nil {
 		if serr := s.store.AddApp(cfg); serr != nil {
@@ -439,7 +439,8 @@ func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.A
 		}
 		return
 	}
-	dcfg.Config.RunAs = app.RunAs() // v2's identity, inherited from v1 unless the request named one
+	// v2's identity, inherited from v1 unless the request named one
+	dcfg.Config.RunAs, dcfg.Config.RunAsRoot = app.RunAs(), app.RunAsRoot()
 
 	if s.store != nil {
 		if serr := s.store.AddApp(dcfg.Config); serr != nil {
@@ -526,7 +527,7 @@ func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes
 		}
 		return
 	}
-	dcfg.Config.RunAs = app.RunAs()
+	dcfg.Config.RunAs, dcfg.Config.RunAsRoot = app.RunAs(), app.RunAsRoot()
 	if serr := s.store.AddApp(dcfg.Config); serr != nil {
 		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
 			"state.AddApp (rollback): "+serr.Error())

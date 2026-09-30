@@ -14,7 +14,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Changed
 
-- **Breaking:** apps no longer run as creekd's user by default. An app that writes to a directory owned by root or `creekd` fails until that directory is chowned to its UID (`GET /v1/apps/{id}` → `run_as`). Existing apps get a UID on the first restart after upgrading, persisted to `state.json`; creekd logs a warning naming each one. To pin a UID before the first start, spawn with `run_as: {uid, gid}`; to keep an app on creekd's user, `run_as_root: true`; to restore the old behaviour for all apps, `CREEKD_APP_UID_BASE=0`.
+- **Breaking:** apps no longer run as creekd's user by default. An app that writes to a directory owned by root or `creekd` fails until that directory is chowned to its UID (`GET /v1/apps/{id}` → `run_as`). Existing apps get a UID on the first restart after upgrading, persisted to `state.json`; creekd logs a warning naming each one. To pin a UID before the first start, spawn with `run_as: {uid, gid}`; to keep an app on creekd's user, `run_as_root: true`. To keep all existing apps on creekd's user, set `CREEKD_APP_UID_BASE=0` before the first restart on this version; an app that already has a UID keeps it (redeploy it with `run_as_root: true` to move it back). An app with a UID does not start if creekd later loses the ability to switch UIDs. User-namespaced apps get no allocated UID.
 
 ### Added
 

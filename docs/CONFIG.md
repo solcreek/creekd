@@ -72,13 +72,15 @@ Daemon-wide floor for cgroup `memory.max` — the **hard** memory cap that trigg
 
 ### `CREEKD_APP_UID_BASE`
 
-First host UID/GID creekd hands to an app whose spawn names no `run_as`. Each app gets its own UID, allocated upward from this base and never reused (the high-water mark persists in `<CREEKD_STATE_DIR>/app-uid-hwm`), so a new app can't inherit files a deleted one left behind.
+First host UID/GID creekd hands to an app whose spawn names no `run_as`. Each app gets its own UID, allocated upward from this base and never reused (the high-water mark persists in `<CREEKD_STATE_DIR>/app-uid-hwm`, and also covers `run_as` UIDs at or above the base), so a new app can't inherit files a deleted one left behind.
 
 - **Default**: `1000000` — above `/etc/subuid` ranges and systemd's reserved user ranges.
-- **`0`**: turns per-app UIDs off. Apps that name no `run_as` then run as creekd's own user (root, or `creekd` under the shipped unit). creekd warns at startup.
+- **`0`**: stops allocating. An app that has no UID yet runs as creekd's own user (root, or `creekd` under the shipped unit), and creekd warns at startup. An app that already has one — recorded in `state.json` when it was spawned, deployed or first restored — keeps it, because its files belong to that UID; to move it back, redeploy it with `run_as_root: true`. Set `0` before the first restart on this version to keep existing apps on creekd's user.
+- **Fails closed**: an app with a recorded UID does not start when creekd cannot switch UIDs (no root, no `CAP_SETUID`/`CAP_SETGID`); it is never silently run as creekd's own user.
+- **User namespaces**: an app spawned with `sandbox.user_namespace` gets no allocated UID — its identity is its UID mapping. A `run_as` for such an app must be a UID mapped inside its namespace.
 - **Requires**: creekd running as root, or holding `CAP_SETUID` + `CAP_SETGID` (the shipped `init/creekd.service` grants both). Without them creekd warns at startup and every app shares its UID.
 - **Why**: a process can read `/proc/<pid>/environ` of any process with the same UID, and root reads everyone's. Apps sharing a UID — or running as root — can read each other's secrets and creekd's `CREEKD_ADMIN_TOKEN`.
-- **Per-app override**: spawn/deploy `run_as: {uid, gid}` pins an identity (the operator can then chown the app's data before its first start); `run_as_root: true` keeps an app on creekd's own user. Two apps may not share a `run_as` UID. A blue-green deploy keeps the app's UID unless the request names one.
+- **Per-app override**: spawn/deploy `run_as: {uid, gid}` pins an identity (the operator can then chown the app's data before its first start); `run_as_root: true` keeps an app on creekd's own user. Two apps may not share a `run_as` UID. A blue-green deploy keeps the app's identity — its UID, or root if it was spawned with `run_as_root` — unless the request names one.
 - The switch happens in the innermost `setpriv` wrapper (`--reuid --regid --clear-groups --inh-caps=-all --ambient-caps=-all`), so the app ends with no capabilities.
 
 ### `CREEKD_STATE_DIR`

@@ -476,6 +476,11 @@ func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 	for _, cfg := range apps {
 		sup.ObserveRunAs(cfg)
 	}
+	if err := sup.SyncUIDHighWater(); err != nil {
+		logger.Error("restore: persist uid high-water mark failed; a deleted app's UID could be reused after the next restart",
+			"err", err,
+		)
+	}
 
 	restored := 0
 	for _, cfg := range apps {

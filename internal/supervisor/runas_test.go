@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/solcreek/creekd/internal/sandbox"
 )
 
 // privilegedLinux makes autoRunAsEnabled see a privileged Linux host,
@@ -229,5 +231,80 @@ func TestParseSetIDCaps(t *testing.T) {
 		if got := parseSetIDCaps([]byte(in)); got != want {
 			t.Errorf("parseSetIDCaps(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// A pinned UID inside the allocation range must survive in the mark
+// file: after its app is deleted and creekd restarts, state.json no
+// longer mentions it, and only the file stops it being handed out.
+func TestRunAsPinnedUIDPersisted(t *testing.T) {
+	privilegedLinux(t)
+	hwm := filepath.Join(t.TempDir(), "app-uid-hwm")
+	s1 := newRunAsSupervisor(t, hwm)
+	if _, err := resolve(t, s1, Config{ID: "pinned", RunAs: &RunAs{UID: 1005, GID: 1005}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s2 := newRunAsSupervisor(t, hwm) // restart; "pinned" was deleted
+	if err := s2.LoadUIDHighWater(); err != nil {
+		t.Fatal(err)
+	}
+	mustUID(t, s2, "new", 1006)
+}
+
+func TestSyncUIDHighWaterPersistsObservedUIDs(t *testing.T) {
+	privilegedLinux(t)
+	hwm := filepath.Join(t.TempDir(), "app-uid-hwm") // lost or never written
+	s := newRunAsSupervisor(t, hwm)
+	s.ObserveRunAs(Config{ID: "restored", RunAs: &RunAs{UID: 5000, GID: 5000}})
+	if err := s.SyncUIDHighWater(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(hwm)
+	if got := strings.TrimSpace(string(data)); got != "5000" {
+		t.Fatalf("mark file = %q, want 5000", got)
+	}
+}
+
+// A user-namespaced app's identity is its mapping; an allocated host
+// UID is not mapped inside it and setresuid would fail with EINVAL.
+func TestRunAsSkipsUserNamespace(t *testing.T) {
+	privilegedLinux(t)
+	s := newRunAsSupervisor(t, "")
+	ra, err := resolve(t, s, Config{ID: "userns", Sandbox: &sandbox.Spec{UserNamespace: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ra != nil {
+		t.Fatalf("RunAs = %+v, want none for a user-namespaced app", ra)
+	}
+}
+
+func TestInheritIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		v1       *App
+		v2       Config
+		wantUID  int // 0 = no RunAs
+		wantRoot bool
+	}{
+		{"v1's UID carries over", &App{runAs: &RunAs{UID: 1000001, GID: 1000001}}, Config{}, 1000001, false},
+		{"v1 spawned run_as_root stays root", &App{runAsRoot: true}, Config{}, 0, true},
+		{"v1 root only because UIDs were off: nothing pinned", &App{}, Config{}, 0, false},
+		{"an explicit v2 RunAs wins", &App{runAs: &RunAs{UID: 1000001, GID: 1000001}}, Config{RunAs: &RunAs{UID: 7, GID: 7}}, 7, false},
+		{"an explicit v2 run_as_root wins", &App{runAs: &RunAs{UID: 1000001, GID: 1000001}}, Config{RunAsRoot: true}, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v2 := tc.v2
+			inheritIdentity(&v2, tc.v1)
+			gotUID := 0
+			if v2.RunAs != nil {
+				gotUID = v2.RunAs.UID
+			}
+			if gotUID != tc.wantUID || v2.RunAsRoot != tc.wantRoot {
+				t.Fatalf("v2 RunAs uid=%d RunAsRoot=%v, want uid=%d RunAsRoot=%v", gotUID, v2.RunAsRoot, tc.wantUID, tc.wantRoot)
+			}
+		})
 	}
 }

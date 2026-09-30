@@ -39,6 +39,12 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
+# Per-app UIDs need setpriv to call setresuid, setresgid, setgroups and
+# capset in creekd's children. This single-line spelling is an allow-list
+# (@system-service) and allows them — verified with systemd-run on
+# Ubuntu 26.04. A deny-list line (SystemCallFilter=~@privileged) would
+# block them and kill every app with SIGSYS: keep them allowed if you
+# change this filter.
 SystemCallFilter=@system-service ~@privileged ~@resources
 
 # Capabilities. creekd binds 80/443 for ACME without full root;
