@@ -6,6 +6,20 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Security
+
+- **Apps could read each other's secrets and creekd's admin token.** Every app ran as creekd's own user: root (with `CAP_SYS_PTRACE`) under a root creekd, or the shared `creekd` user under the shipped unit. Either way any app could read `/proc/<pid>/environ` of every other app and of creekd itself, including `CREEKD_ADMIN_TOKEN`. The default PID namespace did not prevent this: `/proc` is not remounted.
+  - Each app now runs as its own UID/GID, allocated from `CREEKD_APP_UID_BASE` (default `1000000`), persisted, and never reused. The switch drops the app's inheritable and ambient capabilities, so it keeps none.
+  - The shipped `init/creekd.service` grants `CAP_SETUID` + `CAP_SETGID` for this; `creekctl hardening-check` now expects them. creekd warns at startup when it cannot switch UIDs.
+
+### Changed
+
+- **Breaking:** apps no longer run as creekd's user by default. An app that writes to a directory owned by root or `creekd` fails until that directory is chowned to its UID (`GET /v1/apps/{id}` → `run_as`). Existing apps get a UID on the first restart after upgrading, persisted to `state.json`; creekd logs a warning naming each one. To pin a UID before the first start, spawn with `run_as: {uid, gid}`; to keep an app on creekd's user, `run_as_root: true`; to restore the old behaviour for all apps, `CREEKD_APP_UID_BASE=0`.
+
+### Added
+
+- `run_as` / `run_as_root` on spawn and deploy requests; `run_as` on the app view.
+
 ## [0.1.2] - 2026-05-27
 
 Eight days of post-`v0.1.1` work consolidating the K8s-style envelope, durability primitives, and supply-chain integrity. Six review-driven PRs (#5–#11) landed audit-WAL hash chains, the Release ledger, Stage 0 TOFU hostkeys, cosign + SLSA-attested releases, and signed self-upgrade. PR #16 closed four admin-API handler-hardening issues (#12–#15) surfaced by external review. `workerd` target scaffolding seeded for Phase 2. Project documentation pulled back into alignment with reality after a fact-drift audit.

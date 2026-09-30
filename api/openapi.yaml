@@ -642,6 +642,21 @@ components:
         chroot:
           type: string
 
+    RunAs:
+      type: object
+      description: |
+        Host UID/GID the app's process runs as. When a spawn names none
+        (and run_as_root is not set), creekd allocates a dedicated,
+        never-reused UID/GID on privileged Linux hosts. Both must be > 0.
+      required: [uid, gid]
+      properties:
+        uid:
+          type: integer
+          minimum: 1
+        gid:
+          type: integer
+          minimum: 1
+
     VolumeMount:
       type: object
       required: [volume_id, target]
@@ -689,6 +704,11 @@ components:
           type: boolean
         sandbox:
           $ref: "#/components/schemas/Sandbox"
+        run_as:
+          $ref: "#/components/schemas/RunAs"
+        run_as_root:
+          type: boolean
+          description: Run as root with no UID switch. Forfeits isolation from other apps.
         health_check_path:
           type: string
         volume_mounts:
@@ -724,6 +744,11 @@ components:
           type: boolean
         sandbox:
           $ref: "#/components/schemas/Sandbox"
+        run_as:
+          $ref: "#/components/schemas/RunAs"
+        run_as_root:
+          type: boolean
+          description: Run as root with no UID switch. Forfeits isolation from other apps.
         health_check_path:
           type: string
         volume_mounts:
@@ -976,6 +1001,8 @@ components:
           format: int64
         net_ip:
           type: string
+        run_as:
+          $ref: "#/components/schemas/RunAs"
 
     ListAppsResponse:
       type: object

@@ -153,6 +153,24 @@ type Config struct {
 	// &Spec{NoNewPrivs: true} to take explicit ownership.
 	Sandbox *sandbox.Spec
 
+	// RunAs is the host UID/GID the app runs as. When nil, RunAsRoot is
+	// false and the secure-by-default sandbox applies (privileged Linux,
+	// Supervisor.AppUIDBase > 0), Spawn allocates a dedicated UID/GID
+	// that no other app — current or past — has used, and records it
+	// here so restarts, restores and deploys keep the same identity.
+	// Operators who pre-create the app's data directories pass an
+	// explicit RunAs so they can chown before the first start.
+	//
+	// Why per-app: every app running as root holds CAP_SYS_PTRACE, so
+	// any tenant can read any other tenant's /proc/<pid>/environ (its
+	// secrets) and files. A distinct non-root UID puts each app behind
+	// the kernel's ordinary ptrace and file-permission checks.
+	RunAs *RunAs
+
+	// RunAsRoot keeps the app running as root: no UID switch. For
+	// trusted apps that need it; it forfeits isolation from co-tenants.
+	RunAsRoot bool
+
 	// NetIsolation opts into per-app network namespace + veth wiring.
 	// When true AND Supervisor.NetSubnet + NetBridgeName are
 	// configured AND the host is Linux, the supervisor:
@@ -247,6 +265,10 @@ func CloneConfig(cfg Config) Config {
 		spec.GIDMappings = append([]sandbox.IDMap(nil), cfg.Sandbox.GIDMappings...)
 		out.Sandbox = &spec
 	}
+	if cfg.RunAs != nil {
+		ra := *cfg.RunAs
+		out.RunAs = &ra
+	}
 	return out
 }
 
@@ -274,6 +296,11 @@ type App struct {
 	// defensive copy is taken at Spawn time so mutating the caller's
 	// slice after the fact doesn't silently change restart behaviour.
 	env []string
+
+	// runAs is the host UID/GID the process runs as (Config.RunAs after
+	// Spawn resolved it); nil means root. Immutable after Spawn, so it
+	// is read without locking.
+	runAs *RunAs
 
 	mu        sync.RWMutex
 	cmd       *exec.Cmd
@@ -443,6 +470,16 @@ func (a *App) snapshotCmd() *exec.Cmd {
 // Env returns a defensive copy of the app's environment variables.
 func (a *App) Env() []string {
 	return append([]string(nil), a.env...)
+}
+
+// RunAs returns a copy of the host UID/GID the app runs as, or nil
+// when it runs as root.
+func (a *App) RunAs() *RunAs {
+	if a.runAs == nil {
+		return nil
+	}
+	ra := *a.runAs
+	return &ra
 }
 
 // RestartCount returns the number of restarts observed within the
@@ -629,6 +666,21 @@ type Supervisor struct {
 	// Recommended Phase 1 value: ["/data", "/var/lib/app"] for the
 	// common "no-chroot, stateless container conventions" case.
 	AllowedTargetPrefixes []string
+
+	// AppUIDBase is the first host UID/GID handed to an app that names
+	// no Config.RunAs (see resolveRunAsLocked). 0 turns per-app UIDs
+	// off: such apps then run as root, as before. Default
+	// DefaultAppUIDBase.
+	AppUIDBase int
+
+	// UIDStatePath is where the UID high-water mark persists, so a UID
+	// is never handed to a second app across restarts. Empty keeps it
+	// in memory only (fine when no app state persists either).
+	UIDStatePath string
+
+	// uidHWM is the highest UID handed out or observed in state.
+	// Guarded by mu.
+	uidHWM int
 
 	// volumes is the registry of declared Volumes. Lifecycle is
 	// decoupled from individual app spawns — a Volume registered
@@ -922,6 +974,7 @@ func New(logger *slog.Logger) *Supervisor {
 		HealthCheckFailureThreshold: 3,
 		HealthChecker:               &HTTPHealthChecker{},
 		Events:                      NewEventBus(),
+		AppUIDBase:                  DefaultAppUIDBase,
 	}
 }
 
@@ -937,9 +990,11 @@ func runtimeIsLinux() bool {
 //
 //  1. Privileged Linux (canApplyDefaultSandbox): default PID +
 //     NoNewPrivs for every app, plus Mount namespace when VolumeMounts
-//     are present. Pentest review flagged cross-tenant /proc
-//     visibility and setuid escalation as the things this guards
-//     against.
+//     are present. NoNewPrivs guards setuid escalation. The PID
+//     namespace alone does NOT hide other apps' /proc entries: /proc
+//     is not remounted, so every host PID stays visible. What keeps
+//     one app out of another's /proc/<pid>/environ is the per-app UID
+//     (Config.RunAs, resolveRunAsLocked), not this namespace.
 //  2. Anywhere else (macOS dev, non-root CI, unprivileged hosts):
 //     only apply the legacy "stateful apps get full isolation"
 //     default when VolumeMounts is non-empty. Stateless apps stay
@@ -1162,6 +1217,16 @@ func (s *Supervisor) spawnUnchecked(cfg Config) (*App, error) {
 		applyDefaultSandbox(&cfg)
 	}
 
+	// Settle the app's host identity before anything is created, so a
+	// rejected RunAs leaves nothing to roll back.
+	if err := s.resolveRunAsLocked(&cfg); err != nil {
+		return nil, err
+	}
+	if cfg.RunAs != nil {
+		ra := *cfg.RunAs
+		app.runAs = &ra
+	}
+
 	if cfg.Sandbox != nil {
 		// Defensive copy so a mutation of cfg.Sandbox by the caller
 		// after Spawn does not silently affect restarts.
@@ -1307,17 +1372,24 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	cmd := exec.Command(app.Command, app.Args...)
 
 	// Wrap the cmd from the inside out:
-	//   1. setpriv --no-new-privs (if Spec.NoNewPrivs) — the
+	//   1. setpriv (if Spec.NoNewPrivs or the app has a RunAs) — the
 	//      innermost wrapper applies prctl(PR_SET_NO_NEW_PRIVS, 1)
-	//      then exec's the real binary
+	//      and/or drops to the app's UID/GID, then exec's the real
+	//      binary. Innermost on purpose: `ip netns exec` below needs
+	//      root, so the identity switch happens after it.
 	//   2. ip netns exec (if Sandbox.NetNamespace via setupAppNetwork
 	//      wired app.netNS) — setns into the configured network
 	//      namespace, then exec's the rest of the chain
 	// iproute2's `ip` and util-linux's `setpriv` both replace
 	// themselves with exec, so cmd.Process.Pid is the leaf binary
 	// throughout.
-	if app.sandbox != nil && app.sandbox.NoNewPrivs {
-		cmd = sandbox.WrapNoNewPrivs(cmd)
+	nnp := app.sandbox != nil && app.sandbox.NoNewPrivs
+	if nnp || app.runAs != nil {
+		opts := sandbox.SetprivOptions{NoNewPrivs: nnp}
+		if app.runAs != nil {
+			opts.UID, opts.GID = app.runAs.UID, app.runAs.GID
+		}
+		cmd = sandbox.WrapSetpriv(cmd, opts)
 	}
 	if app.netNS != nil {
 		origPath := cmd.Path
@@ -1904,7 +1976,9 @@ type DeployConfig struct {
 
 // deployTempID returns the registry key used for v2 during the
 // deployment window. Exposed so tests can assert intermediate state.
-func deployTempID(id string) string { return id + "__deploying" }
+const deployTempSuffix = "__deploying"
+
+func deployTempID(id string) string { return id + deployTempSuffix }
 
 // Deploy performs a blue-green replacement of the app named cfg.ID:
 //
@@ -1956,6 +2030,11 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 	tempID := deployTempID(cfg.ID)
 	v2Cfg := cfg.Config
 	v2Cfg.ID = tempID
+	// v2 keeps v1's identity unless the deploy names one: the files v1
+	// wrote are owned by that UID, and v2 must still read them.
+	if v2Cfg.RunAs == nil && !v2Cfg.RunAsRoot {
+		v2Cfg.RunAs = v1.RunAs()
+	}
 	v2, err := s.spawnUnchecked(v2Cfg)
 	if err != nil {
 		return nil, fmt.Errorf("deploy: spawn v2: %w", err)

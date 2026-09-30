@@ -100,6 +100,35 @@ func TestValidate_SystemCallFilterOrderInsensitive(t *testing.T) {
 	}
 }
 
+// TestValidate_CapabilitiesWithoutSetID: the pre-per-app-UID unit
+// (CAP_NET_BIND_SERVICE only) is drift — without CAP_SETUID/CAP_SETGID
+// every app shares creekd's UID and can read its environment.
+func TestValidate_CapabilitiesWithoutSetID(t *testing.T) {
+	body := minimalHardenedUnit()
+	for _, key := range []string{"CapabilityBoundingSet", "AmbientCapabilities"} {
+		body = strings.Replace(body,
+			key+"=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID",
+			key+"=CAP_NET_BIND_SERVICE", 1)
+	}
+	drift := mustValidate(t, body)
+	for _, key := range []string{"CapabilityBoundingSet", "AmbientCapabilities"} {
+		if !containsDriftFor(drift, key) {
+			t.Errorf("%s without CAP_SETUID/CAP_SETGID should drift; got %v", key, drift)
+		}
+	}
+}
+
+// TestValidate_CapabilitiesOrderInsensitive: systemd reads the
+// capability list as a set, so the validator does too.
+func TestValidate_CapabilitiesOrderInsensitive(t *testing.T) {
+	body := strings.Replace(minimalHardenedUnit(),
+		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID",
+		"CapabilityBoundingSet=CAP_SETGID CAP_NET_BIND_SERVICE CAP_SETUID", 1)
+	if drift := mustValidate(t, body); len(drift) != 0 {
+		t.Errorf("reordered CapabilityBoundingSet triggered drift: %v", drift)
+	}
+}
+
 // TestValidate_ReadWritePathsOrderInsensitive: ReadWritePaths uses a
 // strict set matcher, so swapping the order of the two shipped paths
 // MUST NOT trigger drift.

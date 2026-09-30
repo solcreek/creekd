@@ -377,18 +377,23 @@ type AppStatus struct {
 
 // AppView defines model for AppView.
 type AppView struct {
-	Args           *[]string     `json:"args,omitempty"`
-	Command        string        `json:"command"`
-	Env            *[]string     `json:"env,omitempty"`
-	HealthFailures int64         `json:"health_failures"`
-	Id             string        `json:"id"`
-	NetIp          *string       `json:"net_ip,omitempty"`
-	Pid            int           `json:"pid"`
-	Port           int           `json:"port"`
-	RestartCount   int           `json:"restart_count"`
-	Runtime        *Runtime      `json:"runtime,omitempty"`
-	Status         AppViewStatus `json:"status"`
-	UptimeMs       int64         `json:"uptime_ms"`
+	Args           *[]string `json:"args,omitempty"`
+	Command        string    `json:"command"`
+	Env            *[]string `json:"env,omitempty"`
+	HealthFailures int64     `json:"health_failures"`
+	Id             string    `json:"id"`
+	NetIp          *string   `json:"net_ip,omitempty"`
+	Pid            int       `json:"pid"`
+	Port           int       `json:"port"`
+	RestartCount   int       `json:"restart_count"`
+
+	// RunAs Host UID/GID the app's process runs as. When a spawn names none
+	// (and run_as_root is not set), creekd allocates a dedicated,
+	// never-reused UID/GID on privileged Linux hosts. Both must be > 0.
+	RunAs    *RunAs        `json:"run_as,omitempty"`
+	Runtime  *Runtime      `json:"runtime,omitempty"`
+	Status   AppViewStatus `json:"status"`
+	UptimeMs int64         `json:"uptime_ms"`
 }
 
 // AppViewStatus defines model for AppView.Status.
@@ -415,20 +420,28 @@ type ConditionType string
 
 // DeployRequest defines model for DeployRequest.
 type DeployRequest struct {
-	Args            *[]string      `json:"args,omitempty"`
-	Command         *string        `json:"command,omitempty"`
-	Entry           *string        `json:"entry,omitempty"`
-	Env             *[]string      `json:"env,omitempty"`
-	GracefulV1Ms    *int64         `json:"graceful_v1_ms,omitempty"`
-	HealthCheckPath *string        `json:"health_check_path,omitempty"`
-	Limits          *Limits        `json:"limits,omitempty"`
-	NetIsolation    *bool          `json:"net_isolation,omitempty"`
-	PollIntervalMs  *int64         `json:"poll_interval_ms,omitempty"`
-	Port            int            `json:"port"`
-	ReadyTimeoutMs  *int64         `json:"ready_timeout_ms,omitempty"`
-	Runtime         *Runtime       `json:"runtime,omitempty"`
-	Sandbox         *Sandbox       `json:"sandbox,omitempty"`
-	VolumeMounts    *[]VolumeMount `json:"volume_mounts,omitempty"`
+	Args            *[]string `json:"args,omitempty"`
+	Command         *string   `json:"command,omitempty"`
+	Entry           *string   `json:"entry,omitempty"`
+	Env             *[]string `json:"env,omitempty"`
+	GracefulV1Ms    *int64    `json:"graceful_v1_ms,omitempty"`
+	HealthCheckPath *string   `json:"health_check_path,omitempty"`
+	Limits          *Limits   `json:"limits,omitempty"`
+	NetIsolation    *bool     `json:"net_isolation,omitempty"`
+	PollIntervalMs  *int64    `json:"poll_interval_ms,omitempty"`
+	Port            int       `json:"port"`
+	ReadyTimeoutMs  *int64    `json:"ready_timeout_ms,omitempty"`
+
+	// RunAs Host UID/GID the app's process runs as. When a spawn names none
+	// (and run_as_root is not set), creekd allocates a dedicated,
+	// never-reused UID/GID on privileged Linux hosts. Both must be > 0.
+	RunAs *RunAs `json:"run_as,omitempty"`
+
+	// RunAsRoot Run as root with no UID switch. Forfeits isolation from other apps.
+	RunAsRoot    *bool          `json:"run_as_root,omitempty"`
+	Runtime      *Runtime       `json:"runtime,omitempty"`
+	Sandbox      *Sandbox       `json:"sandbox,omitempty"`
+	VolumeMounts *[]VolumeMount `json:"volume_mounts,omitempty"`
 }
 
 // ErrorCode defines model for ErrorCode.
@@ -529,6 +542,14 @@ type RestartRequest struct {
 	TimeoutMs *int64 `json:"timeout_ms,omitempty"`
 }
 
+// RunAs Host UID/GID the app's process runs as. When a spawn names none
+// (and run_as_root is not set), creekd allocates a dedicated,
+// never-reused UID/GID on privileged Linux hosts. Both must be > 0.
+type RunAs struct {
+	Gid int `json:"gid"`
+	Uid int `json:"uid"`
+}
+
 // Runtime defines model for Runtime.
 type Runtime string
 
@@ -550,15 +571,23 @@ type SpawnRequest struct {
 	Entry   *string   `json:"entry,omitempty"`
 
 	// Env KEY=VALUE pairs
-	Env             *[]string      `json:"env,omitempty"`
-	HealthCheckPath *string        `json:"health_check_path,omitempty"`
-	Id              string         `json:"id"`
-	Limits          *Limits        `json:"limits,omitempty"`
-	NetIsolation    *bool          `json:"net_isolation,omitempty"`
-	Port            int            `json:"port"`
-	Runtime         *Runtime       `json:"runtime,omitempty"`
-	Sandbox         *Sandbox       `json:"sandbox,omitempty"`
-	VolumeMounts    *[]VolumeMount `json:"volume_mounts,omitempty"`
+	Env             *[]string `json:"env,omitempty"`
+	HealthCheckPath *string   `json:"health_check_path,omitempty"`
+	Id              string    `json:"id"`
+	Limits          *Limits   `json:"limits,omitempty"`
+	NetIsolation    *bool     `json:"net_isolation,omitempty"`
+	Port            int       `json:"port"`
+
+	// RunAs Host UID/GID the app's process runs as. When a spawn names none
+	// (and run_as_root is not set), creekd allocates a dedicated,
+	// never-reused UID/GID on privileged Linux hosts. Both must be > 0.
+	RunAs *RunAs `json:"run_as,omitempty"`
+
+	// RunAsRoot Run as root with no UID switch. Forfeits isolation from other apps.
+	RunAsRoot    *bool          `json:"run_as_root,omitempty"`
+	Runtime      *Runtime       `json:"runtime,omitempty"`
+	Sandbox      *Sandbox       `json:"sandbox,omitempty"`
+	VolumeMounts *[]VolumeMount `json:"volume_mounts,omitempty"`
 }
 
 // StatsView defines model for StatsView.

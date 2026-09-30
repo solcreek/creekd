@@ -28,6 +28,10 @@
 //	                     (hard cap; cgroup-scoped OOM-kill). Pairs
 //	                     with CREEKD_DEFAULT_MEMORY_HIGH as the
 //	                     safety net. Same opt-out semantics.
+//	CREEKD_APP_UID_BASE  first host UID/GID given to an app that names
+//	                     no run_as (default 1000000). Each app gets its
+//	                     own UID, never reused. 0 turns per-app UIDs
+//	                     off: such apps run as root, as before
 //	CREEKD_DEBUG_PPROF   "1" mounts /debug/pprof/* on the admin
 //	                     listener, gated by the same bearer token
 //	CREEKD_STATE_DIR     directory holding state.json (persisted app
@@ -63,6 +67,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -148,6 +153,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err := configureSupervisorFromEnv(sup); err != nil {
 		return err
 	}
+	if goruntime.GOOS == "linux" && !sup.PerAppUIDsAvailable() {
+		logger.Warn("per-app UIDs unavailable (no CAP_SETUID/CAP_SETGID): every app runs as creekd's own user " +
+			"and can read the environment of other apps and of creekd, including CREEKD_ADMIN_TOKEN. " +
+			"Run creekd as root or grant it CAP_SETUID and CAP_SETGID (see init/creekd.service)")
+	} else if sup.AppUIDBase == 0 {
+		logger.Warn("CREEKD_APP_UID_BASE=0: apps that name no run_as run as root and can read each other's environment and creekd's")
+	}
 
 	router := dispatch.NewRouter()
 
@@ -167,6 +179,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		var err error
 		store, err = state.NewStore(filepath.Join(dir, "state.json"))
 		if err != nil {
+			return fmt.Errorf("state: %w", err)
+		}
+		sup.UIDStatePath = filepath.Join(dir, "app-uid-hwm")
+		if err := sup.LoadUIDHighWater(); err != nil {
 			return fmt.Errorf("state: %w", err)
 		}
 		restored := restoreFromState(logger, sup, router, store)
@@ -337,6 +353,13 @@ func configureSupervisorFromEnv(sup *supervisor.Supervisor) error {
 		}
 		sup.DefaultMemoryMax = n
 	}
+	if v := os.Getenv("CREEKD_APP_UID_BASE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("CREEKD_APP_UID_BASE: want a non-negative integer, got %q", v)
+		}
+		sup.AppUIDBase = n
+	}
 	// Per-app network namespace requires both knobs. Either-one-set
 	// is rejected at Spawn time; we don't pre-check here because the
 	// daemon may run with no net-iso apps and that's fine.
@@ -446,8 +469,16 @@ func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 		}
 	}
 
+	// Every UID already on disk raises the high-water mark before any
+	// app spawns, so an entry that needs a fresh UID can't be handed
+	// one a later entry owns.
+	apps := store.Apps()
+	for _, cfg := range apps {
+		sup.ObserveRunAs(cfg)
+	}
+
 	restored := 0
-	for _, cfg := range store.Apps() {
+	for _, cfg := range apps {
 		// Defense in depth: reject obviously-malformed IDs from the
 		// state file even though the daemon would never write them
 		// itself. Protects against hand-edited / corrupted state.json
@@ -478,6 +509,22 @@ func restoreFromState(logger *slog.Logger, sup *supervisor.Supervisor,
 			// platform doesn't accumulate orphan registrations.
 			_ = sup.Stop(cfg.ID)
 			continue
+		}
+		// An entry written before per-app UIDs had no RunAs: Spawn just
+		// allocated one. Persist it, or the next restart would allocate
+		// another and the app would lose access to its own files.
+		if cfg.RunAs == nil && !cfg.RunAsRoot {
+			if ra := app.RunAs(); ra != nil {
+				cfg.RunAs = ra
+				if err := store.AddApp(cfg); err != nil {
+					logger.Error("restore: persist allocated run_as failed",
+						"id", cfg.ID, "uid", ra.UID, "err", err,
+					)
+				}
+				logger.Warn("restore: app now runs as a dedicated non-root user; chown its data to it",
+					"id", cfg.ID, "uid", ra.UID, "gid", ra.GID,
+				)
+			}
 		}
 		restored++
 		logger.Info("restored", "id", cfg.ID, "pid", app.PID(), "port", cfg.Port)

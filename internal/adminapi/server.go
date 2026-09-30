@@ -274,6 +274,11 @@ func (s *Server) SpawnApp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Persist the identity Spawn settled on (an allocated UID when the
+	// request named none), so a restore brings the app back as the
+	// same user that owns its files.
+	cfg.RunAs = app.RunAs()
+
 	if s.store != nil {
 		if serr := s.store.AddApp(cfg); serr != nil {
 			_ = s.sup.Stop(req.Id)
@@ -434,6 +439,8 @@ func (s *Server) DeployApp(w http.ResponseWriter, r *http.Request, id apitypes.A
 		}
 		return
 	}
+	dcfg.Config.RunAs = app.RunAs() // v2's identity, inherited from v1 unless the request named one
+
 	if s.store != nil {
 		if serr := s.store.AddApp(dcfg.Config); serr != nil {
 			writeStoreError(w, "state.AddApp (deploy)", serr)
@@ -504,7 +511,8 @@ func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes
 	// the supervisor swaps process trees + dispatch entries atomically.
 	dcfg := supervisor.DeployConfig{Config: supervisor.CloneConfig(*target.Spec.ConfigSnapshot)}
 	dcfg.Config.ID = id
-	if _, err := s.sup.Deploy(r.Context(), s.router, dcfg); err != nil {
+	app, err := s.sup.Deploy(r.Context(), s.router, dcfg)
+	if err != nil {
 		switch {
 		case errors.Is(err, supervisor.ErrNotFound):
 			writeError(w, http.StatusNotFound, string(apitypes.ErrorCodeNotFound), err.Error())
@@ -518,6 +526,7 @@ func (s *Server) RollbackApp(w http.ResponseWriter, r *http.Request, id apitypes
 		}
 		return
 	}
+	dcfg.Config.RunAs = app.RunAs()
 	if serr := s.store.AddApp(dcfg.Config); serr != nil {
 		writeError(w, http.StatusInternalServerError, string(apitypes.ErrorCodeInternal),
 			"state.AddApp (rollback): "+serr.Error())

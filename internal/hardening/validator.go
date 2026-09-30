@@ -62,8 +62,10 @@ func RequiredDirectives() []Required {
 		{"MemoryDenyWriteExecute", "true", matchExact},
 		{"SystemCallArchitectures", "native", matchExact},
 		{"SystemCallFilter", "@system-service ~@privileged ~@resources", matchSyscallFilter},
-		{"CapabilityBoundingSet", "CAP_NET_BIND_SERVICE", matchExact},
-		{"AmbientCapabilities", "CAP_NET_BIND_SERVICE", matchExact},
+		// CAP_SETUID/CAP_SETGID: per-app UIDs (see init/creekd.service).
+		// A set, not a string: systemd accepts the names in any order.
+		{"CapabilityBoundingSet", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID", matchPathSet},
+		{"AmbientCapabilities", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID", matchPathSet},
 		{"LimitCORE", "0", matchExact},
 		{"DynamicUser", "no", matchExact},
 		// ReadWritePaths is the escape hatch ProtectSystem=strict relies

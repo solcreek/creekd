@@ -33,6 +33,8 @@ func spawnToConfig(req apitypes.SpawnRequest) (supervisor.Config, error) {
 		CgroupLimits:    limitsToInternal(req.Limits),
 		NetIsolation:    derefBool(req.NetIsolation),
 		Sandbox:         sandboxToInternal(req.Sandbox),
+		RunAs:           runAsToInternal(req.RunAs),
+		RunAsRoot:       derefBool(req.RunAsRoot),
 		HealthCheckPath: derefStr(req.HealthCheckPath),
 		VolumeMounts:    volumeMountsToInternal(req.VolumeMounts),
 	}, nil
@@ -56,6 +58,8 @@ func deployToConfig(id string, req apitypes.DeployRequest) (supervisor.DeployCon
 			CgroupLimits:    limitsToInternal(req.Limits),
 			NetIsolation:    derefBool(req.NetIsolation),
 			Sandbox:         sandboxToInternal(req.Sandbox),
+			RunAs:           runAsToInternal(req.RunAs),
+			RunAsRoot:       derefBool(req.RunAsRoot),
 			HealthCheckPath: derefStr(req.HealthCheckPath),
 			VolumeMounts:    volumeMountsToInternal(req.VolumeMounts),
 		},
@@ -93,6 +97,9 @@ func appToView(app *supervisor.App) apitypes.AppView {
 	if app.NetIP != nil {
 		s := app.NetIP.String()
 		v.NetIp = &s
+	}
+	if ra := app.RunAs(); ra != nil {
+		v.RunAs = &apitypes.RunAs{Uid: ra.UID, Gid: ra.GID}
 	}
 	return v
 }
@@ -294,6 +301,13 @@ func sandboxToInternal(s *apitypes.Sandbox) *sandbox.Spec {
 		return nil
 	}
 	return &spec
+}
+
+func runAsToInternal(r *apitypes.RunAs) *supervisor.RunAs {
+	if r == nil {
+		return nil
+	}
+	return &supervisor.RunAs{UID: r.Uid, GID: r.Gid}
 }
 
 func volumeMountsToInternal(vms *[]apitypes.VolumeMount) []supervisor.VolumeMount {

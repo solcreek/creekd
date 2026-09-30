@@ -51,6 +51,14 @@ type Spec struct {
 	Chroot string
 }
 
+// SetprivOptions selects what WrapSetpriv applies before exec'ing the
+// app. UID 0 means "no identity switch"; UID and GID are set together.
+type SetprivOptions struct {
+	NoNewPrivs bool
+	UID        int
+	GID        int
+}
+
 // IDMap mirrors syscall.SysProcIDMap so callers don't need to import
 // "syscall" just to construct a Spec. ContainerID is the start of
 // the range inside the new namespace; HostID is the start outside;

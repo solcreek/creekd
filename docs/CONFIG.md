@@ -70,6 +70,17 @@ Daemon-wide floor for cgroup `memory.max` — the **hard** memory cap that trigg
 - **Per-app override**: `creekctl up --memory-max <size>` always wins.
 - **Malformed values** fail daemon startup.
 
+### `CREEKD_APP_UID_BASE`
+
+First host UID/GID creekd hands to an app whose spawn names no `run_as`. Each app gets its own UID, allocated upward from this base and never reused (the high-water mark persists in `<CREEKD_STATE_DIR>/app-uid-hwm`), so a new app can't inherit files a deleted one left behind.
+
+- **Default**: `1000000` — above `/etc/subuid` ranges and systemd's reserved user ranges.
+- **`0`**: turns per-app UIDs off. Apps that name no `run_as` then run as creekd's own user (root, or `creekd` under the shipped unit). creekd warns at startup.
+- **Requires**: creekd running as root, or holding `CAP_SETUID` + `CAP_SETGID` (the shipped `init/creekd.service` grants both). Without them creekd warns at startup and every app shares its UID.
+- **Why**: a process can read `/proc/<pid>/environ` of any process with the same UID, and root reads everyone's. Apps sharing a UID — or running as root — can read each other's secrets and creekd's `CREEKD_ADMIN_TOKEN`.
+- **Per-app override**: spawn/deploy `run_as: {uid, gid}` pins an identity (the operator can then chown the app's data before its first start); `run_as_root: true` keeps an app on creekd's own user. Two apps may not share a `run_as` UID. A blue-green deploy keeps the app's UID unless the request names one.
+- The switch happens in the innermost `setpriv` wrapper (`--reuid --regid --clear-groups --inh-caps=-all --ambient-caps=-all`), so the app ends with no capabilities.
+
 ### `CREEKD_STATE_DIR`
 
 Directory holding `state.json` plus the audit log, host key, and Release ledger. Setting this single variable turns on every persistence feature creekd offers.

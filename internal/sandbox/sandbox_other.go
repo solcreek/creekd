@@ -17,3 +17,8 @@ func platformApply(_ *exec.Cmd, _ Spec) error {
 // non-Linux hosts. Kept defined to satisfy the supervisor's
 // platform-agnostic call site.
 func WrapNoNewPrivs(cmd *exec.Cmd) *exec.Cmd { return cmd }
+
+// WrapSetpriv is a no-op on non-Linux for the same reason. The
+// supervisor refuses an explicit RunAs off Linux and never allocates
+// one there, so no identity switch is silently dropped.
+func WrapSetpriv(cmd *exec.Cmd, _ SetprivOptions) *exec.Cmd { return cmd }

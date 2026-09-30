@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"os/exec"
+	"strconv"
 	"syscall"
 )
 
@@ -70,11 +71,40 @@ func platformApply(cmd *exec.Cmd, spec Spec) error {
 // anyway. NoNewPrivs lands as one extra line in that same C
 // function. See docs/DESIGN.md "Known weak points".
 func WrapNoNewPrivs(cmd *exec.Cmd) *exec.Cmd {
+	return WrapSetpriv(cmd, SetprivOptions{NoNewPrivs: true})
+}
+
+// WrapSetpriv prepends one `setpriv` invocation that applies every
+// option in opts before exec'ing cmd: --no-new-privs, and, when UID is
+// set, --reuid/--regid/--clear-groups plus an explicit drop of the
+// inheritable and ambient capability sets.
+//
+// The explicit drop matters. Moving from root to a non-zero UID clears
+// the capability sets on its own, but moving between two non-zero UIDs
+// does not: a non-root creekd that holds CAP_SETUID/CAP_SETGID as
+// ambient capabilities (the shipped systemd unit) would pass them to
+// the app, which could then switch to any UID — creekd's or another
+// app's — and read its /proc/<pid>/environ. With inheritable and
+// ambient empty and no file capabilities on the app's binary, the exec
+// leaves the app with no capabilities at all. The same chroot caveat
+// as WrapNoNewPrivs applies.
+func WrapSetpriv(cmd *exec.Cmd, opts SetprivOptions) *exec.Cmd {
 	origPath := cmd.Path
 	origArgs := cmd.Args
-	wrapped := exec.Command("setpriv", append([]string{
-		"--no-new-privs", "--", origPath,
-	}, origArgs[1:]...)...)
+	var flags []string
+	if opts.UID > 0 {
+		flags = append(flags,
+			"--reuid="+strconv.Itoa(opts.UID),
+			"--regid="+strconv.Itoa(opts.GID),
+			"--clear-groups",
+			"--inh-caps=-all",
+			"--ambient-caps=-all",
+		)
+	}
+	if opts.NoNewPrivs {
+		flags = append(flags, "--no-new-privs")
+	}
+	wrapped := exec.Command("setpriv", append(append(flags, "--", origPath), origArgs[1:]...)...)
 	// Carry forward fields that startLocked already set: env, stdio,
 	// SysProcAttr, WaitDelay. The kernel sees the same SysProcAttr
 	// (cloneflags + namespace mappings + cgroup fd), only the leaf

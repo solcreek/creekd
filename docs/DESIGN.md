@@ -123,10 +123,10 @@ The minimum production setup:
 - `CREEKD_DISPATCH_ADDR` either on the public interface or behind a reverse proxy.
 - `CREEKD_LOG_DIR` and `CREEKD_CGROUP_PARENT` set.
 - `CREEKD_STATE_DIR` set, so a restart of the daemon doesn't drop the fleet — also enables the audit log, hostkey, and Release ledger described above.
-- Run as root (or a systemd unit with `Delegate=yes`) so cgroup writes succeed.
+- Run as root (or a systemd unit with `Delegate=yes`) so cgroup writes succeed. Either way creekd must be able to switch UIDs (root, or `CAP_SETUID` + `CAP_SETGID`) so every app runs as its own user — see `CREEKD_APP_UID_BASE` in [`CONFIG.md`](CONFIG.md).
 - `CREEKD_DEBUG_PPROF` left **unset**.
 
-Bundled `init/creekd.service` is the canonical systemd unit: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel-* protections, restricted syscall set, `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` only, `DynamicUser=no`. `creekctl hardening-check` parses an installed unit and reports drift against the canonical set — used by operators after edits, and by CI as a regression fence against the shipped unit weakening over time.
+Bundled `init/creekd.service` is the canonical systemd unit: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel-* protections, restricted syscall set, `CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID` (the last two for per-app UIDs; apps never inherit them), `DynamicUser=no`. `creekctl hardening-check` parses an installed unit and reports drift against the canonical set — used by operators after edits, and by CI as a regression fence against the shipped unit weakening over time.
 
 This is intentionally small. Phase 1 explicitly does not include: TLS termination (use a reverse proxy or `autocert` outside creekd), metrics export beyond the Prometheus `/metrics` endpoint that already exists, or remote-log shipping (the structured logs are append-only JSON; pipe them).
 
@@ -147,7 +147,8 @@ Benchmarks (`make bench`) are CI smoke-only — runner CPU is too noisy for regr
 
 ## Known weak points (Phase 1)
 
-- **No seccomp, no capability drop.** Apps still have whatever caps the parent has. Namespace + cgroup + NoNewPrivs is meaningful but not full sandbox.
+- **No seccomp.** Apps under a per-app UID end with no capabilities (setpriv drops them); an app with `run_as_root` keeps whatever caps the parent has. Namespace + cgroup + NoNewPrivs + per-app UID is meaningful but not full sandbox.
+- **The PID namespace does not hide `/proc`.** `/proc` is not remounted, so an app still lists every host PID and reads world-readable entries such as `/proc/<pid>/cmdline` — never pass secrets as arguments. Per-process secrets in `/proc/<pid>/environ` are protected by the per-app UID, not by the namespace. A private `/proc` needs a mount step in the child, planned with the signal-forwarding init.
 - **`--no-new-privs` + `--chroot` don't compose** on rootfs without `setpriv`. v0.1.0 implements NoNewPrivs via a `setpriv` wrap (Go stdlib doesn't expose `PR_SET_NO_NEW_PRIVS` on `SysProcAttr`, and there's no child-setup hook to inject one). Phase 2's CGO work for seccomp + cap drop will inline the prctl in the same C function, removing this constraint.
 - **No supervisor-survive-restart re-attach.** Documented above. Phase 2.
 - **Single binary, single host.** Multi-host = run more creekd hosts and put an LB in front. There is no clustering in creekd itself, and won't be.

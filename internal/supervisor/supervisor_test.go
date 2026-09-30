@@ -369,6 +369,7 @@ func TestCloneConfigCoversAllAliasableFields(t *testing.T) {
 		"Env":          reflect.Slice,
 		"CgroupLimits": reflect.Pointer,
 		"Sandbox":      reflect.Pointer,
+		"RunAs":        reflect.Pointer,
 		"VolumeMounts": reflect.Slice,
 	}
 

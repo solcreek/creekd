@@ -271,3 +271,31 @@ func exitErrStderr(err error) string {
 	}
 	return ""
 }
+
+// TestWrapSetprivArgs pins the setpriv command line: the identity
+// switch always comes with the inheritable/ambient drop (a non-root
+// creekd holding CAP_SETUID as an ambient capability would otherwise
+// hand it to the app), and the original argv follows "--" untouched.
+func TestWrapSetprivArgs(t *testing.T) {
+	base := func() *exec.Cmd { return exec.Command("/usr/local/bin/bun", "server.js", "--flag") }
+	cases := []struct {
+		name string
+		opts SetprivOptions
+		want []string
+	}{
+		{"no-new-privs only", SetprivOptions{NoNewPrivs: true},
+			[]string{"setpriv", "--no-new-privs", "--", "/usr/local/bin/bun", "server.js", "--flag"}},
+		{"identity switch drops caps", SetprivOptions{UID: 1000000, GID: 1000000},
+			[]string{"setpriv", "--reuid=1000000", "--regid=1000000", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--", "/usr/local/bin/bun", "server.js", "--flag"}},
+		{"both", SetprivOptions{NoNewPrivs: true, UID: 7, GID: 8},
+			[]string{"setpriv", "--reuid=7", "--regid=8", "--clear-groups", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", "--", "/usr/local/bin/bun", "server.js", "--flag"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := WrapSetpriv(base(), tc.opts).Args
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("args =\n  %q\nwant\n  %q", got, tc.want)
+			}
+		})
+	}
+}
