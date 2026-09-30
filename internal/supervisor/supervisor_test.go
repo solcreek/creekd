@@ -1891,13 +1891,16 @@ func TestLogCaptureSurvivesRestart(t *testing.T) {
 	sup.CrashLoopThreshold = 100
 
 	// Each invocation prints a unique line then exits.
-	// Use a counter file so the child can detect run number.
+	// Use a counter file so the child can detect run number. The line is
+	// printed before the counter advances: the test stops the app as soon
+	// as the counter reads 2, and a run stopped between the two steps
+	// would otherwise have counted without printing.
 	counterFile := filepath.Join(t.TempDir(), "counter")
 	script := fmt.Sprintf(`
 		COUNT=$(cat %s 2>/dev/null || echo 0)
 		COUNT=$((COUNT + 1))
-		echo $COUNT > %s
 		echo "run-$COUNT"
+		echo $COUNT > %s
 		exit 0
 	`, counterFile, counterFile)
 
