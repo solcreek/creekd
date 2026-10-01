@@ -719,6 +719,10 @@ type Supervisor struct {
 	// cgMgr is lazily constructed from CgroupParent on first use.
 	cgMgrOnce sync.Once
 	cgMgr     *cgroup.Manager
+	// delegatedMgr is the manager InitCgroups installs in delegated
+	// mode. Separate from cgMgrOnce so that a lookup before InitCgroups
+	// cannot consume the once and leave the supervisor without one.
+	delegatedMgr atomic.Pointer[cgroup.Manager]
 
 	// netOnce + friends lazily set up the bridge, pool, and NAT rule
 	// on the first NetIsolation spawn.
@@ -739,12 +743,13 @@ func (s *Supervisor) cgroupManager() *cgroup.Manager {
 	if s.CgroupParent == "" {
 		return nil
 	}
+	if s.CgroupDelegated {
+		// Built by InitCgroups at startup, before any app runs; nil until
+		// then, and never a fallback rooted at the host root.
+		return s.delegatedMgr.Load()
+	}
 	s.cgMgrOnce.Do(func() {
-		// A delegated manager is built by InitCgroups at startup, before
-		// any app runs; never fall back to one rooted at the host root.
-		if !s.CgroupDelegated {
-			s.cgMgr = cgroup.NewManager(s.CgroupParent)
-		}
+		s.cgMgr = cgroup.NewManager(s.CgroupParent)
 	})
 	return s.cgMgr
 }
@@ -771,7 +776,7 @@ func (s *Supervisor) InitCgroups() error {
 	if err := m.EnsureParent(); err != nil {
 		return err
 	}
-	s.cgMgrOnce.Do(func() { s.cgMgr = m })
+	s.delegatedMgr.Store(m)
 	return nil
 }
 

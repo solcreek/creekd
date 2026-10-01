@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/sandbox"
 )
 
@@ -318,12 +319,18 @@ func TestInitCgroupsDelegatedNeedsParent(t *testing.T) {
 }
 
 // Before InitCgroups has built the delegated manager, cgroupManager must
-// not fall back to one rooted at the host's cgroup root.
+// not fall back to one rooted at the host's cgroup root — and an early
+// lookup must not stop the manager InitCgroups installs from being seen.
 func TestCgroupManagerDelegatedWithoutInit(t *testing.T) {
 	s := New(nil)
 	s.CgroupParent, s.CgroupDelegated = "apps", true
 	if m := s.cgroupManager(); m != nil {
 		t.Fatalf("cgroupManager = %+v, want nil until InitCgroups", m)
+	}
+	installed := &cgroup.Manager{Root: "/sys/fs/cgroup/system.slice/creekd.service", Parent: "apps", Delegated: true}
+	s.delegatedMgr.Store(installed) // what InitCgroups does once its setup succeeds
+	if m := s.cgroupManager(); m != installed {
+		t.Fatalf("after an early lookup, cgroupManager = %+v, want the installed manager", m)
 	}
 }
 
