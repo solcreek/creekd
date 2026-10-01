@@ -70,10 +70,11 @@ func RequiredDirectives() []Required {
 		// A denied syscall fails with EPERM instead of killing the
 		// process with SIGSYS, so an app that probes one degrades.
 		{"SystemCallErrorNumber", "EPERM", matchExact},
-		// CAP_SETUID/CAP_SETGID: per-app UIDs (see init/creekd.service).
-		// A set, not a string: systemd accepts the names in any order.
-		{"CapabilityBoundingSet", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID", matchPathSet},
-		{"AmbientCapabilities", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID", matchPathSet},
+		// CAP_SETUID/CAP_SETGID: per-app UIDs; CAP_KILL: signalling those
+		// apps (see init/creekd.service). A set, not a string: systemd
+		// accepts the names in any order.
+		{"CapabilityBoundingSet", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL", matchPathSet},
+		{"AmbientCapabilities", "CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL", matchPathSet},
 		{"LimitCORE", "0", matchExact},
 		{"DynamicUser", "no", matchExact},
 		// ReadWritePaths is the escape hatch ProtectSystem=strict relies
