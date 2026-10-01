@@ -58,9 +58,9 @@ func platformApply(cmd *exec.Cmd, spec Spec) error {
 // installs it explicitly via the util-linux apt package.
 //
 // Known incompatibility: this wrap does not compose with a chroot
-// on a rootfs that doesn't itself contain setpriv. The clone3 path
-// chroots before exec, so the kernel looks for setpriv inside the
-// jail. Callers that combine NoNewPrivs with Chroot must either
+// on a rootfs that doesn't itself contain setpriv. The spawn gate
+// chroots before it execs the chain, so setpriv is looked up inside
+// the jail. Callers that combine NoNewPrivs with Chroot must either
 // copy setpriv (and its shared libs) into the rootfs, or accept
 // that the supervised process won't have NoNewPrivs set.
 //

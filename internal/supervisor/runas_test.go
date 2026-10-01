@@ -308,3 +308,29 @@ func TestInheritIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestInitCgroupsDelegatedNeedsParent(t *testing.T) {
+	s := New(nil)
+	s.CgroupDelegated = true
+	if err := s.InitCgroups(); err == nil {
+		t.Fatal("delegated cgroups without a parent must fail startup")
+	}
+}
+
+// Before InitCgroups has built the delegated manager, cgroupManager must
+// not fall back to one rooted at the host's cgroup root.
+func TestCgroupManagerDelegatedWithoutInit(t *testing.T) {
+	s := New(nil)
+	s.CgroupParent, s.CgroupDelegated = "apps", true
+	if m := s.cgroupManager(); m != nil {
+		t.Fatalf("cgroupManager = %+v, want nil until InitCgroups", m)
+	}
+}
+
+func TestInitCgroupsNoopWhenNotDelegated(t *testing.T) {
+	s := New(nil)
+	s.CgroupParent = "creekd.slice"
+	if err := s.InitCgroups(); err != nil {
+		t.Fatalf("root mode stays lazy: %v", err)
+	}
+}

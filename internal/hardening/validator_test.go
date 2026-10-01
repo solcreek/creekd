@@ -159,6 +159,20 @@ func TestValidate_CapabilitiesOrderInsensitive(t *testing.T) {
 	}
 }
 
+// TestValidate_CgroupDelegation: the pre-delegation unit
+// (ProtectControlGroups=true, no Delegate) is drift — with it every
+// spawn with cgroup limits fails (#18).
+func TestValidate_CgroupDelegation(t *testing.T) {
+	body := strings.Replace(minimalHardenedUnit(), "ProtectControlGroups=private", "ProtectControlGroups=true", 1)
+	body = strings.Replace(body, "Delegate=yes\n", "", 1)
+	drift := mustValidate(t, body)
+	for _, key := range []string{"ProtectControlGroups", "Delegate"} {
+		if !containsDriftFor(drift, key) {
+			t.Errorf("want %s drift; got %v", key, drift)
+		}
+	}
+}
+
 // TestValidate_ReadWritePathsOrderInsensitive: ReadWritePaths uses a
 // strict set matcher, so swapping the order of the two shipped paths
 // MUST NOT trigger drift.

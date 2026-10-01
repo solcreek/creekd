@@ -31,12 +31,16 @@ type Stats struct {
 
 // Manager is a no-op container on non-Linux. Methods return ErrUnsupported.
 type Manager struct {
-	Root   string
-	Parent string
+	Root      string
+	Parent    string
+	Delegated bool
 }
 
 // NewManager returns a Manager that always errors on use.
 func NewManager(parent string) *Manager { return &Manager{Parent: parent} }
+
+// NewDelegatedManager always returns ErrUnsupported on non-Linux.
+func NewDelegatedManager(_ string) (*Manager, error) { return nil, ErrUnsupported }
 
 // EnsureParent always returns ErrUnsupported on non-Linux.
 func (m *Manager) EnsureParent() error { return ErrUnsupported }

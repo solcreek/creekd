@@ -21,6 +21,8 @@ import (
 // the self-spawned HTTP child. Keeping this in the supervisor package
 // means the integration tests can share the package internals.
 func TestMain(m *testing.M) {
+	// Spawns re-execute this test binary as their gate (spawngate.go).
+	RunSpawnGateIfRequested()
 	if os.Getenv("CREEK_TEST_HTTPAPP") == "1" {
 		runHTTPTestApp()
 		return
