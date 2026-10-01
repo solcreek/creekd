@@ -63,9 +63,10 @@ const (
 )
 
 // CanSignalApps reports whether creekd can signal an app that runs as
-// another UID: root, or CAP_KILL. Without it, a per-app UID app cannot
-// be stopped, restarted or replaced by a deploy; creekd reports this
-// at startup.
+// another UID: root, or CAP_KILL. Without it, stopping or restarting a
+// per-app UID app fails (the app stays running and registered), and a
+// deploy promotes the new version while the old one keeps running
+// unsupervised. creekd reports this at startup.
 func (s *Supervisor) CanSignalApps() bool {
 	return !runtimeIsLinux() || hasKillCap()
 }

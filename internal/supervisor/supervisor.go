@@ -1821,7 +1821,19 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 	}
 	delete(s.apps, id)
 	s.mu.Unlock()
-	return s.stopApp(app, timeout)
+	if err := s.stopApp(app, timeout); err != nil {
+		// The process is still alive: keep it registered, so the app stays
+		// supervised, visible and stoppable once the cause is fixed —
+		// rather than an unsupervised process the router still serves
+		// and state.json still lists, behind 404s.
+		s.mu.Lock()
+		if _, taken := s.apps[id]; !taken {
+			s.apps[id] = app
+		}
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // stopApp gracefully terminates the given App. Caller is responsible
@@ -1829,13 +1841,18 @@ func (s *Supervisor) StopWithTimeout(id string, timeout time.Duration) error {
 // it) before invoking — stopApp does no registry bookkeeping. This is
 // the inner half of StopWithTimeout and is reused by Deploy to wind
 // down the v1 process after the registry swap.
-func (s *Supervisor) stopApp(app *App, timeout time.Duration) error {
+func (s *Supervisor) stopApp(app *App, timeout time.Duration) (err error) {
 	// Close the log rotator after the watch goroutine has finished
 	// draining the child's pipes (signalled by done close), then
 	// remove the per-app cgroup directory and tear down the network
 	// namespace + veth pair. All best-effort — failures are logged
-	// but don't fail the stop.
+	// but don't fail the stop. Skipped when the stop failed: the
+	// process is still running inside that cgroup and network, and
+	// still writing to that log.
 	defer func() {
+		if err != nil {
+			return
+		}
 		if app.rotator != nil {
 			if err := app.rotator.Close(); err != nil {
 				s.logger.Warn("log rotator close failed", "id", app.ID, "err", err)
@@ -1901,7 +1918,9 @@ func (s *Supervisor) escalateAndWait(id string, cmd *exec.Cmd, done <-chan struc
 			select {
 			case <-done:
 			case <-time.After(s.KillWaitTimeout):
-				s.logger.Error("cannot stop app: it keeps running and is no longer supervised",
+				// The caller says what happens to it next: Stop keeps it
+				// registered; a deploy's v1 is left unsupervised.
+				s.logger.Error("cannot stop app: SIGKILL could not be delivered and it keeps running",
 					"id", id, "pid", cmd.Process.Pid, "err", err,
 				)
 				return fmt.Errorf("supervisor: stop %q: SIGKILL pid %d: %w", id, cmd.Process.Pid, err)
@@ -2118,10 +2137,13 @@ func (s *Supervisor) Deploy(ctx context.Context, router *dispatch.Router, cfg De
 		}
 	}
 
-	// v1 is no longer in the registry; wind it down directly. Logs
-	// failure but does not undo the deploy — v2 is now authoritative.
+	// v1 is no longer in the registry; wind it down directly. A failure
+	// does not undo the deploy — v2 is authoritative and serving — but
+	// it leaves v1 running beside it, unsupervised: an error, with the
+	// PID an operator needs to clean up.
 	if err := s.stopApp(v1, cfg.GracefulV1Timeout); err != nil {
-		s.logger.Warn("deploy: v1 stop failed", "id", cfg.ID, "err", err)
+		s.logger.Error("deploy: v2 is live but v1 could not be stopped; it keeps running unsupervised",
+			"id", cfg.ID, "v1_pid", v1.PID(), "err", err)
 	}
 
 	s.logger.Info("deploy complete",

@@ -159,7 +159,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"Run creekd as root or grant it CAP_SETUID and CAP_SETGID (see init/creekd.service)")
 	} else if !sup.CanSignalApps() {
 		logger.Error("creekd cannot signal apps that run as their own UID (no CAP_KILL): " +
-			"stop, restart and deploy will fail and leave the old process running. " +
+			"stop and restart will fail, and a deploy will start the new version while the old one keeps running. " +
 			"Run creekd as root or grant it CAP_KILL (see init/creekd.service)")
 	} else if sup.AppUIDBase == 0 {
 		logger.Warn("CREEKD_APP_UID_BASE=0: apps that name no run_as run as root and can read each other's environment and creekd's")

@@ -8,7 +8,7 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Fixed
 
-- **A non-root creekd could not stop its own apps.** Since 0.1.3 each app runs as its own UID, and under the shipped unit creekd runs as the `creekd` user without `CAP_KILL`, so SIGTERM and SIGKILL to an app failed with `EPERM`. Stop, restart and deploy left the old process running, and `Stop` then waited forever for it to exit, hanging the admin request. The shipped unit now grants `CAP_KILL`; creekd logs an error at startup when it lacks it; a SIGKILL that cannot be delivered now fails `Stop` after `KillWaitTimeout` (5s) with the PID, instead of blocking; signal failures are logged as warnings rather than debug.
+- **A non-root creekd could not stop its own apps.** Since 0.1.3 each app runs as its own UID, and under the shipped unit creekd runs as the `creekd` user without `CAP_KILL`, so SIGTERM and SIGKILL to an app failed with `EPERM`. Stop, restart and deploy left the old process running, and `Stop` then waited forever for it to exit, hanging the admin request. The shipped unit now grants `CAP_KILL`, and creekd logs an error at startup when it lacks it. Without it: a SIGKILL that cannot be delivered fails `Stop` after `KillWaitTimeout` (5s) with the PID instead of blocking, and the app stays running and registered, so it is still supervised and the stop can be retried; a deploy whose old version cannot be stopped still promotes the new one, and logs the old PID as an error. Signal failures are logged as warnings rather than debug.
 
 ### Security
 

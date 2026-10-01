@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -35,12 +37,29 @@ func TestStopReturnsWhenSignalsCannotBeDelivered(t *testing.T) {
 	go func() { errc <- sup.Stop("unkillable") }()
 	select {
 	case err := <-errc:
+		elapsed := time.Since(start)
 		if err == nil {
 			t.Fatal("Stop reported success for a process it could not signal")
 		}
-		t.Logf("Stop after %v: %v", time.Since(start).Round(time.Millisecond), err)
+		// It waited out the graceful window and KillWaitTimeout first.
+		if min := sup.GracefulShutdownTimeout + sup.KillWaitTimeout; elapsed < min {
+			t.Errorf("Stop returned after %v, before the %v it should wait", elapsed, min)
+		}
+		if want := "pid " + strconv.Itoa(pid); !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop hung on a SIGKILL that could not be delivered")
+	}
+
+	// The process is alive: the app must still be registered and
+	// stoppable, not orphaned behind a 404.
+	if sup.Get("unkillable") == nil {
+		t.Fatal("after a failed stop the app is no longer registered")
+	}
+	signalProcess = orig
+	if err := sup.Stop("unkillable"); err != nil {
+		t.Fatalf("retrying the stop once signals work: %v", err)
 	}
 }
 
