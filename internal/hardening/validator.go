@@ -52,7 +52,11 @@ func RequiredDirectives() []Required {
 		{"ProtectKernelTunables", "true", matchExact},
 		{"ProtectKernelModules", "true", matchExact},
 		{"ProtectKernelLogs", "true", matchExact},
-		{"ProtectControlGroups", "true", matchExact},
+		// private: a cgroup namespace showing only creekd's delegated
+		// subtree, writable so creekd can create per-app cgroups. true
+		// (read-only) makes every spawn with cgroup limits fail.
+		{"ProtectControlGroups", "private", matchExact},
+		{"Delegate", "yes", matchExact},
 		{"ProtectClock", "true", matchExact},
 		{"ProtectHostname", "true", matchExact},
 		{"RestrictNamespaces", "true", matchExact},

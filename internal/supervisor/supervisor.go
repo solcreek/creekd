@@ -20,7 +20,8 @@
 //     key, await healthy, atomically swap the canonical key and the
 //     dispatch route, then drain v1.
 //   - cgroup v2 limits via internal/cgroup (memory + swap=0, pids,
-//     cpu.max) attached via CLONE_INTO_CGROUP at clone3 time.
+//     cpu.max), joined by the spawn gate before the app's first
+//     instruction (spawngate_linux.go).
 //   - Linux sandbox composition (PID / UTS / IPC / mount / user
 //     namespaces, chroot, NoNewPrivs via setpriv wrap) via
 //     internal/sandbox.
@@ -121,14 +122,15 @@ type Config struct {
 
 	// CgroupLimits opts into cgroup v2 enforcement (M5.5). When set
 	// AND the supervisor has CgroupParent configured AND the host is
-	// Linux, the child is spawned via CLONE_INTO_CGROUP under a
-	// dedicated sub-cgroup with these limits applied. Nil or a
-	// non-Linux host falls back to standard exec.
+	// Linux, the child starts in a dedicated sub-cgroup with these
+	// limits applied: the spawn gate joins it before exec'ing the app.
+	// Nil or a non-Linux host falls back to standard exec.
 	CgroupLimits *cgroup.Limits
 
 	// Sandbox opts into Linux namespace isolation + optional chroot.
-	// Composes with CgroupLimits in a single clone3: cgroup attach,
-	// CLONE_NEW* flags, and Chroot are applied to the same child.
+	// Composes with CgroupLimits on the same spawn: the CLONE_NEW*
+	// flags apply to the spawn gate, which joins the cgroup and
+	// chroots before exec'ing the app.
 	//
 	// Auto-defaulting (applyDefaultSandbox in this file) fires when
 	// Sandbox is nil OR all its fields are at the zero value. The
@@ -679,6 +681,12 @@ type Supervisor struct {
 	// common "no-chroot, stateless container conventions" case.
 	AllowedTargetPrefixes []string
 
+	// CgroupDelegated roots CgroupParent at creekd's own cgroup — the
+	// subtree systemd delegates to a unit with Delegate=yes — instead of
+	// the host's cgroup root, so a non-root creekd can create per-app
+	// cgroups. InitCgroups must run before any spawn.
+	CgroupDelegated bool
+
 	// AppUIDBase is the first host UID/GID handed to an app that names
 	// no Config.RunAs (see resolveRunAsLocked). 0 stops allocating: an
 	// app with no RunAs yet runs as creekd's own user, while one whose
@@ -711,6 +719,10 @@ type Supervisor struct {
 	// cgMgr is lazily constructed from CgroupParent on first use.
 	cgMgrOnce sync.Once
 	cgMgr     *cgroup.Manager
+	// delegatedMgr is the manager InitCgroups installs in delegated
+	// mode. Separate from cgMgrOnce so that a lookup before InitCgroups
+	// cannot consume the once and leave the supervisor without one.
+	delegatedMgr atomic.Pointer[cgroup.Manager]
 
 	// netOnce + friends lazily set up the bridge, pool, and NAT rule
 	// on the first NetIsolation spawn.
@@ -731,10 +743,41 @@ func (s *Supervisor) cgroupManager() *cgroup.Manager {
 	if s.CgroupParent == "" {
 		return nil
 	}
+	if s.CgroupDelegated {
+		// Built by InitCgroups at startup, before any app runs; nil until
+		// then, and never a fallback rooted at the host root.
+		return s.delegatedMgr.Load()
+	}
 	s.cgMgrOnce.Do(func() {
 		s.cgMgr = cgroup.NewManager(s.CgroupParent)
 	})
 	return s.cgMgr
+}
+
+// InitCgroups prepares a delegated cgroup subtree (CgroupDelegated):
+// it roots the manager at creekd's own cgroup, moves creekd into its
+// supervisor leaf and enables cpu, memory and pids for the per-app
+// cgroups under CgroupParent. Call it once at startup, before any app
+// is spawned or restored: a child spawned while creekd still sits in
+// its own cgroup root would keep that root occupied, and cgroup v2 then
+// refuses to hand controllers down. A no-op without CgroupDelegated,
+// where the manager is still built lazily under the host root.
+func (s *Supervisor) InitCgroups() error {
+	if !s.CgroupDelegated {
+		return nil
+	}
+	if s.CgroupParent == "" {
+		return errors.New("supervisor: CgroupDelegated needs CgroupParent (a directory under creekd's own cgroup, e.g. \"apps\")")
+	}
+	m, err := cgroup.NewDelegatedManager(s.CgroupParent)
+	if err != nil {
+		return err
+	}
+	if err := m.EnsureParent(); err != nil {
+		return err
+	}
+	s.delegatedMgr.Store(m)
+	return nil
 }
 
 // applyCgroupDefaults injects DefaultMemoryHigh and DefaultMemoryMax
@@ -1433,12 +1476,9 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 	}
 	cmd.WaitDelay = s.WaitDelay
 
-	// Apply namespace + chroot isolation (M5.9) BEFORE attaching the
-	// cgroup fd. Both mutate SysProcAttr; sandbox.Apply sets
-	// Cloneflags / Chroot, attachCgroup adds UseCgroupFD / CgroupFD.
-	// Order doesn't affect correctness — they're additive — but doing
-	// sandbox first surfaces an unsupported-platform error early,
-	// before any cgroup fd is opened.
+	// Apply namespace + chroot isolation (M5.9) to SysProcAttr before
+	// startProcess hands it to the spawn gate; doing it first surfaces
+	// an unsupported-platform error before anything is started.
 	if app.sandbox != nil {
 		if err := sandbox.Apply(cmd, *app.sandbox); err != nil {
 			app.setStatus(StatusCrashed)
@@ -1446,32 +1486,14 @@ func (s *Supervisor) startLocked(app *App, extraEnv []string) error {
 		}
 	}
 
-	// M5.5: if this app has a cgroup, spawn the child *inside* it via
-	// CLONE_INTO_CGROUP so enforcement is active from the first
-	// instruction — no race window where the child runs un-capped.
-	// We open the fd here, hand it to the kernel via SysProcAttr,
-	// and close it after Start (the kernel duplicated it during clone3).
-	var cgFD *os.File
-	if app.cg != nil {
-		fd, err := app.cg.OpenFD()
-		if err != nil {
-			app.setStatus(StatusCrashed)
-			return fmt.Errorf("supervisor: open cgroup fd: %w", err)
-		}
-		cgFD = fd
-		attachCgroup(cmd, int(fd.Fd()))
-	}
-
-	if err := cmd.Start(); err != nil {
-		if cgFD != nil {
-			_ = cgFD.Close()
-		}
+	// Start behind the spawn gate (spawngate_linux.go): the app is in
+	// its cgroup before its first instruction, without clone3.
+	started, err := s.startProcess(app, cmd)
+	if err != nil {
 		app.setStatus(StatusCrashed)
-		return fmt.Errorf("supervisor: starting %q: %w", app.ID, err)
+		return err
 	}
-	if cgFD != nil {
-		_ = cgFD.Close()
-	}
+	cmd = started
 
 	app.setState(cmd, StatusRunning, time.Now())
 

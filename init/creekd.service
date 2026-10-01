@@ -30,7 +30,15 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
-ProtectControlGroups=true
+# creekd creates a cgroup per app, as the non-root creekd user: systemd
+# delegates the unit's own cgroup subtree to it (Delegate=yes), and
+# "private" runs creekd in a cgroup namespace where that subtree is all
+# of /sys/fs/cgroup, writable, and nothing else on the host is visible.
+# (true would make the cgroup filesystem read-only and every spawn fail.)
+# "private" needs systemd >= 257; older systemd ignores it with a warning
+# and falls back to "no", which delegated mode also handles.
+ProtectControlGroups=private
+Delegate=yes
 ProtectClock=true
 ProtectHostname=true
 RestrictNamespaces=true
@@ -86,8 +94,10 @@ Environment=CREEKD_ADMIN_ADDR=127.0.0.1:9080
 # Dispatch proxy (public-facing, Caddy terminates TLS in front)
 Environment=CREEKD_DISPATCH_ADDR=127.0.0.1:9000
 
-# cgroup v2 isolation
-Environment=CREEKD_CGROUP_PARENT=creekd.slice
+# cgroup v2 isolation, inside the delegated subtree: per-app cgroups live
+# under <creekd's cgroup>/apps, creekd itself moves to .../supervisor.
+Environment=CREEKD_CGROUP_DELEGATED=1
+Environment=CREEKD_CGROUP_PARENT=apps
 Environment=CREEKD_DEFAULT_MEMORY_HIGH=256M
 Environment=CREEKD_DEFAULT_MEMORY_MAX=1G
 

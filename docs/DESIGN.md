@@ -26,9 +26,17 @@ Each app is one direct child of creekd. We considered, and rejected, three alter
 
 1. **Embedded runtime (PoC approach).** All apps run inside one Bun process via dynamic `import()`. Crashes are shared, no per-app cgroup, single runtime, no namespace isolation. Fine for a demo; impossible for production.
 2. **Container-per-app.** Either rope in containerd / runc or wrap Docker. Solves isolation but drags in image management, layered storage, a separate daemon, and ~20 MB resident per app for the runtime alone.
-3. **Fork-then-exec helper.** A small C/Rust shim per app. Pure overhead — Go's `exec.Cmd` already does what we need.
+3. **Fork-then-exec helper as a separate shim.** A small C/Rust binary per app. Rejected as a separate artifact — but see the spawn gate below: creekd now uses its own binary for exactly this step.
 
 Direct child + cgroup + namespaces gives us the same isolation as a container without the container infrastructure. The trade is: we can't ship pre-built images, so the user (or the Creek runtime above us) supplies the binary.
+
+### Spawn gate
+
+On Linux every app starts behind a **spawn gate**: creekd re-executes itself (`/proc/self/exe __spawn-gate`), the gate blocks on a pipe, the supervisor writes the gate's PID into the app's `cgroup.procs`, then releases it; the gate chroots if asked and execs the spawn chain (`setpriv …`, the app) in place, so the PID the supervisor tracks becomes the app. A close-on-exec status pipe carries an exec failure back, so "no such command" is still a spawn error.
+
+Why: Go cannot run code in the child between fork and exec, and the one kernel feature that places a child in a cgroup at birth, `CLONE_INTO_CGROUP`, needs `clone3` — which systemd answers with `ENOSYS` under any `RestrictNamespaces=` (it cannot inspect `clone3`'s flags), so the shipped unit could not spawn an app with cgroup limits (#18). Starting a child and moving it afterwards would let it fork children that stay outside its cgroup. The gate keeps the guarantee — no app code runs outside its cgroup — without `clone3`, and is where further pre-exec setup belongs (an app's own `/proc`, a seccomp filter, a signal-forwarding init).
+
+Cost, measured 2026-09-30 on a 4-vCPU microVM: the gate step is ~7 ms at p50 (one more `exec` of the Go binary); spawn-to-healthy for a June app rose from p50 19 ms / p95 20 ms to 25 ms / 55 ms. The alternative weighed, dropping `RestrictNamespaces` from the unit, measured the same on every other check but let apps create user namespaces.
 
 ## Why Go
 
@@ -79,7 +87,7 @@ Each spawned process can opt into, independently:
 
 1. **Cgroup v2 limits** — memory.max, memory.swap.max=0, pids.max, cpu.max. Memory cap is hard: kernel OOM kills on overrun. CPU is bandwidth (quota / period), not pinning.
 2. **Linux namespaces** — PID, UTS, IPC, mount, user, network. Mix-and-match. User namespace + mappings if you want unprivileged uid 0 inside.
-3. **Chroot** — set on the same SysProcAttr; composes with mount namespace.
+3. **Chroot** — applied by the spawn gate just before it execs the app; composes with mount namespace.
 4. **NoNewPrivs** — `setpriv --no-new-privs --` wrapper, since Go's stdlib doesn't expose `PR_SET_NO_NEW_PRIVS` directly.
 
 These are orthogonal flags on a `sandbox.Spec`. Zero values mean "share with host". The supervisor does not enforce a minimum sandbox — the deployment policy decides what to require, not the runtime.

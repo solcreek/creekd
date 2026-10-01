@@ -28,6 +28,8 @@ import (
 // would otherwise reject the store and the tests would panic at the
 // first store.Apps() call. Production startup is unaffected.
 func TestMain(m *testing.M) {
+	// Spawns re-execute this test binary as their gate.
+	supervisor.RunSpawnGateIfRequested()
 	state.AllowUnsupportedFilesystemForTests = true
 	os.Exit(m.Run())
 }

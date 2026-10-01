@@ -18,8 +18,9 @@
 // them up needs CGO bindings to libseccomp / libcap. Tracked for
 // Phase 2 once the build pipeline opens to CGO.
 //
-// Composition: every flag here writes into the same SysProcAttr that
-// attachCgroup (M5.5) and the network-namespace wrapper exec also
-// touch. The kernel sees a single clone3 with every hardening knob
-// active before the first instruction of the supervised binary.
+// Composition: the clone flags here go on the supervisor's spawn gate
+// (internal/supervisor spawngate_linux.go), the process that later
+// execs the app, so every namespace is in place before the app's first
+// instruction. Chroot is the exception: the gate applies it itself,
+// after the supervisor has placed it in its cgroup.
 package sandbox

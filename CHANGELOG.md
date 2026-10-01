@@ -8,15 +8,20 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ### Fixed
 
+- **The shipped unit can spawn apps with cgroup limits** (#18). As the non-root `creekd` user, creekd could not write the host's root cgroup, so every spawn failed with `cgroup.subtree_control: permission denied`. The unit now sets `Delegate=yes`, `ProtectControlGroups=private`, `CREEKD_CGROUP_DELEGATED=1` and `CREEKD_CGROUP_PARENT=apps`: per-app cgroups live under creekd's own delegated subtree (see `CREEKD_CGROUP_DELEGATED`).
+
 - **A non-root creekd could not stop its own apps.** Since 0.1.3 each app runs as its own UID, and under the shipped unit creekd runs as the `creekd` user without `CAP_KILL`, so SIGTERM and SIGKILL to an app failed with `EPERM`. Stop, restart and deploy left the old process running, and `Stop` then waited forever for it to exit, hanging the admin request. The shipped unit now grants `CAP_KILL`, and creekd logs an error at startup when it lacks it. Without it: a SIGKILL that cannot be delivered fails `Stop` after `KillWaitTimeout` (5s) with the PID instead of blocking, and the app stays running and registered, so it is still supervised and the stop can be retried; a deploy whose old version cannot be stopped still promotes the new one, and logs the old PID as an error. Signal failures are logged as warnings rather than debug.
+
+### Changed
+
+- **Apps start behind a spawn gate.** On Linux creekd re-executes itself as a gate, places it in the app's cgroup, then lets it exec the app, instead of `clone3` + `CLONE_INTO_CGROUP` — which systemd's `RestrictNamespaces` turns into `ENOSYS`. No app code runs outside its cgroup; an exec failure is still a spawn error; chroot is applied by the gate. Each spawn costs one more exec of the creekd binary (~7 ms at p50). Test binaries of packages that spawn apps call `supervisor.RunSpawnGateIfRequested` in `TestMain`.
+- Under the shipped unit (`ProtectSystem=strict`), apps can write only under `ReadWritePaths` (`/var/lib/creekd`, `/var/log/creekd`): keep app data there, or in a registered volume.
+- `creekctl hardening-check` reads repeated `SystemCallFilter=` assignments as systemd does (in order; an empty one resets) and expects the three-line filter plus `SystemCallErrorNumber=EPERM`. The one-line filter now reports as weakened.
+
 
 ### Security
 
 - **The shipped unit's syscall filter now denies what it says it denies.** `SystemCallFilter=@system-service ~@privileged ~@resources` on one line is an allow-list of `@system-service`; its `~` tokens removed nothing that set already contains, so creekd and its apps could still call `setpriority`, `sched_setaffinity`, `sched_setscheduler`, `setrlimit`, `chown`, `mbind` and 20 more. The unit now allows `@system-service`, denies `@privileged @resources`, and re-allows only `@setuid capset` for per-app UIDs, as three assignments; a denied call fails with `EPERM` (`SystemCallErrorNumber=EPERM`) instead of killing the process. Impact before the fix was limited: apps run under their own UID with no capabilities, so these calls could not raise privileges.
-
-### Changed
-
-- `creekctl hardening-check` reads repeated `SystemCallFilter=` assignments as systemd does (in order; an empty one resets) and expects the three-line filter plus `SystemCallErrorNumber=EPERM`. The one-line filter now reports as weakened.
 
 ## [0.1.3] - 2026-09-30
 

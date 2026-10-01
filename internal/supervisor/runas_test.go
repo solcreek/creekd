@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solcreek/creekd/internal/cgroup"
 	"github.com/solcreek/creekd/internal/sandbox"
 )
 
@@ -306,5 +307,37 @@ func TestInheritIdentity(t *testing.T) {
 				t.Fatalf("v2 RunAs uid=%d RunAsRoot=%v, want uid=%d RunAsRoot=%v", gotUID, v2.RunAsRoot, tc.wantUID, tc.wantRoot)
 			}
 		})
+	}
+}
+
+func TestInitCgroupsDelegatedNeedsParent(t *testing.T) {
+	s := New(nil)
+	s.CgroupDelegated = true
+	if err := s.InitCgroups(); err == nil {
+		t.Fatal("delegated cgroups without a parent must fail startup")
+	}
+}
+
+// Before InitCgroups has built the delegated manager, cgroupManager must
+// not fall back to one rooted at the host's cgroup root — and an early
+// lookup must not stop the manager InitCgroups installs from being seen.
+func TestCgroupManagerDelegatedWithoutInit(t *testing.T) {
+	s := New(nil)
+	s.CgroupParent, s.CgroupDelegated = "apps", true
+	if m := s.cgroupManager(); m != nil {
+		t.Fatalf("cgroupManager = %+v, want nil until InitCgroups", m)
+	}
+	installed := &cgroup.Manager{Root: "/sys/fs/cgroup/system.slice/creekd.service", Parent: "apps", Delegated: true}
+	s.delegatedMgr.Store(installed) // what InitCgroups does once its setup succeeds
+	if m := s.cgroupManager(); m != installed {
+		t.Fatalf("after an early lookup, cgroupManager = %+v, want the installed manager", m)
+	}
+}
+
+func TestInitCgroupsNoopWhenNotDelegated(t *testing.T) {
+	s := New(nil)
+	s.CgroupParent = "creekd.slice"
+	if err := s.InitCgroups(); err != nil {
+		t.Fatalf("root mode stays lazy: %v", err)
 	}
 }

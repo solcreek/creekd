@@ -84,8 +84,7 @@ var ErrUnsupported = errors.New("sandbox: not supported on this platform")
 
 // Apply mutates cmd's SysProcAttr so that Start spawns the child with
 // the namespaces and chroot described by spec. Existing fields on
-// SysProcAttr (e.g. UseCgroupFD set by the cgroup attach helper) are
-// preserved — Apply only ORs in additional flags. Calling Apply with
+// SysProcAttr are preserved — Apply only ORs in additional flags. Calling Apply with
 // the zero spec is a no-op and never errors.
 //
 // On non-Linux platforms, calling Apply with any flag set returns

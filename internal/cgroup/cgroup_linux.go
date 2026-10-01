@@ -65,6 +65,10 @@ type Manager struct {
 	// Parent is the relative slice directory under Root that holds
 	// per-app sub-cgroups. Example: "creekd.slice". Required.
 	Parent string
+	// Delegated means Root is creekd's own delegated cgroup rather than
+	// the host root (NewDelegatedManager): EnsureParent first moves
+	// creekd out of it into SupervisorLeaf.
+	Delegated bool
 }
 
 // NewManager returns a Manager rooted at the standard cgroup v2 mount
@@ -86,6 +90,11 @@ func (m *Manager) EnsureParent() error {
 	if m.Parent == "" {
 		return errors.New("cgroup: empty parent slice")
 	}
+	if m.Delegated {
+		if err := m.leaveRoot(); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(m.parentPath(), 0o755); err != nil {
 		return fmt.Errorf("cgroup: mkdir parent %s: %w", m.parentPath(), err)
 	}
@@ -93,7 +102,9 @@ func (m *Manager) EnsureParent() error {
 	// Enable the controllers we need on the root's cgroup.subtree_control
 	// so children of the parent can use memory / cpu / pids. cgroup v2
 	// requires a chain: root must delegate to parent's parent, which
-	// is the root itself; we only need to write at the root.
+	// is the root itself; we only need to write at the root. With a
+	// delegated manager "root" is creekd's own cgroup, which systemd
+	// chowned to the service user.
 	rootSubtree := filepath.Join(m.Root, "cgroup.subtree_control")
 	if err := enableControllers(rootSubtree, "+cpu", "+memory", "+pids"); err != nil {
 		return err
@@ -226,10 +237,10 @@ func (c *Cgroup) OpenFD() (*os.File, error) {
 }
 
 // AddProcess writes pid to cgroup.procs, moving an already-running
-// process into this cgroup. Prefer CLONE_INTO_CGROUP (via OpenFD +
-// SysProcAttr) when starting a fresh child — that way the child is
-// born inside the cgroup with no enforcement gap. AddProcess is
-// useful for adopting external processes after the fact.
+// process into this cgroup. The supervisor's spawn gate uses it on a
+// gate that is blocked before exec, so no app code runs outside the
+// cgroup; OpenFD + CLONE_INTO_CGROUP needs clone3, which systemd's
+// RestrictNamespaces turns into ENOSYS.
 func (c *Cgroup) AddProcess(pid int) error {
 	return writeFile(filepath.Join(c.path, "cgroup.procs"), strconv.Itoa(pid))
 }

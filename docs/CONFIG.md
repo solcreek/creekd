@@ -47,6 +47,16 @@ Name of the cgroup v2 slice that owns per-app sub-cgroups. Required for any per-
 - **Example**: `creekd.slice`
 - **Requires**: Linux, cgroup v2, and creekd running with permission to write under the parent slice (typically root, or `Delegate=yes` in a systemd unit).
 - **Empty** disables cgroup enforcement — apps run with the same limits as creekd itself.
+- **With `CREEKD_CGROUP_DELEGATED=1`**, a directory under creekd's own cgroup instead (e.g. `apps`).
+
+### `CREEKD_CGROUP_DELEGATED`
+
+Roots `CREEKD_CGROUP_PARENT` at creekd's own cgroup instead of the host's cgroup root, so a non-root creekd can create per-app cgroups in the subtree systemd delegates to it.
+
+- **Default**: off
+- **Set to `1`** together with `Delegate=yes` in the unit (the shipped `init/creekd.service` does both, with `CREEKD_CGROUP_PARENT=apps`). At startup, before any app starts, creekd moves itself into a `supervisor` child of its cgroup — cgroup v2 forbids handing controllers down from a cgroup that holds processes — and enables `cpu memory pids` for `CREEKD_CGROUP_PARENT`. Startup fails if it cannot.
+- **Works with** `ProtectControlGroups=private` (systemd ≥ 257: creekd sees only its own subtree, writable) and with `ProtectControlGroups=no`. Not with `true` or `strict`, which make the cgroup filesystem read-only.
+- **Without it** under the shipped unit, every spawn with cgroup limits fails: `open /sys/fs/cgroup/cgroup.subtree_control: permission denied` (#18).
 
 ### `CREEKD_DEFAULT_MEMORY_HIGH`
 

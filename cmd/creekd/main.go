@@ -14,6 +14,11 @@
 //	                     (default 127.0.0.1:9000); empty disables it
 //	CREEKD_LOG_DIR       per-app log capture root; empty forwards
 //	                     child stdout/stderr to creekd's own writers
+//	CREEKD_CGROUP_DELEGATED
+//	                     "1": CREEKD_CGROUP_PARENT is relative to
+//	                     creekd's own cgroup (systemd Delegate=yes)
+//	                     rather than the host root; creekd moves itself
+//	                     into its "supervisor" leaf at startup
 //	CREEKD_CGROUP_PARENT cgroup v2 slice owning per-app sub-cgroups;
 //	                     empty disables cgroup enforcement
 //	CREEKD_DEFAULT_MEMORY_HIGH
@@ -104,6 +109,8 @@ func handleVersionFlag(args []string, out io.Writer) bool {
 }
 
 func main() {
+	// First: a creekd started as a spawn gate must not run the daemon.
+	supervisor.RunSpawnGateIfRequested()
 	if handleVersionFlag(os.Args, os.Stdout) {
 		return
 	}
@@ -152,6 +159,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	sup := supervisor.New(logger)
 	if err := configureSupervisorFromEnv(sup); err != nil {
 		return err
+	}
+	// Before anything spawns: a delegated cgroup subtree needs creekd
+	// out of its root first (see Supervisor.InitCgroups).
+	if err := sup.InitCgroups(); err != nil {
+		return fmt.Errorf("cgroups: %w", err)
 	}
 	if goruntime.GOOS == "linux" && !sup.PerAppUIDsAvailable() {
 		logger.Warn("per-app UIDs unavailable (no CAP_SETUID/CAP_SETGID): every app runs as creekd's own user " +
@@ -342,6 +354,13 @@ func configureSupervisorFromEnv(sup *supervisor.Supervisor) error {
 	}
 	if v := os.Getenv("CREEKD_CGROUP_PARENT"); v != "" {
 		sup.CgroupParent = v
+	}
+	if v := os.Getenv("CREEKD_CGROUP_DELEGATED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("CREEKD_CGROUP_DELEGATED: want a boolean, got %q", v)
+		}
+		sup.CgroupDelegated = b
 	}
 	if v := os.Getenv("CREEKD_DEFAULT_MEMORY_HIGH"); v != "" {
 		n, err := parseSize(v)
