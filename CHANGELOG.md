@@ -6,9 +6,15 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-01
+
+The shipped systemd unit now works as shipped: as the non-root `creekd` user it spawns apps with per-app cgroup limits, runs each as its own UID, stops them, and filters syscalls the way it says it does. Apps start behind a spawn gate on Linux.
+
+**Upgrading:** the unit file changed — install the new `init/creekd.service` (or merge its changes into yours) and `systemctl daemon-reload`; updating the binary alone keeps the old unit, which cannot spawn apps with cgroup limits. Under the unit, app data must live under `/var/lib/creekd` (`ProtectSystem=strict`).
+
 ### Fixed
 
-- **The shipped unit can spawn apps with cgroup limits** (#18). As the non-root `creekd` user, creekd could not write the host's root cgroup, so every spawn failed with `cgroup.subtree_control: permission denied`. The unit now sets `Delegate=yes`, `ProtectControlGroups=private`, `CREEKD_CGROUP_DELEGATED=1` and `CREEKD_CGROUP_PARENT=apps`: per-app cgroups live under creekd's own delegated subtree (see `CREEKD_CGROUP_DELEGATED`).
+- **The shipped unit can spawn apps with cgroup limits** (#18). As the non-root `creekd` user, creekd could not write the host's root cgroup, so every spawn failed with `cgroup.subtree_control: permission denied`. The unit now sets `Delegate=yes`, `ProtectControlGroups=private`, `CREEKD_CGROUP_DELEGATED=1` and `CREEKD_CGROUP_PARENT=apps`: per-app cgroups live under creekd's own delegated subtree (see `CREEKD_CGROUP_DELEGATED`), and in that mode `CREEKD_CGROUP_PARENT` must be a relative path below it.
 
 - **A non-root creekd could not stop its own apps.** Since 0.1.3 each app runs as its own UID, and under the shipped unit creekd runs as the `creekd` user without `CAP_KILL`, so SIGTERM and SIGKILL to an app failed with `EPERM`. Stop, restart and deploy left the old process running, and `Stop` then waited forever for it to exit, hanging the admin request. The shipped unit now grants `CAP_KILL`, and creekd logs an error at startup when it lacks it. Without it: a SIGKILL that cannot be delivered fails `Stop` after `KillWaitTimeout` (5s) with the PID instead of blocking, and the app stays running and registered, so it is still supervised and the stop can be retried; a deploy whose old version cannot be stopped still promotes the new one, and logs the old PID as an error. Signal failures are logged as warnings rather than debug.
 
@@ -185,7 +191,8 @@ First public release. The supervisor is now installable via `curl install.sh | s
 - Single host. No clustering, no multi-host scheduling.
 - Log retention is size-only, no time-based rotation, no remote shipping.
 
-[Unreleased]: https://github.com/solcreek/creekd/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/solcreek/creekd/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/solcreek/creekd/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/solcreek/creekd/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/solcreek/creekd/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/solcreek/creekd/compare/v0.1.0...v0.1.1
