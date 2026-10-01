@@ -30,8 +30,13 @@ const SupervisorLeaf = "supervisor"
 // ProtectControlGroups=no it is the real /system.slice/<unit> path.
 // Either way nothing outside the delegated subtree is written.
 func NewDelegatedManager(parent string) (*Manager, error) {
-	if parent == "" {
-		return nil, errors.New("cgroup: empty parent")
+	// The promise of delegated mode is that nothing is written outside
+	// the subtree: an absolute path, "..", or "apps/../../x" would join
+	// to a path above m.Root. Nor may it be the root itself ("", "."):
+	// app cgroups would sit beside creekd's own SupervisorLeaf, and an
+	// app named "supervisor" would land in creekd's cgroup.
+	if !filepath.IsLocal(parent) || filepath.Clean(parent) == "." {
+		return nil, fmt.Errorf("cgroup: delegated parent %q must be a relative path inside creekd's own cgroup (e.g. \"apps\")", parent)
 	}
 	own, err := ownCgroup()
 	if err != nil {

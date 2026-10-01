@@ -5,6 +5,7 @@ package cgroup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,31 @@ func TestNewDelegatedManagerRootsAtOwnCgroup(t *testing.T) {
 			t.Errorf("parentPath = %s, want %s", got, want)
 		}
 	}
-	if _, err := NewDelegatedManager(""); err == nil {
-		t.Error("an empty parent must be refused")
+}
+
+// A delegated parent must stay below creekd's own cgroup.
+func TestNewDelegatedManagerRejectsNonLocalParent(t *testing.T) {
+	orig := procSelfCgroup
+	t.Cleanup(func() { procSelfCgroup = orig })
+	fake := filepath.Join(t.TempDir(), "cgroup")
+	if err := os.WriteFile(fake, []byte("0::/system.slice/creekd.service\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	procSelfCgroup = fake
+
+	for _, parent := range []string{"", ".", "./", "apps/..", "..", "../outside", "../../outside", "apps/../../outside", "/apps", "/sys/fs/cgroup"} {
+		if m, err := NewDelegatedManager(parent); err == nil {
+			t.Errorf("parent %q accepted: manager writes under %s", parent, m.parentPath())
+		}
+	}
+	for _, parent := range []string{"apps", "apps/sub", "apps/./sub"} {
+		m, err := NewDelegatedManager(parent)
+		if err != nil {
+			t.Errorf("parent %q refused: %v", parent, err)
+			continue
+		}
+		if !strings.HasPrefix(m.parentPath(), m.Root+"/") {
+			t.Errorf("parent %q resolves to %s, outside %s", parent, m.parentPath(), m.Root)
+		}
 	}
 }
